@@ -36,8 +36,8 @@ is exposed through Botster plugin tools:
 
 The operations create/list/show/update/delete workspace records, attach sanitized
 repo and spawn-target references, group hub session UUID references with
-plugin-owned role/template/status metadata, and return read models in the
-`botster-workspaces.workspace` entity family. Delete marks a workspace deleted
+plugin-owned role/template/status metadata, and return read models identified as
+`botster-workspaces.workspace`. Delete marks a workspace deleted
 and does not delete hub sessions, package records, spawn targets, repository
 content, or host filesystem content.
 
@@ -92,10 +92,10 @@ surfaces:
 - app surface: `workspaces`
 - settings surface: `workspaces-settings`
 
-Both surfaces render structural UI and bind dynamic rows to the
-`botster-workspaces.workspace` entity family. The package intentionally does not
-declare a `runnable_entrypoints` item because there is no workspace process to
-launch yet.
+Both surfaces render structural UI from plugin-owned workspace state through the
+same hub plugin surface contract consumed by browser and TUI clients. The package
+intentionally does not declare a `runnable_entrypoints` item because there is no
+workspace process to launch yet.
 
 ## Verification
 

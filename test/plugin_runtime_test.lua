@@ -1,5 +1,4 @@
 local database = {}
-local published_snapshots = {}
 local registrations = {}
 
 local function copy(value)
@@ -28,12 +27,6 @@ botster = {
           schema_version = request.schema_version,
           payload = copy(request.payload),
         }
-        return { ok = true }
-      end,
-    },
-    entities = {
-      snapshot = function(payload)
-        published_snapshots[#published_snapshots + 1] = copy(payload)
         return { ok = true }
       end,
     },
@@ -93,6 +86,46 @@ local function spawn_target_ref(id, label)
   }
 end
 
+local invalid_surface_types = {
+  bind_list = true,
+  row = true,
+  section = true,
+  binding = true,
+}
+
+local function assert_valid_surface_node(node)
+  assert_true(type(node.type) == "string", "surface node has type")
+  assert_true(not invalid_surface_types[node.type], "surface node type is supported: " .. tostring(node.type))
+  if node.type == "list_item" then
+    assert_true(node.slots and node.slots.title, "list_item has required title slot")
+  end
+  for _, child in ipairs(node.children or {}) do
+    assert_valid_surface_node(child)
+  end
+  for _, slot_children in pairs(node.slots or {}) do
+    for _, child in ipairs(slot_children or {}) do
+      assert_valid_surface_node(child)
+    end
+  end
+end
+
+local function collect_text(node, out)
+  if node.type == "text" and node.props and node.props.text then
+    out[#out + 1] = node.props.text
+  end
+  if node.type == "empty_state" and node.props and node.props.title then
+    out[#out + 1] = node.props.title
+  end
+  for _, child in ipairs(node.children or {}) do
+    collect_text(child, out)
+  end
+  for _, slot_children in pairs(node.slots or {}) do
+    for _, child in ipairs(slot_children or {}) do
+      collect_text(child, out)
+    end
+  end
+end
+
 local spec = dofile("plugin.lua")
 
 assert_eq(#registrations, 1, "plugin registers once")
@@ -129,7 +162,7 @@ assert_eq(created.entity.entity_family, "botster-workspaces.workspace", "entity 
 assert_eq(created.entity.repo_label, "Main application repo", "entity exposes repo label")
 assert_eq(created.entity.spawn_target_label, "Codex local", "entity exposes spawn target label")
 assert_eq(created.entity.session_count, 0, "entity counts sessions")
-assert_eq(#published_snapshots, 1, "create publishes entity snapshot")
+assert_eq(created.workspace.created_at, "plugin-clock-000001", "create assigns plugin-owned timestamp")
 
 local duplicate = create({
   name = "Product refactor",
@@ -196,6 +229,7 @@ local updated = update({
 assert_eq(updated.ok, true, "update succeeds")
 assert_eq(updated.entity.session_count, 2, "update refreshes session count")
 assert_eq(#updated.workspace.session_group.session_refs, 2, "update stores session refs")
+assert_eq(updated.workspace.updated_at, "plugin-clock-000003", "update assigns plugin-owned timestamp")
 
 local entity_rows = snapshot({})
 assert_eq(entity_rows.ok, true, "entity snapshot succeeds")
@@ -225,12 +259,20 @@ assert_eq(#restart_list.workspaces, 2, "state persists through plugin reload")
 
 local app_surface = handler(spec, "workspaces_surface")({})
 assert_eq(app_surface.id, "botster-workspaces-app", "app surface renders")
-assert_eq(app_surface.children[1].props.source, "/botster-workspaces.workspace", "app surface binds entity family")
-assert_eq(app_surface.children[1].item_template.props.title.path, "@/name", "app surface title is bound")
+assert_valid_surface_node(app_surface)
+assert_eq(app_surface.children[2].type, "list", "app surface uses valid list node")
+local app_text = {}
+collect_text(app_surface, app_text)
+assert_true(table.concat(app_text, "\n"):find("Product refactor", 1, true), "app surface renders workspace state")
+assert_true(table.concat(app_text, "\n"):find("botster%-workspaces%.workspace") ~= nil, "app surface names read-model family")
 
 local settings_surface = handler(spec, "workspaces_settings_surface")({})
 assert_eq(settings_surface.id, "botster-workspaces-settings", "settings surface renders")
-assert_eq(settings_surface.children[2].props.source, "/botster-workspaces.workspace", "settings surface binds entity family")
+assert_valid_surface_node(settings_surface)
+assert_eq(settings_surface.children[2].type, "list", "settings surface uses valid list node")
+local settings_text = {}
+collect_text(settings_surface, settings_text)
+assert_true(table.concat(settings_text, "\n"):find("Product refactor", 1, true), "settings surface renders workspace state")
 
 local invalid_repo = create({
   name = "Unsafe repo",

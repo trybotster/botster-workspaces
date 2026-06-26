@@ -2,7 +2,6 @@
   "required_capabilities": [
     "plugin_db",
     "mcp",
-    "entities",
     "surfaces",
     "spawn_targets:read",
     "sessions:read",

@@ -24,7 +24,6 @@ The logical workspace contract remains:
   settings in plugin runtime data.
 - `mcp`: expose create/list/show/update/delete and entity snapshot operations
   through Botster plugin tools.
-- `entities`: publish workspace read models as plugin-owned entity frames.
 - `surfaces`: expose the package app and settings descriptors.
 - `spawn_targets:read`: list or validate references to hub-owned spawn targets.
 - `sessions:read`: resolve hub-owned session references for grouping.
@@ -33,8 +32,8 @@ The logical workspace contract remains:
   direct host filesystem traversal.
 
 If the hub compiled manifest schema adds narrower first-class surfaces for
-plugin entities, spawn-target reads, session reads, or process spawn requests,
-the manifest and this document must change together.
+plugin entity broadcast, spawn-target reads, session reads, or process spawn
+requests, the manifest and this document must change together.
 
 ## Plugin-Owned State
 
@@ -44,7 +43,7 @@ the manifest and this document must change together.
 - Session group records.
 - Default session templates.
 - Workspace settings.
-- Workspace entity read models.
+- Workspace read models.
 
 ## Hub-Owned Authority
 

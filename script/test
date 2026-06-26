@@ -30,7 +30,6 @@ assert(manifest["capabilities"].is_a?(Array), "capabilities must be an array")
 logical_capabilities = %w[
   plugin_db
   mcp
-  entities
   surfaces
   spawn_targets:read
   sessions:read

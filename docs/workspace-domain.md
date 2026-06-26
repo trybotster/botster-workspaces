@@ -106,9 +106,14 @@ content, or host filesystem content.
 
 ## Entity Read Models
 
-The plugin publishes workspace read models through plugin-owned entity frames.
-The initial entity family is `botster-workspaces.workspace`. UI lists bind to
-that entity family instead of treating route snapshots as mutable data payloads.
+The plugin exposes workspace read models through `botster_workspaces.list` and
+`botster_workspaces.entity_snapshot`. The read-model family name is
+`botster-workspaces.workspace`.
+
+The current hub revision used by this package does not expose a live plugin
+entity broadcast capability. Until that primitive exists, app and settings
+surface routes render concrete structural UI from plugin-owned `plugin_db` state
+instead of emitting bound rows that depend on an unavailable entity producer.
 
 The fixture read model includes:
 

@@ -22,6 +22,7 @@ end
 local function default_state()
   return {
     next_workspace = 0,
+    next_timestamp = 0,
     workspaces = {},
     default_session_templates = {},
   }
@@ -46,13 +47,6 @@ local function trim(value)
   return (value:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function now()
-  if os and type(os.time) == "function" then
-    return tostring(os.time())
-  end
-  return "0"
-end
-
 local function load_state()
   local capabilities = botster and botster.capabilities or {}
   local plugin_db = capabilities.plugin_db
@@ -67,6 +61,7 @@ local function load_state()
 
   local state = result.record.payload
   state.next_workspace = tonumber(state.next_workspace or 0) or 0
+  state.next_timestamp = tonumber(state.next_timestamp or 0) or 0
   state.workspaces = state.workspaces or {}
   state.default_session_templates = state.default_session_templates or {}
   return state
@@ -187,6 +182,11 @@ local function next_workspace_id(state, name)
   return "ws_" .. slug .. "_" .. tostring(state.next_workspace)
 end
 
+local function next_timestamp(state)
+  state.next_timestamp = (tonumber(state.next_timestamp or 0) or 0) + 1
+  return string.format("plugin-clock-%06d", state.next_timestamp)
+end
+
 local function default_settings(workspace_id, repo_ref, spawn_target_ref, template_id)
   return {
     workspace_id = workspace_id,
@@ -228,26 +228,6 @@ local function active_read_models(state)
   return rows
 end
 
-local function publish_snapshot(state)
-  local capabilities = botster and botster.capabilities or {}
-  if capabilities.entities and type(capabilities.entities.snapshot) == "function" then
-    pcall(capabilities.entities.snapshot, {
-      entity_family = ENTITY_FAMILY,
-      rows = active_read_models(state),
-    })
-  end
-
-  local ok, Hub = pcall(require, "lib.hub")
-  if ok and Hub and type(Hub.get) == "function" then
-    local hub = Hub.get()
-    if hub and type(hub.entity_snapshot) == "function" then
-      pcall(function()
-        hub:entity_snapshot(ENTITY_FAMILY, active_read_models(state), { owner_plugin = PLUGIN })
-      end)
-    end
-  end
-end
-
 local function create_workspace(arguments)
   local name = trim(arguments.name)
   local purpose = trim(arguments.purpose)
@@ -276,8 +256,8 @@ local function create_workspace(arguments)
     return error_result("duplicate_active_name", "an active workspace already uses that name")
   end
 
-  local timestamp = now()
   local workspace_id = next_workspace_id(state, name)
+  local timestamp = next_timestamp(state)
   local template_id = arguments.default_session_template_id
   local workspace = {
     id = workspace_id,
@@ -301,7 +281,6 @@ local function create_workspace(arguments)
   if error then
     return error
   end
-  publish_snapshot(state)
   return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
 end
 
@@ -395,13 +374,12 @@ local function update_workspace(arguments)
     workspace.session_group.workspace_id = workspace.id
     workspace.session_group.session_refs = copy(patch.session_group.session_refs)
   end
-  workspace.updated_at = now()
+  workspace.updated_at = next_timestamp(state)
 
   local error = save_or_error(state)
   if error then
     return error
   end
-  publish_snapshot(state)
   return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
 end
 
@@ -416,12 +394,11 @@ local function delete_workspace(arguments)
     return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
   end
   workspace.status = "deleted"
-  workspace.updated_at = now()
+  workspace.updated_at = next_timestamp(state)
   local error = save_or_error(state)
   if error then
     return error
   end
-  publish_snapshot(state)
   return {
     ok = true,
     workspace = copy(workspace),
@@ -442,76 +419,114 @@ local function entity_snapshot()
   return { ok = true, entity_family = ENTITY_FAMILY, rows = rows }
 end
 
-local function binding(path)
-  return { type = "binding", path = path }
+local function text_node(id, text, tone)
+  local props = { text = text }
+  if tone then
+    props.tone = tone
+  end
+  return {
+    type = "text",
+    id = id,
+    props = props,
+  }
+end
+
+local function empty_state(id, title, description)
+  return {
+    type = "empty_state",
+    id = id,
+    props = {
+      title = title,
+      description = description,
+    },
+  }
+end
+
+local function list_item(row)
+  return {
+    type = "list_item",
+    id = "workspace-row-" .. tostring(row.id),
+    props = {
+      value = row.id,
+    },
+    slots = {
+      title = {
+        text_node("workspace-row-" .. tostring(row.id) .. "-title", row.name),
+      },
+      subtitle = {
+        text_node("workspace-row-" .. tostring(row.id) .. "-purpose", row.purpose),
+        text_node("workspace-row-" .. tostring(row.id) .. "-repo", row.repo_label .. " / " .. row.spawn_target_label, "muted"),
+      },
+      meta = {
+        text_node("workspace-row-" .. tostring(row.id) .. "-status", row.status),
+        text_node("workspace-row-" .. tostring(row.id) .. "-sessions", tostring(row.session_count) .. " sessions"),
+      },
+    },
+  }
+end
+
+local function workspace_list_children(rows)
+  local children = {}
+  if #rows == 0 then
+    children[#children + 1] = empty_state(
+      "botster-workspaces-empty",
+      "No active workspaces",
+      "Create a workspace to group repo, spawn target, and session references."
+    )
+    return children
+  end
+
+  for _, row in ipairs(rows) do
+    children[#children + 1] = list_item(row)
+  end
+  return children
 end
 
 local function workspaces_surface()
+  local rows = active_read_models(load_state())
   return {
     type = "panel",
     id = "botster-workspaces-app",
     props = {
       title = "Workspaces",
-      entity_family = ENTITY_FAMILY,
     },
     children = {
+      text_node("botster-workspaces-read-model", "Read model: " .. ENTITY_FAMILY, "muted"),
       {
-        type = "bind_list",
+        type = "list",
         id = "botster-workspaces-list",
         props = {
-          source = "/" .. ENTITY_FAMILY,
-          empty = "No active workspaces",
+          aria_label = "Workspaces",
         },
-        item_template = {
-          type = "row",
-          id = binding("@/id"),
-          props = {
-            title = binding("@/name"),
-            description = binding("@/purpose"),
-            status = binding("@/status"),
-            leading = binding("@/repo_label"),
-            trailing = binding("@/spawn_target_label"),
-            meta = binding("@/session_count"),
-          },
-        },
+        children = workspace_list_children(rows),
       },
     },
   }
 end
 
 local function settings_surface()
+  local rows = active_read_models(load_state())
   return {
     type = "panel",
     id = "botster-workspaces-settings",
     props = {
       title = "Workspaces Settings",
-      entity_family = ENTITY_FAMILY,
     },
     children = {
       {
-        type = "section",
+        type = "text",
         id = "botster-workspaces-settings-summary",
         props = {
-          title = "Configuration",
-          description = "No required configuration fields",
+          text = "No required configuration fields",
         },
       },
       {
-        type = "bind_list",
+        type = "list",
         id = "botster-workspaces-settings-list",
         props = {
-          source = "/" .. ENTITY_FAMILY,
-          empty = "No active workspace settings",
+          aria_label = "Workspace settings",
         },
-        item_template = {
-          type = "row",
-          id = binding("@/id"),
-          props = {
-            title = binding("@/name"),
-            description = binding("@/repo_label"),
-            trailing = binding("@/spawn_target_label"),
-          },
-        },
+        children = workspace_list_children(rows),
       },
     },
   }

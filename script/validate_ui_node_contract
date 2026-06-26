@@ -1,0 +1,77 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+require "json"
+require "open3"
+require "tmpdir"
+
+ROOT = File.expand_path("..", __dir__)
+
+def abort_with(message)
+  warn(message)
+  exit 1
+end
+
+botster_core_path = ENV["BOTSTER_CORE_PATH"]
+abort_with("BOTSTER_CORE_PATH must point at the locked botster-core crate") if botster_core_path.to_s.empty?
+abort_with("BOTSTER_CORE_PATH does not exist: #{botster_core_path}") unless Dir.exist?(botster_core_path)
+workspace_crate_path = File.join(botster_core_path, "crates", "botster-core")
+botster_core_path = workspace_crate_path if File.exist?(File.join(workspace_crate_path, "Cargo.toml"))
+
+lua = ENV.fetch("LUA", "lua")
+
+Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
+  surfaces_path = File.join(dir, "surfaces.json")
+  env = ENV.to_h.merge("BOTSTER_WORKSPACES_SURFACE_JSON" => surfaces_path)
+  success = system(env, lua, File.join(ROOT, "test/plugin_runtime_test.lua"), chdir: ROOT, out: File::NULL)
+  abort_with("Lua runtime test failed while generating surface payloads") unless success
+  abort_with("surface payload was not generated") unless File.exist?(surfaces_path)
+
+  payload = JSON.parse(File.read(surfaces_path))
+  abort_with("expected app and settings surface payloads") unless payload.is_a?(Array) && payload.length == 2
+
+  File.write(File.join(dir, "Cargo.toml"), <<~TOML)
+    [package]
+    name = "botster-workspaces-ui-contract"
+    version = "0.0.0"
+    edition = "2021"
+
+    [dependencies]
+    botster-core = { path = #{botster_core_path.inspect} }
+    serde_json = "1"
+  TOML
+
+  FileUtils.mkdir_p(File.join(dir, "src"))
+  File.write(File.join(dir, "src/main.rs"), <<~RS)
+    use botster_core::UiNode;
+    use std::{env, fs, process};
+
+    fn main() {
+        let path = env::args().nth(1).expect("surface json path");
+        let input = fs::read_to_string(&path).expect("read surface json");
+        let values: Vec<serde_json::Value> = serde_json::from_str(&input).expect("surface json array");
+        for (index, value) in values.into_iter().enumerate() {
+            let node: UiNode = serde_json::from_value(value)
+                .unwrap_or_else(|error| {
+                    eprintln!("surface {index} failed UiNode deserialize: {error}");
+                    process::exit(1);
+                });
+            node.validate().unwrap_or_else(|error| {
+                eprintln!("surface {index} failed UiNode validate: {error}");
+                process::exit(1);
+            });
+        }
+    }
+  RS
+
+  cargo_args = ["run", "--quiet", "--manifest-path", File.join(dir, "Cargo.toml"), "--", surfaces_path]
+  stdout, stderr, status = Open3.capture3("cargo", *cargo_args)
+  unless status.success?
+    warn stdout unless stdout.empty?
+    warn stderr unless stderr.empty?
+    abort_with("botster_core UiNode contract validation failed")
+  end
+end
+
+puts "script/validate_ui_node_contract: ok"

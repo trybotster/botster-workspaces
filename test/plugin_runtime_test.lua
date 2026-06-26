@@ -126,6 +126,76 @@ local function collect_text(node, out)
   end
 end
 
+local function json_escape(value)
+  local escaped = value:gsub("\\", "\\\\")
+  escaped = escaped:gsub('"', '\\"')
+  escaped = escaped:gsub("\n", "\\n")
+  escaped = escaped:gsub("\r", "\\r")
+  escaped = escaped:gsub("\t", "\\t")
+  return '"' .. escaped .. '"'
+end
+
+local function is_array(value)
+  local count = 0
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false
+    end
+    if key > count then
+      count = key
+    end
+  end
+  for index = 1, count do
+    if value[index] == nil then
+      return false
+    end
+  end
+  return true
+end
+
+local function json_encode(value)
+  local value_type = type(value)
+  if value_type == "nil" then
+    return "null"
+  end
+  if value_type == "boolean" then
+    return value and "true" or "false"
+  end
+  if value_type == "number" then
+    return tostring(value)
+  end
+  if value_type == "string" then
+    return json_escape(value)
+  end
+  if value_type ~= "table" then
+    error("cannot encode JSON value of type " .. value_type)
+  end
+
+  local parts = {}
+  if is_array(value) then
+    for index, child in ipairs(value) do
+      parts[index] = json_encode(child)
+    end
+    return "[" .. table.concat(parts, ",") .. "]"
+  end
+
+  for key, child in pairs(value) do
+    parts[#parts + 1] = json_escape(tostring(key)) .. ":" .. json_encode(child)
+  end
+  table.sort(parts)
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local function dump_surfaces(path, surfaces)
+  if not path or path == "" then
+    return
+  end
+  local file = assert(io.open(path, "w"))
+  file:write(json_encode(surfaces))
+  file:write("\n")
+  file:close()
+end
+
 local spec = dofile("plugin.lua")
 
 assert_eq(#registrations, 1, "plugin registers once")
@@ -273,6 +343,11 @@ assert_eq(settings_surface.children[2].type, "list", "settings surface uses vali
 local settings_text = {}
 collect_text(settings_surface, settings_text)
 assert_true(table.concat(settings_text, "\n"):find("Product refactor", 1, true), "settings surface renders workspace state")
+
+dump_surfaces(os.getenv("BOTSTER_WORKSPACES_SURFACE_JSON"), {
+  app_surface,
+  settings_surface,
+})
 
 local invalid_repo = create({
   name = "Unsafe repo",

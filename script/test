@@ -241,6 +241,7 @@ scanned_files = %w[
   plugin.lua
   docs/workspace-domain.md
   docs/capabilities.md
+  script/hub_acceptance_smoke
   script/validate_ui_node_contract
   test/fixtures/workspaces/contract.json
   test/plugin_runtime_test.lua

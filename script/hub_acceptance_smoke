@@ -1,0 +1,160 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+require "socket"
+
+socket_path = ARGV.fetch(0) do
+  warn "usage: script/hub_acceptance_smoke <botster-hub.sock> [workspace-name]"
+  exit 1
+end
+
+workspace_name = ARGV[1] || "Acceptance Workspace"
+
+def assert(condition, message)
+  raise message unless condition
+end
+
+socket = UNIXSocket.new(socket_path)
+socket.puts(JSON.generate({
+  protocol: "botster-hub-daemon-v1",
+  compatibility: {
+    protocol: "botster-hub-daemon-v1",
+    minimum_protocol_version: 1,
+    required_features: %w[
+      sessions
+      terminal_streaming
+      resize
+      plugin_surface_render
+      plugin_surface_action
+    ],
+    minimum_conformance_fixture_revision: 2,
+    client_name: "botster-workspaces-acceptance-smoke"
+  }
+}))
+hello = JSON.parse(socket.gets)
+assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
+
+def request(socket, payload)
+  socket.puts(JSON.generate(payload))
+  response = JSON.parse(socket.gets)
+  if response["error"]
+    raise "daemon #{payload.fetch(:type)} failed: #{response["error"]}"
+  end
+  response
+end
+
+def call_tool(socket, name, arguments)
+  response = request(socket, {
+    type: "plugin_mcp_call_tool",
+    name: name,
+    arguments: arguments
+  })
+  assert(response["kind"] == "plugin_mcp_tool_result", "#{name} returned #{response["kind"]}")
+  response.fetch("plugin_tool_result")
+end
+
+def collect_text(node, out = [])
+  props = node["props"] || {}
+  out << props["text"] if node["type"] == "text" && props["text"]
+  out << props["title"] if node["type"] == "empty_state" && props["title"]
+  Array(node["children"]).each { |child| collect_text(child, out) }
+  (node["slots"] || {}).each_value do |children|
+    Array(children).each { |child| collect_text(child, out) }
+  end
+  out
+end
+
+tools = request(socket, { type: "plugin_mcp_list_tools" })
+tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
+%w[
+  botster_workspaces.create
+  botster_workspaces.list
+  botster_workspaces.show
+  botster_workspaces.update
+  botster_workspaces.delete
+  botster_workspaces.entity_snapshot
+].each do |name|
+  assert(tool_names.include?(name), "missing plugin MCP tool #{name}")
+end
+
+create = call_tool(socket, "botster_workspaces.create", {
+  name: workspace_name,
+  purpose: "Acceptance smoke for enabled plugin worker",
+  local_repo_ref: {
+    id: "repo_acceptance",
+    display_name: "Acceptance repo",
+    repo_capability_ref: "repo_capability_acceptance",
+    default_branch: "main",
+    relative_worktree_hint: "worktrees/acceptance"
+  },
+  spawn_target_ref: {
+    target_id: "target_acceptance",
+    label: "Acceptance target",
+    kind: "agent",
+    capability_ref: "spawn_target_acceptance"
+  },
+  default_session_template_id: "template_acceptance"
+})
+existing = false
+if create["ok"] == true
+  workspace_id = create.fetch("workspace").fetch("id")
+else
+  assert(create.dig("error", "code") == "duplicate_active_name", "workspace create failed: #{create}")
+  existing = true
+  existing_list = call_tool(socket, "botster_workspaces.list", {})
+  existing_row = existing_list.fetch("workspaces").find { |workspace| workspace["name"] == workspace_name }
+  assert(existing_row, "duplicate workspace name was reported but no existing row was listed")
+  workspace_id = existing_row.fetch("id")
+end
+
+update = call_tool(socket, "botster_workspaces.update", {
+  id: workspace_id,
+  patch: {
+    session_group: {
+      session_refs: [
+        {
+          session_uuid: "example-session-acceptance-1",
+          role: "implement",
+          spawned_from_template_id: "template_acceptance",
+          status: "running"
+        },
+        {
+          session_uuid: "example-session-acceptance-2",
+          role: "verify",
+          spawned_from_template_id: "template_acceptance",
+          status: "queued"
+        }
+      ]
+    }
+  }
+})
+assert(update.fetch("entity").fetch("session_count") == 2, "session grouping did not update")
+
+list = call_tool(socket, "botster_workspaces.list", {})
+row = list.fetch("workspaces").find { |workspace| workspace["id"] == workspace_id }
+assert(row, "created workspace missing from list")
+assert(row["session_count"] == 2, "list row did not expose session count")
+
+show = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
+assert(show.fetch("workspace").fetch("session_group").fetch("session_refs").length == 2, "show did not preserve session refs")
+
+snapshot = call_tool(socket, "botster_workspaces.entity_snapshot", {})
+assert(snapshot["entity_family"] == "botster-workspaces.workspace", "snapshot family mismatch")
+assert(snapshot.fetch("rows").any? { |snapshot_row| snapshot_row["id"] == workspace_id }, "snapshot missing workspace")
+
+%w[workspaces workspaces-settings].each do |surface_id|
+  response = request(socket, {
+    type: "plugin_surface_render",
+    package_name: "botster-workspaces",
+    surface_id: surface_id,
+    payload: {}
+  })
+  assert(response["kind"] == "plugin_surface", "#{surface_id} did not return plugin surface")
+  surface = response.fetch("plugin_surface")
+  text = collect_text(surface).join("\n")
+  assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
+  assert(text.include?("2 sessions"), "#{surface_id} surface missing session count")
+end
+
+puts "script/hub_acceptance_smoke: ok workspace_id=#{workspace_id} existing=#{existing}"

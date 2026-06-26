@@ -1,12 +1,28 @@
 {
   "required_capabilities": [
     "plugin_db",
-    "entities",
+    "mcp",
     "surfaces",
     "spawn_targets:read",
     "sessions:read",
     "process:spawn",
     "filesystem:scoped_repo"
+  ],
+  "manifest_capabilities": [
+    {
+      "surface": "mcp"
+    },
+    {
+      "surface": "plugin_db",
+      "scope": "botster-workspaces"
+    },
+    {
+      "surface": "surfaces"
+    },
+    {
+      "surface": "filesystem",
+      "scope": "workspace"
+    }
   ],
   "workspaces": [
     {

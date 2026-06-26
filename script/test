@@ -27,28 +27,43 @@ assert(manifest["botster"].is_a?(String) && !manifest["botster"].empty?, "Botste
 assert(manifest["source"] == { "type" => "path", "path" => "." }, "source must describe local path install")
 assert(manifest["capabilities"].is_a?(Array), "capabilities must be an array")
 
-required_capabilities = %w[
+logical_capabilities = %w[
   plugin_db
-  entities
+  mcp
   surfaces
   spawn_targets:read
   sessions:read
   process:spawn
   filesystem:scoped_repo
 ]
-assert(manifest["capabilities"].sort == required_capabilities.sort, "manifest capabilities must match workspace contract")
+manifest_capabilities = workspace_contract.fetch("manifest_capabilities")
+assert(manifest["capabilities"] == manifest_capabilities, "manifest capabilities must match hub-compiled schema contract")
 
 configuration = manifest.fetch("configuration")
 assert(configuration["groups"].is_a?(Array), "configuration.groups must be an array")
 assert(configuration["fields"].is_a?(Array), "configuration.fields must be an array")
 
 entrypoints = manifest.fetch("entrypoints")
-assert(entrypoints.is_a?(Array) && entrypoints.length == 1, "exactly one inert entrypoint is expected")
+assert(entrypoints.is_a?(Array) && entrypoints.length == 1, "exactly one Lua entrypoint is expected")
 entrypoint = entrypoints.first
 assert(entrypoint["runtime"] == "lua", "entrypoint runtime must be lua")
 assert(entrypoint["path"] == "plugin.lua", "entrypoint path must be plugin.lua")
 assert(entrypoint["bootstrap"] == false, "entrypoint bootstrap must be false")
 assert(File.file?(File.join(ROOT, entrypoint["path"])), "entrypoint file must exist")
+plugin_lua = read(entrypoint["path"])
+%w[
+  botster_workspaces.create
+  botster_workspaces.list
+  botster_workspaces.show
+  botster_workspaces.update
+  botster_workspaces.delete
+  botster_workspaces.entity_snapshot
+  plugin_db
+  surface_route
+  botster-workspaces.workspace
+].each do |needle|
+  assert(plugin_lua.include?(needle), "plugin entrypoint must wire #{needle}")
+end
 
 surfaces = manifest.fetch("surfaces")
 assert(surfaces.is_a?(Array), "surfaces must be an array")
@@ -79,9 +94,12 @@ end
   assert(capabilities_doc.include?(heading.tr("\\", "")), "capabilities doc must include #{heading.tr("\\", "")}")
 end
 
-required_capabilities.each do |capability|
+logical_capabilities.each do |capability|
   assert(capabilities_doc.include?(capability), "capabilities doc must mention #{capability}")
   assert(workspace_contract.fetch("required_capabilities").include?(capability), "fixture must require #{capability}")
+end
+manifest_capabilities.each do |capability|
+  assert(capability["surface"].is_a?(String) && !capability["surface"].empty?, "manifest capability surface is required")
 end
 
 def required_keys(hash, keys, label)
@@ -223,7 +241,10 @@ scanned_files = %w[
   plugin.lua
   docs/workspace-domain.md
   docs/capabilities.md
+  script/hub_acceptance_smoke
+  script/validate_ui_node_contract
   test/fixtures/workspaces/contract.json
+  test/plugin_runtime_test.lua
 ]
 
 leak_patterns = {
@@ -238,6 +259,11 @@ scanned_files.each do |path|
   leak_patterns.each do |label, pattern|
     assert(!contents.match?(pattern), "#{path} contains #{label}")
   end
+end
+
+lua = ENV.fetch("LUA", "lua")
+unless system(lua, File.join(ROOT, "test/plugin_runtime_test.lua"), chdir: ROOT)
+  raise "Lua runtime test failed"
 end
 
 puts "script/test: ok"

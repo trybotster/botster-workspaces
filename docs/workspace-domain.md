@@ -4,8 +4,9 @@
 package admission, spawn authorization, processes, PTYs, session UUIDs, terminal
 transport, and scoped filesystem enforcement.
 
-This contract is intentionally scaffold-level. It defines records, operations,
-fixtures, and tests before adding runtime CRUD handlers.
+This contract defines records, operations, fixtures, and tests for the first
+runtime CRUD handlers. Runtime behavior must continue to follow this document
+unless a later contract change updates docs, fixtures, and tests together.
 
 ## Workspace Record
 
@@ -105,9 +106,14 @@ content, or host filesystem content.
 
 ## Entity Read Models
 
-The plugin publishes workspace read models through plugin-owned entity frames.
-The initial entity family is `botster-workspaces.workspace`. UI lists bind to
-that entity family instead of treating route snapshots as mutable data payloads.
+The plugin exposes workspace read models through `botster_workspaces.list` and
+`botster_workspaces.entity_snapshot`. The read-model family name is
+`botster-workspaces.workspace`.
+
+The current hub revision used by this package does not expose a live plugin
+entity broadcast capability. Until that primitive exists, app and settings
+surface routes render concrete structural UI from plugin-owned `plugin_db` state
+instead of emitting bound rows that depend on an unavailable entity producer.
 
 The fixture read model includes:
 
@@ -124,4 +130,5 @@ The fixture read model includes:
 
 Runtime workspace records belong in `plugin.db` under the plugin runtime data
 namespace. Source files in this repository are documentation, fixtures, tests,
-and the inert package entrypoint only.
+and the package entrypoint; workspace records must not be persisted in source
+files.

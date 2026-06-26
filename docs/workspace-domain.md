@@ -4,8 +4,9 @@
 package admission, spawn authorization, processes, PTYs, session UUIDs, terminal
 transport, and scoped filesystem enforcement.
 
-This contract is intentionally scaffold-level. It defines records, operations,
-fixtures, and tests before adding runtime CRUD handlers.
+This contract defines records, operations, fixtures, and tests for the first
+runtime CRUD handlers. Runtime behavior must continue to follow this document
+unless a later contract change updates docs, fixtures, and tests together.
 
 ## Workspace Record
 
@@ -124,4 +125,5 @@ The fixture read model includes:
 
 Runtime workspace records belong in `plugin.db` under the plugin runtime data
 namespace. Source files in this repository are documentation, fixtures, tests,
-and the inert package entrypoint only.
+and the package entrypoint; workspace records must not be persisted in source
+files.

@@ -3,16 +3,13 @@
   "version": "0.1.0",
   "kind": "plugin",
   "botster": ">=0.1.0",
-  "description": "First-party Botster workspace package scaffold.",
+  "description": "First-party Botster workspace records, session grouping, and surfaces.",
   "source": { "type": "path", "path": "." },
   "capabilities": [
-    "plugin_db",
-    "entities",
-    "surfaces",
-    "spawn_targets:read",
-    "sessions:read",
-    "process:spawn",
-    "filesystem:scoped_repo"
+    { "surface": "mcp" },
+    { "surface": "plugin_db", "scope": "botster-workspaces" },
+    { "surface": "surfaces" },
+    { "surface": "filesystem", "scope": "workspace" }
   ],
   "configuration": {
     "groups": [],
@@ -23,7 +20,7 @@
       "id": "workspaces",
       "kind": "app",
       "title": "Workspaces",
-      "description": "Descriptor-backed workspace package surface. Domain state is not implemented yet.",
+      "description": "Descriptor-backed workspace package surface bound to workspace entity state.",
       "order": 1,
       "category": "workspace",
       "supports": ["render"]
@@ -32,7 +29,7 @@
       "id": "workspaces-settings",
       "kind": "settings",
       "title": "Workspaces Settings",
-      "description": "Descriptor-backed workspace settings surface. Configuration fields are intentionally empty in this scaffold.",
+      "description": "Descriptor-backed workspace settings surface with empty required configuration.",
       "order": 2,
       "category": "workspace",
       "supports": ["render"]

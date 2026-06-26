@@ -8,10 +8,10 @@ botster-hub.
 
 ## Current scope
 
-This repository is an installable scaffold. It declares package metadata, an
-empty configuration schema, descriptor-backed app/settings surfaces, explicit
-workspace contract capabilities, and the minimal Lua entrypoint current local
-package enable/prepare requires.
+This repository is an installable workspace plugin. It declares package
+metadata, an empty configuration schema, descriptor-backed app/settings surfaces,
+explicit workspace contract capabilities, and a Lua entrypoint with plugin-owned
+runtime operations.
 
 The first workspace domain contract is defined in:
 
@@ -24,10 +24,27 @@ plugin-owned workspace records, local repo reference metadata, spawn target
 references, session grouping, default session templates, workspace settings, and
 workspace entity read models.
 
-It does not implement runtime workspace CRUD handlers, plugin database tables,
-MCP tools, agent orchestration, session actions, or a runnable app process yet.
-Those runtime paths must use plugin-owned persistence and hub capabilities rather
-than direct host filesystem access or hub storage rewrites.
+Runtime workspace records persist through `plugin_db`. The public operation path
+is exposed through Botster plugin tools:
+
+- `botster_workspaces.create`
+- `botster_workspaces.list`
+- `botster_workspaces.show`
+- `botster_workspaces.update`
+- `botster_workspaces.delete`
+- `botster_workspaces.entity_snapshot`
+
+The operations create/list/show/update/delete workspace records, attach sanitized
+repo and spawn-target references, group hub session UUID references with
+plugin-owned role/template/status metadata, and return read models in the
+`botster-workspaces.workspace` entity family. Delete marks a workspace deleted
+and does not delete hub sessions, package records, spawn targets, repository
+content, or host filesystem content.
+
+This package does not implement agent orchestration, session actions, or a
+runnable app process yet. Runtime paths use plugin-owned persistence and hub
+capability references rather than direct host filesystem access or hub storage
+rewrites.
 
 ## Authority boundary
 
@@ -75,8 +92,10 @@ surfaces:
 - app surface: `workspaces`
 - settings surface: `workspaces-settings`
 
-The scaffold intentionally does not declare a `runnable_entrypoints` item because
-there is no workspace process to launch yet.
+Both surfaces render structural UI and bind dynamic rows to the
+`botster-workspaces.workspace` entity family. The package intentionally does not
+declare a `runnable_entrypoints` item because there is no workspace process to
+launch yet.
 
 ## Verification
 
@@ -87,6 +106,8 @@ script/test
 ```
 
 The harness validates the manifest, docs, fixtures, create/list/show/update/delete
-contract examples, capability coverage, and leak scans for docs and fixtures.
+contract examples, registered plugin operations, plugin.db-backed runtime
+semantics, entity read models, surface bindings, capability coverage, and leak
+scans for docs, fixtures, and runtime tests.
 
 Then run the local Botster smoke flow above against a real `botster-hub` binary.

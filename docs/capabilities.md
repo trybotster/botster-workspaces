@@ -5,9 +5,25 @@ without taking hub authority.
 
 ## Declared Capabilities
 
+The runtime contract uses the logical capability names below. The current
+hub-compiled manifest schema serializes admitted package capabilities as
+`{ "surface": "...", "scope": "..." }` objects, so `botster-package.json`
+declares the current admission shape:
+
+- `{ "surface": "mcp" }`: expose CRUD operations as plugin tools.
+- `{ "surface": "plugin_db", "scope": "botster-workspaces" }`: persist
+  workspace runtime state under this plugin's namespace.
+- `{ "surface": "surfaces" }`: expose descriptor-backed app/settings surfaces.
+- `{ "surface": "filesystem", "scope": "workspace" }`: resolve approved
+  workspace-scoped repository references without raw host traversal.
+
+The logical workspace contract remains:
+
 - `plugin_db`: persist workspace records, local repo reference metadata, spawn
   target reference metadata, session groups, default session templates, and
   settings in plugin runtime data.
+- `mcp`: expose create/list/show/update/delete and entity snapshot operations
+  through Botster plugin tools.
 - `entities`: publish workspace read models as plugin-owned entity frames.
 - `surfaces`: expose the package app and settings descriptors.
 - `spawn_targets:read`: list or validate references to hub-owned spawn targets.
@@ -16,9 +32,9 @@ without taking hub authority.
 - `filesystem:scoped_repo`: resolve approved repository references without
   direct host filesystem traversal.
 
-These names are the manifest strings currently used by this package. If the hub
-compiled manifest schema later renames any capability, the manifest and this
-document must change together.
+If the hub compiled manifest schema adds narrower first-class surfaces for
+plugin entities, spawn-target reads, session reads, or process spawn requests,
+the manifest and this document must change together.
 
 ## Plugin-Owned State
 

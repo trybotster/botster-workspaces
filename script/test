@@ -1,0 +1,90 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "json"
+
+ROOT = File.expand_path("..", __dir__)
+
+def read(path)
+  File.read(File.join(ROOT, path))
+end
+
+def assert(condition, message)
+  raise message unless condition
+end
+
+manifest = JSON.parse(read("botster-package.json"))
+readme = read("README.md")
+gitignore = read(".gitignore")
+
+assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
+assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
+assert(manifest["version"].is_a?(String) && !manifest["version"].empty?, "manifest version is required")
+assert(manifest["botster"].is_a?(String) && !manifest["botster"].empty?, "Botster compatibility is required")
+assert(manifest["source"] == { "type" => "path", "path" => "." }, "source must describe local path install")
+assert(manifest["capabilities"].is_a?(Array), "capabilities must be an array")
+
+configuration = manifest.fetch("configuration")
+assert(configuration["groups"].is_a?(Array), "configuration.groups must be an array")
+assert(configuration["fields"].is_a?(Array), "configuration.fields must be an array")
+
+entrypoints = manifest.fetch("entrypoints")
+assert(entrypoints.is_a?(Array) && entrypoints.length == 1, "exactly one inert entrypoint is expected")
+entrypoint = entrypoints.first
+assert(entrypoint["runtime"] == "lua", "entrypoint runtime must be lua")
+assert(entrypoint["path"] == "plugin.lua", "entrypoint path must be plugin.lua")
+assert(entrypoint["bootstrap"] == false, "entrypoint bootstrap must be false")
+assert(File.file?(File.join(ROOT, entrypoint["path"])), "entrypoint file must exist")
+
+surfaces = manifest.fetch("surfaces")
+assert(surfaces.is_a?(Array), "surfaces must be an array")
+surface_by_kind = surfaces.group_by { |surface| surface["kind"] }
+assert(surface_by_kind["app"]&.any? { |surface| surface["id"] == "workspaces" }, "workspaces app surface is required")
+assert(surface_by_kind["settings"]&.any? { |surface| surface["id"] == "workspaces-settings" }, "workspaces settings surface is required")
+
+%w[
+  botster-hub
+  packages\ install
+  packages\ show
+  packages\ enable
+  packages\ list
+  --path\ ../botster-workspaces
+  app\ surface
+  settings\ surface
+].each do |needle|
+  assert(readme.include?(needle.tr("\\", "")), "README must mention #{needle.tr("\\", "")}")
+end
+
+%w[
+  .env
+  mise.local.toml
+  *.log
+  tmp/
+  data/
+  dist/
+  build/
+].each do |pattern|
+  assert(gitignore.lines.map(&:strip).include?(pattern), ".gitignore must include #{pattern}")
+end
+
+scanned_files = %w[
+  botster-package.json
+  README.md
+  plugin.lua
+]
+
+leak_patterns = {
+  "absolute home path" => %r{/Users/[A-Za-z0-9._-]+},
+  "email address" => /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i,
+  "session id" => /sess-[0-9A-Za-z-]+/,
+  "secret assignment" => /\b(secret|token|password|api[_-]?key)\b\s*[:=]/i
+}
+
+scanned_files.each do |path|
+  contents = read(path)
+  leak_patterns.each do |label, pattern|
+    assert(!contents.match?(pattern), "#{path} contains #{label}")
+  end
+end
+
+puts "script/test: ok"

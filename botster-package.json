@@ -5,7 +5,15 @@
   "botster": ">=0.1.0",
   "description": "First-party Botster workspace package scaffold.",
   "source": { "type": "path", "path": "." },
-  "capabilities": [],
+  "capabilities": [
+    "plugin_db",
+    "entities",
+    "surfaces",
+    "spawn_targets:read",
+    "sessions:read",
+    "process:spawn",
+    "filesystem:scoped_repo"
+  ],
   "configuration": {
     "groups": [],
     "fields": []

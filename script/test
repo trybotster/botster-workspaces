@@ -16,6 +16,9 @@ end
 manifest = JSON.parse(read("botster-package.json"))
 readme = read("README.md")
 gitignore = read(".gitignore")
+workspace_doc = read("docs/workspace-domain.md")
+capabilities_doc = read("docs/capabilities.md")
+workspace_contract = JSON.parse(read("test/fixtures/workspaces/contract.json"))
 
 assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
 assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
@@ -23,6 +26,17 @@ assert(manifest["version"].is_a?(String) && !manifest["version"].empty?, "manife
 assert(manifest["botster"].is_a?(String) && !manifest["botster"].empty?, "Botster compatibility is required")
 assert(manifest["source"] == { "type" => "path", "path" => "." }, "source must describe local path install")
 assert(manifest["capabilities"].is_a?(Array), "capabilities must be an array")
+
+required_capabilities = %w[
+  plugin_db
+  entities
+  surfaces
+  spawn_targets:read
+  sessions:read
+  process:spawn
+  filesystem:scoped_repo
+]
+assert(manifest["capabilities"].sort == required_capabilities.sort, "manifest capabilities must match workspace contract")
 
 configuration = manifest.fetch("configuration")
 assert(configuration["groups"].is_a?(Array), "configuration.groups must be an array")
@@ -43,6 +57,116 @@ assert(surface_by_kind["app"]&.any? { |surface| surface["id"] == "workspaces" },
 assert(surface_by_kind["settings"]&.any? { |surface| surface["id"] == "workspaces-settings" }, "workspaces settings surface is required")
 
 %w[
+  Workspace\ Record
+  Default\ Session\ Templates
+  Create
+  List
+  Show
+  Update
+  Delete\ Or\ Archive
+  Entity\ Read\ Models
+  Persistence\ Boundary
+].each do |heading|
+  assert(workspace_doc.include?(heading.tr("\\", "")), "workspace domain doc must include #{heading.tr("\\", "")}")
+end
+
+%w[
+  Declared\ Capabilities
+  Plugin-Owned\ State
+  Hub-Owned\ Authority
+  Contract\ Assertions
+].each do |heading|
+  assert(capabilities_doc.include?(heading.tr("\\", "")), "capabilities doc must include #{heading.tr("\\", "")}")
+end
+
+required_capabilities.each do |capability|
+  assert(capabilities_doc.include?(capability), "capabilities doc must mention #{capability}")
+  assert(workspace_contract.fetch("required_capabilities").include?(capability), "fixture must require #{capability}")
+end
+
+def required_keys(hash, keys, label)
+  keys.each do |key|
+    assert(hash.key?(key), "#{label} must include #{key}")
+  end
+end
+
+workspace_keys = %w[
+  id
+  name
+  purpose
+  status
+  local_repo_ref
+  spawn_target_ref
+  session_group
+  default_session_template_id
+  settings
+  created_at
+  updated_at
+]
+
+workspaces = workspace_contract.fetch("workspaces")
+assert(workspaces.is_a?(Array) && workspaces.any?, "workspace fixtures are required")
+workspaces.each do |workspace|
+  required_keys(workspace, workspace_keys, "workspace")
+  assert(%w[active archived deleted].include?(workspace.fetch("status")), "workspace status must be contract-valid")
+  required_keys(workspace.fetch("local_repo_ref"), %w[id display_name repo_capability_ref default_branch relative_worktree_hint], "local_repo_ref")
+  required_keys(workspace.fetch("spawn_target_ref"), %w[target_id label kind capability_ref], "spawn_target_ref")
+  required_keys(workspace.fetch("session_group"), %w[workspace_id session_refs], "session_group")
+  assert(workspace.fetch("session_group").fetch("workspace_id") == workspace.fetch("id"), "session_group workspace_id must match workspace id")
+  required_keys(workspace.fetch("settings"), %w[workspace_id default_repo_ref_id default_spawn_target_id default_session_template_id archive_policy], "settings")
+  assert(workspace.fetch("settings").fetch("workspace_id") == workspace.fetch("id"), "settings workspace_id must match workspace id")
+end
+
+active_names = workspaces.select { |workspace| workspace.fetch("status") == "active" }.map { |workspace| workspace.fetch("name") }
+assert(active_names.uniq.length == active_names.length, "active workspace names must be unique")
+
+templates = workspace_contract.fetch("default_session_templates")
+assert(templates.is_a?(Array) && templates.any?, "default session template fixtures are required")
+templates.each do |template|
+  required_keys(template, %w[id name spawn_target_ref command_profile initial_prompt_template environment_policy enabled], "default_session_template")
+end
+
+operations = workspace_contract.fetch("operation_examples")
+%w[create list show update delete].each do |operation|
+  assert(operations.key?(operation), "#{operation} operation contract is required")
+end
+
+create_input = operations.fetch("create").fetch("input")
+%w[name purpose local_repo_ref spawn_target_ref].each do |field|
+  assert(create_input.key?(field), "create input must require #{field}")
+end
+assert(operations.fetch("create").fetch("expected_status") == "active", "create must produce an active workspace")
+
+list_contract = operations.fetch("list")
+assert(list_contract.fetch("default_statuses") == ["active"], "list defaults to active workspaces")
+assert(list_contract.fetch("sort") == "name", "list sort must be by name")
+%w[id name purpose status repo_label spawn_target_label session_count entity_family].each do |field|
+  assert(list_contract.fetch("row_fields").include?(field), "list rows must include #{field}")
+end
+
+show_contract = operations.fetch("show")
+assert(workspaces.any? { |workspace| workspace.fetch("id") == show_contract.fetch("id") }, "show example id must exist")
+assert(show_contract.fetch("not_found_error") == "workspace_not_found", "show must define not-found error")
+
+update_contract = operations.fetch("update")
+%w[name purpose local_repo_ref spawn_target_ref default_session_template_id settings session_group.session_refs].each do |field|
+  assert(update_contract.fetch("allowed_fields").include?(field), "update must allow plugin-owned #{field}")
+end
+%w[process_state pty_state terminal_scrollback package_admission spawn_target_record session_manifest].each do |field|
+  assert(update_contract.fetch("rejected_hub_owned_fields").include?(field), "update must reject hub-owned #{field}")
+end
+
+delete_contract = operations.fetch("delete")
+assert(delete_contract.fetch("mode") == "mark_deleted", "delete mode must be mark_deleted")
+assert(delete_contract.fetch("excluded_from_default_list") == true, "deleted workspaces must be excluded from default list")
+%w[hub_sessions package_records spawn_targets repository_content host_filesystem_content].each do |field|
+  assert(delete_contract.fetch("does_not_delete").include?(field), "delete must not delete #{field}")
+end
+
+entity_families = workspace_contract.fetch("entity_families")
+assert(entity_families.any? { |family| family["name"] == "botster-workspaces.workspace" && family["source"] == "plugin-owned" }, "workspace entity family must be plugin-owned")
+
+%w[
   botster-hub
   packages\ install
   packages\ show
@@ -51,8 +175,34 @@ assert(surface_by_kind["settings"]&.any? { |surface| surface["id"] == "workspace
   --path\ ../botster-workspaces
   app\ surface
   settings\ surface
+  docs/workspace-domain.md
+  docs/capabilities.md
+  script/test
 ].each do |needle|
   assert(readme.include?(needle.tr("\\", "")), "README must mention #{needle.tr("\\", "")}")
+end
+
+%w[
+  project_pipelines
+  ProjectPipelines
+  project-pipelines
+].each do |needle|
+  assert(!read("plugin.lua").include?(needle), "plugin entrypoint must not implement Project Pipelines")
+  assert(!read("botster-package.json").include?(needle), "manifest must not implement Project Pipelines")
+  assert(!workspace_doc.include?(needle), "workspace doc must not implement Project Pipelines")
+  assert(!capabilities_doc.include?(needle), "capabilities doc must not implement Project Pipelines")
+end
+
+%w[
+  fs.
+  io.open
+  os.execute
+  File.read(
+  File.write(
+].each do |needle|
+  assert(!workspace_doc.include?(needle), "workspace doc must not prescribe direct host filesystem API #{needle}")
+  assert(!capabilities_doc.include?(needle), "capabilities doc must not prescribe direct host filesystem API #{needle}")
+  assert(!read("plugin.lua").include?(needle), "plugin entrypoint must not use direct host filesystem API #{needle}")
 end
 
 %w[
@@ -71,6 +221,9 @@ scanned_files = %w[
   botster-package.json
   README.md
   plugin.lua
+  docs/workspace-domain.md
+  docs/capabilities.md
+  test/fixtures/workspaces/contract.json
 ]
 
 leak_patterns = {

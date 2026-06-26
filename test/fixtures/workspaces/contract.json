@@ -1,0 +1,178 @@
+{
+  "required_capabilities": [
+    "plugin_db",
+    "entities",
+    "surfaces",
+    "spawn_targets:read",
+    "sessions:read",
+    "process:spawn",
+    "filesystem:scoped_repo"
+  ],
+  "workspaces": [
+    {
+      "id": "ws_product_refactor",
+      "name": "Product refactor",
+      "purpose": "Coordinate product refactor agents",
+      "status": "active",
+      "local_repo_ref": {
+        "id": "repo_main",
+        "display_name": "Main application repo",
+        "repo_capability_ref": "repo_capability_main",
+        "default_branch": "main",
+        "relative_worktree_hint": "worktrees/product-refactor"
+      },
+      "spawn_target_ref": {
+        "target_id": "target_codex_local",
+        "label": "Codex local",
+        "kind": "agent",
+        "capability_ref": "spawn_target_codex_local"
+      },
+      "session_group": {
+        "workspace_id": "ws_product_refactor",
+        "session_refs": [
+          {
+            "session_uuid": "example-session-001",
+            "role": "implement",
+            "spawned_from_template_id": "template_codex_implement",
+            "status": "running"
+          }
+        ]
+      },
+      "default_session_template_id": "template_codex_implement",
+      "settings": {
+        "workspace_id": "ws_product_refactor",
+        "default_repo_ref_id": "repo_main",
+        "default_spawn_target_id": "target_codex_local",
+        "default_session_template_id": "template_codex_implement",
+        "archive_policy": "mark_deleted"
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "ws_archived_docs",
+      "name": "Archived docs pass",
+      "purpose": "Retain history for a completed documentation pass",
+      "status": "archived",
+      "local_repo_ref": {
+        "id": "repo_docs",
+        "display_name": "Documentation repo",
+        "repo_capability_ref": "repo_capability_docs",
+        "default_branch": "main",
+        "relative_worktree_hint": "worktrees/docs-pass"
+      },
+      "spawn_target_ref": {
+        "target_id": "target_claude_local",
+        "label": "Claude local",
+        "kind": "agent",
+        "capability_ref": "spawn_target_claude_local"
+      },
+      "session_group": {
+        "workspace_id": "ws_archived_docs",
+        "session_refs": []
+      },
+      "default_session_template_id": null,
+      "settings": {
+        "workspace_id": "ws_archived_docs",
+        "default_repo_ref_id": "repo_docs",
+        "default_spawn_target_id": "target_claude_local",
+        "default_session_template_id": null,
+        "archive_policy": "mark_deleted"
+      },
+      "created_at": "2026-01-02T00:00:00Z",
+      "updated_at": "2026-01-03T00:00:00Z"
+    }
+  ],
+  "default_session_templates": [
+    {
+      "id": "template_codex_implement",
+      "name": "Codex implementer",
+      "spawn_target_ref": {
+        "target_id": "target_codex_local",
+        "label": "Codex local",
+        "kind": "agent",
+        "capability_ref": "spawn_target_codex_local"
+      },
+      "command_profile": "codex",
+      "initial_prompt_template": "Implement the workspace task.",
+      "environment_policy": "inherit_hub_defaults",
+      "enabled": true
+    }
+  ],
+  "operation_examples": {
+    "create": {
+      "input": {
+        "name": "New feature workspace",
+        "purpose": "Coordinate new feature agents",
+        "local_repo_ref": {
+          "id": "repo_feature",
+          "display_name": "Feature repo",
+          "repo_capability_ref": "repo_capability_feature",
+          "default_branch": "main",
+          "relative_worktree_hint": "worktrees/new-feature"
+        },
+        "spawn_target_ref": {
+          "target_id": "target_codex_local",
+          "label": "Codex local",
+          "kind": "agent",
+          "capability_ref": "spawn_target_codex_local"
+        }
+      },
+      "expected_status": "active"
+    },
+    "list": {
+      "default_statuses": ["active"],
+      "sort": "name",
+      "row_fields": [
+        "id",
+        "name",
+        "purpose",
+        "status",
+        "repo_label",
+        "spawn_target_label",
+        "session_count",
+        "entity_family"
+      ]
+    },
+    "show": {
+      "id": "ws_product_refactor",
+      "not_found_error": "workspace_not_found"
+    },
+    "update": {
+      "allowed_fields": [
+        "name",
+        "purpose",
+        "local_repo_ref",
+        "spawn_target_ref",
+        "default_session_template_id",
+        "settings",
+        "session_group.session_refs"
+      ],
+      "rejected_hub_owned_fields": [
+        "process_state",
+        "pty_state",
+        "terminal_scrollback",
+        "package_admission",
+        "spawn_target_record",
+        "session_manifest"
+      ]
+    },
+    "delete": {
+      "mode": "mark_deleted",
+      "excluded_from_default_list": true,
+      "does_not_delete": [
+        "hub_sessions",
+        "package_records",
+        "spawn_targets",
+        "repository_content",
+        "host_filesystem_content"
+      ]
+    }
+  },
+  "entity_families": [
+    {
+      "name": "botster-workspaces.workspace",
+      "source": "plugin-owned"
+    }
+  ]
+}

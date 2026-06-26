@@ -2,4 +2,11 @@
 target/
 node_modules/
 .env
+mise.local.toml
 *.log
+log/
+tmp/
+dist/
+build/
+data/
+hub-state.json

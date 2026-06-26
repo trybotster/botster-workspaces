@@ -1,0 +1,36 @@
+{
+  "name": "botster-workspaces",
+  "version": "0.1.0",
+  "kind": "plugin",
+  "botster": ">=0.1.0",
+  "description": "First-party Botster workspace package scaffold.",
+  "source": { "type": "path", "path": "." },
+  "capabilities": [],
+  "configuration": {
+    "groups": [],
+    "fields": []
+  },
+  "surfaces": [
+    {
+      "id": "workspaces",
+      "kind": "app",
+      "title": "Workspaces",
+      "description": "Descriptor-backed workspace package surface. Domain state is not implemented yet.",
+      "order": 1,
+      "category": "workspace",
+      "supports": ["render"]
+    },
+    {
+      "id": "workspaces-settings",
+      "kind": "settings",
+      "title": "Workspaces Settings",
+      "description": "Descriptor-backed workspace settings surface. Configuration fields are intentionally empty in this scaffold.",
+      "order": 2,
+      "category": "workspace",
+      "supports": ["render"]
+    }
+  ],
+  "entrypoints": [
+    { "runtime": "lua", "path": "plugin.lua", "bootstrap": false }
+  ]
+}

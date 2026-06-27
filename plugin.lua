@@ -4,7 +4,11 @@ local ENTITY_FAMILY = "botster-workspaces.workspace"
 
 local HUB_OWNED_FIELDS = {
   process_state = true,
+  process_spawn_request = true,
   pty_state = true,
+  pty_request = true,
+  raw_spawn_request = true,
+  spawn_command = true,
   terminal_scrollback = true,
   package_admission = true,
   spawn_target_record = true,
@@ -193,15 +197,166 @@ local function default_settings(workspace_id, repo_ref, spawn_target_ref, templa
     default_repo_ref_id = repo_ref.id,
     default_spawn_target_id = spawn_target_ref.target_id,
     default_session_template_id = template_id,
+    default_session_template_refs = {},
     archive_policy = "mark_deleted",
   }
 end
 
+local function normalize_template_ref(value, selected)
+  if type(value) ~= "table" then
+    local template_id = trim(value)
+    if not template_id then
+      return nil
+    end
+    return {
+      template_id = template_id,
+      label = template_id,
+      role = "default",
+      group = "main",
+      accessory = false,
+      selected = selected == true,
+      validation_status = "unchecked",
+      diagnostic = "template reference has not been validated against the hub",
+      last_checked = nil,
+    }
+  end
+
+  local template_id = trim(value.template_id or value.id)
+  if not template_id then
+    return nil
+  end
+  local explicit_selected = value.selected
+
+  return {
+    template_id = template_id,
+    label = trim(value.label or value.name) or template_id,
+    role = trim(value.role) or "default",
+    group = trim(value.group) or trim(value.session_group) or "main",
+    accessory = value.accessory == true,
+    selected = explicit_selected == true or (explicit_selected == nil and selected == true),
+    validation_status = trim(value.validation_status) or "unchecked",
+    diagnostic = trim(value.diagnostic) or "template reference has not been validated against the hub",
+    last_checked = value.last_checked,
+  }
+end
+
+local function normalize_template_refs(workspace)
+  local refs = {}
+  local seen = {}
+  local source = workspace.default_session_template_refs
+    or (workspace.settings and workspace.settings.default_session_template_refs)
+
+  if type(source) == "table" then
+    for _, ref in ipairs(source) do
+      local normalized = normalize_template_ref(ref, #refs == 0)
+      if normalized and not seen[normalized.template_id] then
+        seen[normalized.template_id] = true
+        refs[#refs + 1] = normalized
+      end
+    end
+  end
+
+  local singular = workspace.default_session_template_id
+    or (workspace.settings and workspace.settings.default_session_template_id)
+  local normalized = normalize_template_ref(singular, #refs == 0)
+  if normalized and not seen[normalized.template_id] then
+    seen[normalized.template_id] = true
+    refs[#refs + 1] = normalized
+  end
+
+  if #refs > 0 then
+    local selected_seen = false
+    for _, ref in ipairs(refs) do
+      if ref.selected and not selected_seen then
+        selected_seen = true
+      elseif ref.selected then
+        ref.selected = false
+      end
+    end
+    if not selected_seen then
+      refs[1].selected = true
+    end
+  end
+
+  workspace.default_session_template_refs = refs
+  workspace.default_session_template_id = refs[1] and refs[1].template_id or nil
+  workspace.settings = workspace.settings or {}
+  workspace.settings.workspace_id = workspace.id
+  workspace.settings.default_session_template_refs = copy(refs)
+  workspace.settings.default_session_template_id = workspace.default_session_template_id
+  return refs
+end
+
+local function template_refs_from_arguments(arguments)
+  if arguments.default_session_template_refs ~= nil then
+    return arguments.default_session_template_refs
+  end
+  if arguments.default_session_templates ~= nil then
+    return arguments.default_session_templates
+  end
+  if arguments.default_session_template_id ~= nil then
+    return { arguments.default_session_template_id }
+  end
+  return {}
+end
+
+local function selected_template_ref(workspace, template_id)
+  local refs = normalize_template_refs(workspace)
+  local wanted = trim(template_id)
+  for _, ref in ipairs(refs) do
+    if wanted and ref.template_id == wanted then
+      return ref
+    end
+  end
+  for _, ref in ipairs(refs) do
+    if ref.selected then
+      return ref
+    end
+  end
+  return refs[1]
+end
+
+local function short_identifier(value, fallback, max_length)
+  local text = trim(value) or fallback
+  text = text:gsub("[^%w%-_]+", "-"):gsub("%-+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
+  if text == "" then
+    text = fallback
+  end
+  if #text > max_length then
+    text = text:sub(#text - max_length + 1)
+  end
+  return text
+end
+
+local function cached_template_summary(workspace)
+  local refs = normalize_template_refs(workspace)
+  local labels = {}
+  local diagnostics = {}
+  local invalid = 0
+  for _, ref in ipairs(refs) do
+    labels[#labels + 1] = ref.label or ref.template_id
+    if ref.validation_status ~= "valid" then
+      diagnostics[#diagnostics + 1] = (ref.template_id or "unknown") .. ": " .. (ref.diagnostic or ref.validation_status)
+    end
+    if ref.validation_status == "invalid" then
+      invalid = invalid + 1
+    end
+  end
+  return {
+    count = #refs,
+    labels = labels,
+    diagnostics = diagnostics,
+    invalid_count = invalid,
+  }
+end
+
 local function read_model(workspace)
+  normalize_template_refs(workspace)
   local session_refs = {}
   if workspace.session_group and type(workspace.session_group.session_refs) == "table" then
     session_refs = workspace.session_group.session_refs
   end
+  local template_summary = cached_template_summary(workspace)
 
   return {
     id = workspace.id,
@@ -211,6 +366,10 @@ local function read_model(workspace)
     repo_label = workspace.local_repo_ref and workspace.local_repo_ref.display_name or nil,
     spawn_target_label = workspace.spawn_target_ref and workspace.spawn_target_ref.label or nil,
     session_count = #session_refs,
+    default_session_template_count = template_summary.count,
+    default_session_template_labels = template_summary.labels,
+    template_diagnostic_count = #template_summary.diagnostics,
+    invalid_template_count = template_summary.invalid_count,
     entity_family = ENTITY_FAMILY,
   }
 end
@@ -259,6 +418,13 @@ local function create_workspace(arguments)
   local workspace_id = next_workspace_id(state, name)
   local timestamp = next_timestamp(state)
   local template_id = arguments.default_session_template_id
+  local template_refs = {}
+  for _, ref in ipairs(template_refs_from_arguments(arguments)) do
+    local normalized = normalize_template_ref(ref, #template_refs == 0)
+    if normalized then
+      template_refs[#template_refs + 1] = normalized
+    end
+  end
   local workspace = {
     id = workspace_id,
     name = name,
@@ -271,10 +437,12 @@ local function create_workspace(arguments)
       session_refs = {},
     },
     default_session_template_id = template_id,
+    default_session_template_refs = template_refs,
     settings = default_settings(workspace_id, repo_ref, spawn_target_ref, template_id),
     created_at = timestamp,
     updated_at = timestamp,
   }
+  normalize_template_refs(workspace)
 
   state.workspaces[#state.workspaces + 1] = workspace
   local error = save_or_error(state)
@@ -356,6 +524,9 @@ local function update_workspace(arguments)
   if patch.spawn_target_ref ~= nil and not validate_spawn_target_ref(patch.spawn_target_ref) then
     return error_result("validation_failed", "spawn_target_ref is invalid", { "spawn_target_ref" })
   end
+  if patch.default_session_template_refs ~= nil and type(patch.default_session_template_refs) ~= "table" then
+    return error_result("validation_failed", "default_session_template_refs is invalid", { "default_session_template_refs" })
+  end
   if patch.session_group ~= nil and not validate_session_refs(patch.session_group.session_refs) then
     return error_result("validation_failed", "session_group.session_refs is invalid", { "session_group.session_refs" })
   end
@@ -364,7 +535,20 @@ local function update_workspace(arguments)
   workspace.purpose = patch.purpose ~= nil and trim(patch.purpose) or workspace.purpose
   workspace.local_repo_ref = patch.local_repo_ref ~= nil and copy(patch.local_repo_ref) or workspace.local_repo_ref
   workspace.spawn_target_ref = patch.spawn_target_ref ~= nil and copy(patch.spawn_target_ref) or workspace.spawn_target_ref
-  workspace.default_session_template_id = patch.default_session_template_id ~= nil and patch.default_session_template_id or workspace.default_session_template_id
+  if patch.default_session_template_refs ~= nil
+    or patch.default_session_templates ~= nil
+    or patch.default_session_template_id ~= nil then
+    workspace.default_session_template_refs = {}
+    for _, ref in ipairs(template_refs_from_arguments(patch)) do
+      local normalized = normalize_template_ref(ref, #workspace.default_session_template_refs == 0)
+      if normalized then
+        workspace.default_session_template_refs[#workspace.default_session_template_refs + 1] = normalized
+      end
+    end
+    workspace.default_session_template_id = workspace.default_session_template_refs[1]
+      and workspace.default_session_template_refs[1].template_id
+      or nil
+  end
   if patch.settings ~= nil then
     workspace.settings = copy(patch.settings)
     workspace.settings.workspace_id = workspace.id
@@ -374,6 +558,7 @@ local function update_workspace(arguments)
     workspace.session_group.workspace_id = workspace.id
     workspace.session_group.session_refs = copy(patch.session_group.session_refs)
   end
+  normalize_template_refs(workspace)
   workspace.updated_at = next_timestamp(state)
 
   local error = save_or_error(state)
@@ -381,6 +566,112 @@ local function update_workspace(arguments)
     return error
   end
   return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+end
+
+local function resolve_template_via_hub(template_id)
+  local capabilities = botster and botster.capabilities or {}
+  local session_templates = capabilities.session_templates
+  if session_templates and type(session_templates.resolve) == "function" then
+    local ok, result = pcall(session_templates.resolve, { template_id = template_id })
+    if ok and result and result.ok ~= false then
+      return {
+        validation_status = "valid",
+        diagnostic = "template resolved by hub session-template API",
+        label = result.label or result.name or result.template_id or template_id,
+      }
+    end
+    return {
+      validation_status = "invalid",
+      diagnostic = result and result.error and (result.error.message or result.error.code) or tostring(result),
+    }
+  end
+  return {
+    validation_status = "unchecked",
+    diagnostic = "hub session-template resolve capability unavailable; cached reference retained",
+  }
+end
+
+local function refresh_template_diagnostics(arguments)
+  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  if not workspace_id then
+    return error_result("missing_argument", "missing required argument: id")
+  end
+
+  local state = load_state()
+  local workspace = workspace_by_id(state, workspace_id)
+  if not workspace then
+    return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
+  end
+
+  local refs = normalize_template_refs(workspace)
+  local checked_at = next_timestamp(state)
+  for _, ref in ipairs(refs) do
+    local diagnostic = resolve_template_via_hub(ref.template_id)
+    ref.validation_status = diagnostic.validation_status
+    ref.diagnostic = diagnostic.diagnostic
+    ref.label = diagnostic.label or ref.label
+    ref.last_checked = checked_at
+  end
+  normalize_template_refs(workspace)
+  workspace.updated_at = next_timestamp(state)
+
+  local error = save_or_error(state)
+  if error then
+    return error
+  end
+  return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+end
+
+local function spawn_default_session(arguments)
+  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  if not workspace_id then
+    return error_result("missing_argument", "missing required argument: id")
+  end
+
+  local state = load_state()
+  local workspace = workspace_by_id(state, workspace_id)
+  if not workspace then
+    return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
+  end
+
+  local ref = selected_template_ref(workspace, arguments.template_id)
+  if not ref then
+    return error_result("missing_template_reference", "workspace has no default session template reference")
+  end
+
+  local session_id = trim(arguments.session_id)
+    or ("ws-" .. short_identifier(workspace.id, "workspace", 18) .. "-" .. short_identifier(ref.template_id, "template", 12))
+  local request = {
+    type = "spawn_session_template",
+    template_id = ref.template_id,
+    session_id = session_id,
+    request = {
+      context = {
+        workspace_id = workspace.id,
+        prompt = trim(arguments.prompt),
+        ticket_id = trim(arguments.ticket_id),
+        branch_name = trim(arguments.branch_name),
+      },
+    },
+  }
+
+  local capabilities = botster and botster.capabilities or {}
+  local session_templates = capabilities.session_templates
+  if session_templates and type(session_templates.spawn) == "function" then
+    local ok, result = pcall(session_templates.spawn, request)
+    if ok and result and result.ok ~= false then
+      return { ok = true, workspace_id = workspace.id, template_ref = copy(ref), hub_api = "spawn_session_template", spawn = result }
+    end
+    return error_result("hub_template_spawn_failed", result and result.error and (result.error.message or result.error.code) or tostring(result))
+  end
+
+  return {
+    ok = true,
+    workspace_id = workspace.id,
+    template_ref = copy(ref),
+    hub_api = "spawn_session_template",
+    daemon_request = request,
+  }
 end
 
 local function delete_workspace(arguments)
@@ -443,6 +734,11 @@ local function empty_state(id, title, description)
 end
 
 local function list_item(row)
+  local template_text = "No default templates"
+  if row.default_session_template_labels and #row.default_session_template_labels > 0 then
+    template_text = table.concat(row.default_session_template_labels, ", ")
+  end
+  local diagnostic_text = tostring(row.template_diagnostic_count or 0) .. " template diagnostics"
   return {
     type = "list_item",
     id = "workspace-row-" .. tostring(row.id),
@@ -456,10 +752,12 @@ local function list_item(row)
       subtitle = {
         text_node("workspace-row-" .. tostring(row.id) .. "-purpose", row.purpose),
         text_node("workspace-row-" .. tostring(row.id) .. "-repo", row.repo_label .. " / " .. row.spawn_target_label, "muted"),
+        text_node("workspace-row-" .. tostring(row.id) .. "-templates", "Templates: " .. template_text, "muted"),
       },
       meta = {
         text_node("workspace-row-" .. tostring(row.id) .. "-status", row.status),
         text_node("workspace-row-" .. tostring(row.id) .. "-sessions", tostring(row.session_count) .. " sessions"),
+        text_node("workspace-row-" .. tostring(row.id) .. "-template-diagnostics", diagnostic_text),
       },
     },
   }
@@ -567,6 +865,7 @@ return botster.register({
           local_repo_ref = { type = "object" },
           spawn_target_ref = { type = "object" },
           default_session_template_id = { type = "string" },
+          default_session_template_refs = { type = "array" },
         },
         required = { "name", "purpose", "local_repo_ref", "spawn_target_ref" },
         additionalProperties = false,
@@ -630,6 +929,39 @@ return botster.register({
       },
       handler = "delete_workspace",
       call = delete_workspace,
+    },
+    {
+      name = "botster_workspaces.refresh_template_diagnostics",
+      description = "Refresh cached diagnostics for workspace default session template references.",
+      input_schema = {
+        type = "object",
+        properties = {
+          id = { type = "string" },
+          workspace_id = { type = "string" },
+        },
+        additionalProperties = false,
+      },
+      handler = "refresh_template_diagnostics",
+      call = refresh_template_diagnostics,
+    },
+    {
+      name = "botster_workspaces.spawn_default_session",
+      description = "Request a hub-owned session spawn from a selected workspace default template.",
+      input_schema = {
+        type = "object",
+        properties = {
+          id = { type = "string" },
+          workspace_id = { type = "string" },
+          template_id = { type = "string" },
+          session_id = { type = "string" },
+          prompt = { type = "string" },
+          ticket_id = { type = "string" },
+          branch_name = { type = "string" },
+        },
+        additionalProperties = false,
+      },
+      handler = "spawn_default_session",
+      call = spawn_default_session,
     },
     {
       name = "botster_workspaces.entity_snapshot",

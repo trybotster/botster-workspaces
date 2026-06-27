@@ -27,13 +27,21 @@ The logical workspace contract remains:
 - `surfaces`: expose the package app and settings descriptors.
 - `spawn_targets:read`: list or validate references to hub-owned spawn targets.
 - `sessions:read`: resolve hub-owned session references for grouping.
-- `process:spawn`: request a hub-owned process/session from a default template.
+- `process:spawn`: request a hub-owned process/session only through the hub
+  `spawn_session_template` API.
 - `filesystem:scoped_repo`: resolve approved repository references without
   direct host filesystem traversal.
 
+The landed hub session-template daemon contract exposes
+`list_session_templates`, `show_session_template`, `resolve_session_template`,
+and `spawn_session_template`. Workspace runtime code may cache references and
+diagnostics from those APIs, but it must not duplicate the template registry or
+materialize raw core spawn requests.
+
 If the hub compiled manifest schema adds narrower first-class surfaces for
-plugin entity broadcast, spawn-target reads, session reads, or process spawn
-requests, the manifest and this document must change together.
+plugin entity broadcast, spawn-target reads, session reads, session-template
+resolution, or template spawn requests, the manifest and this document must
+change together.
 
 ## Plugin-Owned State
 
@@ -41,7 +49,8 @@ requests, the manifest and this document must change together.
 - Local repo reference metadata.
 - Spawn target reference metadata.
 - Session group records.
-- Default session templates.
+- Default session template references, labels, roles, grouping/accessory
+  metadata, selected state, and cached diagnostics.
 - Workspace settings.
 - Workspace read models.
 
@@ -49,6 +58,8 @@ requests, the manifest and this document must change together.
 
 - Package install, provenance, lock metadata, and enablement.
 - Admitted spawn target records and spawn authorization.
+- Session-template registry, resolution, context injection, and spawn request
+  materialization.
 - Process and PTY lifecycle.
 - Session UUIDs, terminal transport, scrollback, and recovery.
 - Scoped filesystem enforcement.
@@ -60,6 +71,8 @@ or read arbitrary host filesystem paths.
 
 - Manifest capabilities must include every capability listed here.
 - Contract fixtures must not require a capability missing from the manifest.
+- Template spawn requests must use `spawn_session_template`, not raw process,
+  command, PTY, spawn target, or filesystem fields.
 - Docs and fixtures must remain path-neutral and free of operator-specific
   identifiers.
 - Project Pipelines behavior is outside this package contract.

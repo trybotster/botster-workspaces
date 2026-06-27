@@ -21,8 +21,8 @@ The first workspace domain contract is defined in:
 
 The contract defines create/list/show/update/delete workspace behavior,
 plugin-owned workspace records, local repo reference metadata, spawn target
-references, session grouping, default session templates, workspace settings, and
-workspace entity read models.
+references, session grouping, default session template references, workspace
+settings, and workspace entity read models.
 
 Runtime workspace records persist through `plugin_db`. The public operation path
 is exposed through Botster plugin tools:
@@ -32,14 +32,28 @@ is exposed through Botster plugin tools:
 - `botster_workspaces.show`
 - `botster_workspaces.update`
 - `botster_workspaces.delete`
+- `botster_workspaces.refresh_template_diagnostics`
+- `botster_workspaces.spawn_default_session`
 - `botster_workspaces.entity_snapshot`
 
 The operations create/list/show/update/delete workspace records, attach sanitized
 repo and spawn-target references, group hub session UUID references with
-plugin-owned role/template/status metadata, and return read models identified as
-`botster-workspaces.workspace`. Delete marks a workspace deleted
-and does not delete hub sessions, package records, spawn targets, repository
-content, or host filesystem content.
+plugin-owned role/template/status metadata, cache diagnostics for referenced hub
+session templates, and return read models identified as
+`botster-workspaces.workspace`. A workspace can request a selected default
+template through the hub-owned `spawn_session_template` API with workspace
+context; it does not construct raw process, PTY, spawn target, command, or
+filesystem requests. Delete marks a workspace deleted and does not delete hub
+sessions, package records, spawn targets, repository content, or host filesystem
+content.
+
+Default template selection is currently tool-driven. Clients select a workspace
+default by calling `botster_workspaces.update` with
+`default_session_template_refs` and exactly one `selected` reference; app and
+settings surfaces render the selected/cached read model, while
+`botster_workspaces.spawn_default_session` consumes that selected reference for
+the hub-owned template spawn request. This package does not register a separate
+UI action descriptor for template selection in this milestone.
 
 This package does not implement agent orchestration, session actions, or a
 runnable app process yet. Runtime paths use plugin-owned persistence and hub
@@ -54,7 +68,7 @@ Plugin-owned state:
 - local repo reference metadata
 - spawn target reference metadata
 - session group references
-- default session templates
+- default session template references and cached diagnostics
 - workspace settings
 - workspace entity read models
 
@@ -62,6 +76,8 @@ Hub-owned authority:
 
 - package install, provenance, lock metadata, and enablement
 - spawn target admission and spawn authorization
+- session-template registry, resolution, context injection, and spawn
+  materialization
 - process and PTY lifecycle
 - session UUIDs, terminal transport, scrollback, and recovery
 - scoped filesystem enforcement
@@ -106,8 +122,9 @@ script/test
 ```
 
 The harness validates the manifest, docs, fixtures, create/list/show/update/delete
-contract examples, registered plugin operations, plugin.db-backed runtime
-semantics, entity read models, surface bindings, capability coverage, and leak
-scans for docs, fixtures, and runtime tests.
+contract examples, template diagnostics, selected-template spawn request shape,
+registered plugin operations, plugin.db-backed runtime semantics, entity read
+models, surface bindings, capability coverage, and leak scans for docs,
+fixtures, and runtime tests.
 
 Then run the local Botster smoke flow above against a real `botster-hub` binary.

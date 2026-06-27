@@ -24,7 +24,10 @@ Required fields:
 - `local_repo_ref`: plugin-owned repository reference metadata.
 - `spawn_target_ref`: plugin-owned reference to a hub-owned spawn target.
 - `session_group`: plugin-owned grouping of hub session references.
-- `default_session_template_id`: optional plugin-owned template reference.
+- `default_session_template_id`: compatibility pointer to the first default
+  template reference.
+- `default_session_template_refs`: one or more plugin-owned references to
+  hub-owned session templates.
 - `settings`: plugin-owned workspace settings.
 - `created_at` and `updated_at`: contract timestamps.
 
@@ -42,23 +45,40 @@ reference contains `session_uuid`, `role`, `spawned_from_template_id`, and
 session.
 
 `settings` contains `workspace_id`, `default_repo_ref_id`,
-`default_spawn_target_id`, `default_session_template_id`, and `archive_policy`.
+`default_spawn_target_id`, `default_session_template_id`,
+`default_session_template_refs`, and `archive_policy`.
 
 ## Default Session Templates
 
-Default session templates are plugin-owned records used to request hub-owned
-spawns. A template contains:
+Default session templates are hub-owned package manifest records exposed through
+the daemon `session_templates` contract. Workspaces store references and cached
+diagnostics only. A reference contains:
 
-- `id`
-- `name`
-- `spawn_target_ref`
-- `command_profile`
-- `initial_prompt_template`
-- `environment_policy`
-- `enabled`
+- `template_id`
+- `label`
+- `role`
+- `group`
+- `accessory`
+- `selected`
+- `validation_status`
+- `diagnostic`
+- `last_checked`
 
-Templates do not bypass hub spawn policy. They provide default request metadata
-for the hub-owned spawn path.
+Existing singular `default_session_template_id` records normalize to a one-item
+`default_session_template_refs` array when read. Invalid or missing template ids
+remain in workspace state with an `invalid` diagnostic so operators can repair
+the reference without losing intent.
+
+Template diagnostics are refreshed through the hub-owned
+`resolve_session_template` API and cached in plugin state. App and settings
+surface renderers read the cached diagnostics; they do not synchronously resolve
+hub templates during render.
+
+Spawning from a workspace default goes through the hub-owned
+`spawn_session_template` API. The workspace request supplies selected
+`template_id`, `session_id`, and trusted context such as `workspace_id`, prompt,
+ticket id, and branch name. The plugin never constructs raw process, PTY, spawn
+target, command, or filesystem requests.
 
 ## Operations
 
@@ -70,13 +90,17 @@ id, timestamps, an empty `session_group.session_refs` array, and default
 settings.
 
 Create rejects missing required fields and duplicate active workspace names.
+Callers may pass `default_session_template_refs` for one or more template
+references, or the compatibility `default_session_template_id` field for older
+singular records.
 
 ### List
 
 Listing workspaces returns active workspaces by default, sorted by `name`.
 Archived or deleted visibility must be requested explicitly by a future runtime
 option. List rows expose read-model fields only: id, name, purpose, status,
-repo display label, spawn target label, session count, and entity family.
+repo display label, spawn target label, session count, template reference
+counts/labels/diagnostic counts, and entity family.
 
 List rows must not expose raw host filesystem paths.
 
@@ -84,17 +108,38 @@ List rows must not expose raw host filesystem paths.
 
 Showing a workspace by id returns the full workspace record, local repo
 reference metadata, spawn target reference metadata, session group, default
-template reference, and settings. Unknown ids return a not-found contract error.
+template references, cached diagnostics, and settings. Unknown ids return a
+not-found contract error.
 
 ### Update
 
 Updating a workspace may patch plugin-owned fields: `name`, `purpose`,
-`local_repo_ref`, `spawn_target_ref`, `default_session_template_id`, settings,
-and session reference metadata.
+`local_repo_ref`, `spawn_target_ref`, `default_session_template_id`,
+`default_session_template_refs`, settings, and session reference metadata.
+Clients select the default template through this update path by submitting
+`default_session_template_refs` with exactly one reference marked `selected`.
+The app and settings surfaces display the resulting selected/cached read model;
+this package does not register a separate UI action descriptor for template
+selection in this milestone.
 
 Update rejects duplicate active names and hub-owned fields such as process
-state, PTY state, terminal scrollback, package admission state, spawn target
-records, and session manifests.
+state, raw process/spawn requests, PTY state, terminal scrollback, package
+admission state, spawn target records, and session manifests.
+
+### Refresh Template Diagnostics
+
+Refreshing diagnostics resolves each stored template id through the hub
+`resolve_session_template` API when that capability is available to the plugin
+worker. The plugin persists only the cached reference label, validation status,
+diagnostic text, and last checked marker. Missing capabilities or missing
+templates do not delete references.
+
+### Spawn Default Session
+
+Spawning a workspace default session selects the requested template id or the
+selected/default reference and requests `spawn_session_template` from the hub.
+The request includes workspace context but does not contain raw executable,
+argument, PTY, or host path authority.
 
 ### Delete Or Archive
 
@@ -124,6 +169,10 @@ The fixture read model includes:
 - `repo_label`
 - `spawn_target_label`
 - `session_count`
+- `default_session_template_count`
+- `default_session_template_labels`
+- `template_diagnostic_count`
+- `invalid_template_count`
 - `entity_family`
 
 ## Persistence Boundary

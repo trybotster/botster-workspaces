@@ -30,6 +30,24 @@ botster = {
         return { ok = true }
       end,
     },
+    session_templates = {
+      resolve = function(request)
+        if request.template_id == "template_missing" then
+          return {
+            ok = false,
+            error = {
+              code = "template_not_found",
+              message = "template not found",
+            },
+          }
+        end
+        return {
+          ok = true,
+          template_id = request.template_id,
+          label = "Hub " .. request.template_id,
+        }
+      end,
+    },
   },
   register = function(spec)
     registrations[#registrations + 1] = spec
@@ -204,6 +222,8 @@ assert_true(tool(spec, "botster_workspaces.list"), "list tool is registered")
 assert_true(tool(spec, "botster_workspaces.show"), "show tool is registered")
 assert_true(tool(spec, "botster_workspaces.update"), "update tool is registered")
 assert_true(tool(spec, "botster_workspaces.delete"), "delete tool is registered")
+assert_true(tool(spec, "botster_workspaces.refresh_template_diagnostics"), "template diagnostics tool is registered")
+assert_true(tool(spec, "botster_workspaces.spawn_default_session"), "template spawn tool is registered")
 assert_true(tool(spec, "botster_workspaces.entity_snapshot"), "entity snapshot tool is registered")
 
 local create = tool(spec, "botster_workspaces.create")
@@ -211,6 +231,8 @@ local list = tool(spec, "botster_workspaces.list")
 local show = tool(spec, "botster_workspaces.show")
 local update = tool(spec, "botster_workspaces.update")
 local delete = tool(spec, "botster_workspaces.delete")
+local refresh_templates = tool(spec, "botster_workspaces.refresh_template_diagnostics")
+local spawn_default_session = tool(spec, "botster_workspaces.spawn_default_session")
 local snapshot = tool(spec, "botster_workspaces.entity_snapshot")
 
 local missing = create({})
@@ -222,7 +244,22 @@ local created = create({
   purpose = "Coordinate product refactor agents",
   local_repo_ref = repo_ref("repo_main", "Main application repo"),
   spawn_target_ref = spawn_target_ref("target_codex_local", "Codex local"),
-  default_session_template_id = "template_codex_implement",
+  default_session_template_refs = {
+    {
+      template_id = "template_codex_implement",
+      label = "Codex implementer",
+      role = "implement",
+      group = "primary",
+      selected = true,
+    },
+    {
+      template_id = "template_missing",
+      label = "Missing review template",
+      role = "review",
+      group = "accessory",
+      accessory = true,
+    },
+  },
 })
 assert_eq(created.ok, true, "create succeeds")
 assert_eq(created.workspace.status, "active", "create marks active")
@@ -232,7 +269,30 @@ assert_eq(created.entity.entity_family, "botster-workspaces.workspace", "entity 
 assert_eq(created.entity.repo_label, "Main application repo", "entity exposes repo label")
 assert_eq(created.entity.spawn_target_label, "Codex local", "entity exposes spawn target label")
 assert_eq(created.entity.session_count, 0, "entity counts sessions")
+assert_eq(created.entity.default_session_template_count, 2, "entity counts default templates")
+assert_eq(created.workspace.default_session_template_id, "template_codex_implement", "create preserves primary template compatibility field")
+assert_eq(#created.workspace.default_session_template_refs, 2, "create stores multiple template refs")
 assert_eq(created.workspace.created_at, "plugin-clock-000001", "create assigns plugin-owned timestamp")
+
+local refreshed = refresh_templates({ id = created.workspace.id })
+assert_eq(refreshed.ok, true, "template diagnostics refresh succeeds")
+assert_eq(refreshed.workspace.default_session_template_refs[1].validation_status, "valid", "valid template is marked")
+assert_eq(refreshed.workspace.default_session_template_refs[1].label, "Hub template_codex_implement", "hub label is cached")
+assert_eq(refreshed.workspace.default_session_template_refs[2].validation_status, "invalid", "invalid template is marked")
+assert_eq(refreshed.workspace.default_session_template_refs[2].template_id, "template_missing", "invalid template reference is retained")
+
+local spawn_request = spawn_default_session({
+  id = created.workspace.id,
+  session_id = "session-workspace-template-1",
+  prompt = "Implement from workspace context",
+  ticket_id = "ticket-123",
+  branch_name = "main",
+})
+assert_eq(spawn_request.ok, true, "spawn default session request succeeds")
+assert_eq(spawn_request.hub_api, "spawn_session_template", "spawn uses hub template API name")
+assert_eq(spawn_request.daemon_request.type, "spawn_session_template", "spawn request is daemon template spawn")
+assert_eq(spawn_request.daemon_request.template_id, "template_codex_implement", "spawn uses selected template")
+assert_eq(spawn_request.daemon_request.request.context.workspace_id, created.workspace.id, "spawn passes workspace context")
 
 local duplicate = create({
   name = "Product refactor",
@@ -274,6 +334,17 @@ local rejected = update({
 assert_eq(rejected.ok, false, "update rejects hub-owned fields")
 assert_eq(rejected.error.code, "hub_owned_field_rejected", "hub-owned error code")
 
+local raw_spawn_rejected = update({
+  id = created.workspace.id,
+  patch = {
+    raw_spawn_request = {
+      command = "codex",
+    },
+  },
+})
+assert_eq(raw_spawn_rejected.ok, false, "update rejects raw spawn request fields")
+assert_eq(raw_spawn_rejected.error.code, "hub_owned_field_rejected", "raw spawn error code")
+
 local updated = update({
   id = created.workspace.id,
   patch = {
@@ -299,12 +370,55 @@ local updated = update({
 assert_eq(updated.ok, true, "update succeeds")
 assert_eq(updated.entity.session_count, 2, "update refreshes session count")
 assert_eq(#updated.workspace.session_group.session_refs, 2, "update stores session refs")
-assert_eq(updated.workspace.updated_at, "plugin-clock-000003", "update assigns plugin-owned timestamp")
+assert_eq(updated.workspace.updated_at, "plugin-clock-000005", "update assigns plugin-owned timestamp")
+
+local selected_by_update = update({
+  id = created.workspace.id,
+  patch = {
+    default_session_template_refs = {
+      {
+        template_id = "template_codex_implement",
+        label = "Codex implementer",
+        role = "implement",
+        group = "primary",
+        selected = false,
+      },
+      {
+        template_id = "template_codex_review",
+        label = "Codex reviewer",
+        role = "review",
+        group = "accessory",
+        accessory = true,
+        selected = true,
+      },
+    },
+  },
+})
+assert_eq(selected_by_update.ok, true, "update selects default template")
+assert_eq(selected_by_update.workspace.default_session_template_refs[2].selected, true, "second template is selected")
+
+local selected_spawn_request = spawn_default_session({
+  id = created.workspace.id,
+  session_id = "session-workspace-template-selected",
+})
+assert_eq(selected_spawn_request.ok, true, "spawn after selection succeeds")
+assert_eq(selected_spawn_request.daemon_request.template_id, "template_codex_review", "spawn uses tool-selected template")
+
+local singular = create({
+  name = "Legacy singular",
+  purpose = "Load old singular template records",
+  local_repo_ref = repo_ref("repo_legacy", "Legacy repo"),
+  spawn_target_ref = spawn_target_ref("target_codex_local", "Codex local"),
+  default_session_template_id = "template_legacy",
+})
+assert_eq(singular.ok, true, "singular template create succeeds")
+assert_eq(#singular.workspace.default_session_template_refs, 1, "singular template normalizes to one ref")
+assert_eq(singular.workspace.default_session_template_refs[1].template_id, "template_legacy", "singular template id preserved")
 
 local entity_rows = snapshot({})
 assert_eq(entity_rows.ok, true, "entity snapshot succeeds")
 assert_eq(entity_rows.entity_family, "botster-workspaces.workspace", "snapshot family")
-assert_eq(#entity_rows.rows, 2, "snapshot includes active rows")
+assert_eq(#entity_rows.rows, 3, "snapshot includes active rows")
 
 local deleted = delete({ id = created.workspace.id })
 assert_eq(deleted.ok, true, "delete succeeds")
@@ -312,8 +426,7 @@ assert_eq(deleted.workspace.status, "deleted", "delete marks deleted")
 assert_eq(#deleted.workspace.session_group.session_refs, 2, "delete preserves session references")
 
 local active_after_delete = list({})
-assert_eq(#active_after_delete.workspaces, 1, "deleted rows are excluded from default list")
-assert_eq(active_after_delete.workspaces[1].id, second.workspace.id, "remaining active row is listed")
+assert_eq(#active_after_delete.workspaces, 2, "deleted rows are excluded from default list")
 
 local recreated = create({
   name = "Product refactor",
@@ -325,7 +438,7 @@ assert_eq(recreated.ok, true, "deleted names do not block new active workspace")
 
 local restart_spec = dofile("plugin.lua")
 local restart_list = tool(restart_spec, "botster_workspaces.list")({})
-assert_eq(#restart_list.workspaces, 2, "state persists through plugin reload")
+assert_eq(#restart_list.workspaces, 3, "state persists through plugin reload")
 
 local app_surface = handler(spec, "workspaces_surface")({})
 assert_eq(app_surface.id, "botster-workspaces-app", "app surface renders")

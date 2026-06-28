@@ -28,11 +28,16 @@ socket.puts(JSON.generate({
       plugin_surface_render
       plugin_surface_action
     ],
-    minimum_conformance_fixture_revision: 2,
+    # The locked hub used by this repository reports conformance fixture
+    # revision 1; hub lifecycle fixtures use the same minimum for plugin
+    # surface action/render coverage.
+    minimum_conformance_fixture_revision: 1,
     client_name: "botster-workspaces-acceptance-smoke"
   }
 }))
-hello = JSON.parse(socket.gets)
+hello_line = socket.gets
+raise "daemon closed before hello" unless hello_line
+hello = JSON.parse(hello_line)
 assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
 
 def request(socket, payload)
@@ -65,6 +70,12 @@ def collect_text(node, out = [])
   out
 end
 
+def collect_terminal_output(response)
+  Array(response["events"]).filter_map do |event|
+    event["data"] if event["type"] == "terminal_output"
+  end.join
+end
+
 tools = request(socket, { type: "plugin_mcp_list_tools" })
 tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
 %w[
@@ -73,10 +84,19 @@ tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
   botster_workspaces.show
   botster_workspaces.update
   botster_workspaces.delete
+  botster_workspaces.refresh_template_diagnostics
+  botster_workspaces.spawn_default_session
   botster_workspaces.entity_snapshot
 ].each do |name|
   assert(tool_names.include?(name), "missing plugin MCP tool #{name}")
 end
+
+templates = request(socket, { type: "list_session_templates" })
+assert(templates["kind"] == "session_templates", "daemon did not expose session templates")
+template = templates.fetch("session_templates").first
+assert(template, "enabled hub must expose at least one session template")
+template_id = template.fetch("template_id")
+target_id = template.fetch("target_id")
 
 create = call_tool(socket, "botster_workspaces.create", {
   name: workspace_name,
@@ -89,12 +109,20 @@ create = call_tool(socket, "botster_workspaces.create", {
     relative_worktree_hint: "worktrees/acceptance"
   },
   spawn_target_ref: {
-    target_id: "target_acceptance",
-    label: "Acceptance target",
+    target_id: target_id,
+    label: "Acceptance template target",
     kind: "agent",
     capability_ref: "spawn_target_acceptance"
   },
-  default_session_template_id: "template_acceptance"
+  default_session_template_refs: [
+    {
+      template_id: template_id,
+      label: "Acceptance template",
+      role: "acceptance",
+      group: "primary",
+      selected: true
+    }
+  ]
 })
 existing = false
 if create["ok"] == true
@@ -116,13 +144,13 @@ update = call_tool(socket, "botster_workspaces.update", {
         {
           session_uuid: "example-session-acceptance-1",
           role: "implement",
-          spawned_from_template_id: "template_acceptance",
+          spawned_from_template_id: template_id,
           status: "running"
         },
         {
           session_uuid: "example-session-acceptance-2",
           role: "verify",
-          spawned_from_template_id: "template_acceptance",
+          spawned_from_template_id: template_id,
           status: "queued"
         }
       ]
@@ -131,10 +159,58 @@ update = call_tool(socket, "botster_workspaces.update", {
 })
 assert(update.fetch("entity").fetch("session_count") == 2, "session grouping did not update")
 
+refresh = call_tool(socket, "botster_workspaces.refresh_template_diagnostics", {
+  id: workspace_id
+})
+assert(refresh["ok"] == true, "template diagnostic refresh failed")
+assert(refresh.fetch("workspace").fetch("default_session_template_refs").first.fetch("template_id") == template_id, "template reference was not preserved")
+
+template_session_id = "wst#{Process.pid % 10_000}#{Time.now.to_i % 100_000}"
+spawn_selection = call_tool(socket, "botster_workspaces.spawn_default_session", {
+  id: workspace_id,
+  session_id: template_session_id,
+  prompt: "Acceptance smoke workspace context"
+})
+assert(spawn_selection["ok"] == true, "workspace template spawn selection failed")
+assert(spawn_selection["hub_api"] == "spawn_session_template", "workspace did not select hub template spawn API")
+daemon_request = spawn_selection.fetch("daemon_request")
+assert(daemon_request.fetch("type") == "spawn_session_template", "workspace returned non-template spawn request")
+spawn_response = request(socket, daemon_request.transform_keys(&:to_sym))
+assert(spawn_response["kind"] == "spawned", "hub did not spawn from workspace-selected template")
+
+attach_response = request(socket, {
+  type: "attach",
+  session_id: template_session_id,
+  subscription_id: "workspaces-acceptance-smoke"
+})
+assert(attach_response["kind"] == "events", "template session attach returned #{attach_response["kind"]}")
+
+observed = +""
+deadline = Time.now + 5
+while Time.now < deadline
+  drain = request(socket, {
+    type: "drain",
+    session_id: template_session_id
+  })
+  assert(drain["kind"] == "events", "template session drain returned #{drain["kind"]}")
+  observed << collect_terminal_output(drain)
+  break if observed.include?("workspace-template-ready")
+
+  sleep 0.03
+end
+assert(observed.include?("workspace-template-ready"), "template session output was not observed: #{observed.inspect}")
+
+shutdown_template = request(socket, {
+  type: "shutdown_session",
+  session_id: template_session_id
+})
+assert(shutdown_template["kind"] == "events", "template session shutdown returned #{shutdown_template["kind"]}")
+
 list = call_tool(socket, "botster_workspaces.list", {})
 row = list.fetch("workspaces").find { |workspace| workspace["id"] == workspace_id }
 assert(row, "created workspace missing from list")
 assert(row["session_count"] == 2, "list row did not expose session count")
+assert(row["default_session_template_count"] == 1, "list row did not expose template count")
 
 show = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
 assert(show.fetch("workspace").fetch("session_group").fetch("session_refs").length == 2, "show did not preserve session refs")
@@ -155,6 +231,7 @@ assert(snapshot.fetch("rows").any? { |snapshot_row| snapshot_row["id"] == worksp
   text = collect_text(surface).join("\n")
   assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
   assert(text.include?("2 sessions"), "#{surface_id} surface missing session count")
+  assert(text.include?("Templates:"), "#{surface_id} surface missing template summary")
 end
 
-puts "script/hub_acceptance_smoke: ok workspace_id=#{workspace_id} existing=#{existing}"
+puts "script/hub_acceptance_smoke: ok workspace_id=#{workspace_id} template_id=#{template_id} existing=#{existing}"

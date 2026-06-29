@@ -73,6 +73,10 @@ or read arbitrary host filesystem paths.
 - Contract fixtures must not require a capability missing from the manifest.
 - Template spawn requests must use `spawn_session_template`, not raw process,
   command, PTY, spawn target, or filesystem fields.
+- Workspace spawn requests may pass only the proven context fields
+  `workspace_id`, `prompt`, `ticket_id`, and `branch_name`; cwd/env setup stays
+  in hub-approved template data, and plugin requests must not add target,
+  metadata, executable, argument, PTY, or filesystem overrides.
 - Docs and fixtures must remain path-neutral and free of operator-specific
   identifiers.
 - Project Pipelines behavior is outside this package contract.

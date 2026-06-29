@@ -655,16 +655,6 @@ local function spawn_default_session(arguments)
     },
   }
 
-  local capabilities = botster and botster.capabilities or {}
-  local session_templates = capabilities.session_templates
-  if session_templates and type(session_templates.spawn) == "function" then
-    local ok, result = pcall(session_templates.spawn, request)
-    if ok and result and result.ok ~= false then
-      return { ok = true, workspace_id = workspace.id, template_ref = copy(ref), hub_api = "spawn_session_template", spawn = result }
-    end
-    return error_result("hub_template_spawn_failed", result and result.error and (result.error.message or result.error.code) or tostring(result))
-  end
-
   return {
     ok = true,
     workspace_id = workspace.id,

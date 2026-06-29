@@ -42,10 +42,12 @@ plugin-owned role/template/status metadata, cache diagnostics for referenced hub
 session templates, and return read models identified as
 `botster-workspaces.workspace`. A workspace can request a selected default
 template through the hub-owned `spawn_session_template` API with workspace
-context; it does not construct raw process, PTY, spawn target, command, or
-filesystem requests. Delete marks a workspace deleted and does not delete hub
-sessions, package records, spawn targets, repository content, or host filesystem
-content.
+context limited to the proven workspace id, prompt, ticket id, and branch name
+fields. Cwd/env materialization remains hub template data, not plugin-authored
+spawn payload. The plugin does not construct raw process, PTY, spawn target,
+command, cwd/env override, metadata, or filesystem requests. Delete marks a
+workspace deleted and does not delete hub sessions, package records, spawn
+targets, repository content, or host filesystem content.
 
 Default template selection is currently tool-driven. Clients select a workspace
 default by calling `botster_workspaces.update` with

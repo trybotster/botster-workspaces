@@ -138,8 +138,11 @@ templates do not delete references.
 
 Spawning a workspace default session selects the requested template id or the
 selected/default reference and requests `spawn_session_template` from the hub.
-The request includes workspace context but does not contain raw executable,
-argument, PTY, or host path authority.
+The request includes workspace context limited to the proven `workspace_id`,
+`prompt`, `ticket_id`, and `branch_name` fields. It does not contain raw target
+ids, cwd/env overrides, executable, argument, metadata context, PTY, or host path
+authority. Cwd/env setup remains hub-approved template data resolved by the
+daemon, not workspace-plugin request construction.
 
 ### Delete Or Archive
 

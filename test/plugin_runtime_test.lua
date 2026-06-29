@@ -293,6 +293,10 @@ assert_eq(spawn_request.hub_api, "spawn_session_template", "spawn uses hub templ
 assert_eq(spawn_request.daemon_request.type, "spawn_session_template", "spawn request is daemon template spawn")
 assert_eq(spawn_request.daemon_request.template_id, "template_codex_implement", "spawn uses selected template")
 assert_eq(spawn_request.daemon_request.request.context.workspace_id, created.workspace.id, "spawn passes workspace context")
+assert_eq(spawn_request.daemon_request.target_id, nil, "spawn request does not echo hub-owned target id")
+assert_eq(spawn_request.daemon_request.request.cwd, nil, "spawn request does not inject unproven cwd override")
+assert_eq(spawn_request.daemon_request.request.env, nil, "spawn request does not inject unproven env override")
+assert_eq(spawn_request.daemon_request.request.context.metadata, nil, "spawn request does not inject unproven metadata context")
 
 local duplicate = create({
   name = "Product refactor",

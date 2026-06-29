@@ -175,6 +175,10 @@ assert(spawn_selection["ok"] == true, "workspace template spawn selection failed
 assert(spawn_selection["hub_api"] == "spawn_session_template", "workspace did not select hub template spawn API")
 daemon_request = spawn_selection.fetch("daemon_request")
 assert(daemon_request.fetch("type") == "spawn_session_template", "workspace returned non-template spawn request")
+assert(!daemon_request.key?("target_id"), "workspace must not echo hub-owned target_id into template spawn")
+assert(!daemon_request.fetch("request").key?("cwd"), "workspace must not inject unproven cwd override")
+assert(!daemon_request.fetch("request").key?("env"), "workspace must not inject unproven env override")
+assert(!daemon_request.dig("request", "context").key?("metadata"), "workspace must not inject unproven metadata context")
 spawn_response = request(socket, daemon_request.transform_keys(&:to_sym))
 assert(spawn_response["kind"] == "spawned", "hub did not spawn from workspace-selected template")
 

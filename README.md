@@ -9,7 +9,7 @@ botster-hub.
 ## Current scope
 
 This repository is an installable workspace plugin. It declares package
-metadata, an empty configuration schema, descriptor-backed app/settings surfaces,
+metadata, package-level workspace defaults, descriptor-backed app/settings surfaces,
 explicit workspace contract capabilities, and a Lua entrypoint with plugin-owned
 runtime operations.
 
@@ -97,18 +97,34 @@ botster-hub packages show --data-dir "$tmp_data_dir" botster-workspaces
 botster-hub packages enable --data-dir "$tmp_data_dir" botster-workspaces
 botster-hub packages show --data-dir "$tmp_data_dir" botster-workspaces
 botster-hub packages list --data-dir "$tmp_data_dir"
+botster-hub packages config --data-dir "$tmp_data_dir" botster-workspaces
+botster-hub packages config set --data-dir "$tmp_data_dir" botster-workspaces '{"archive_policy":{"type":"select","value":"archive"}}'
+botster-hub packages reload --data-dir "$tmp_data_dir" botster-workspaces
 ```
 
 The second `packages show` should report the package as enabled and expose the
-`configuration` schema with empty `groups` and `fields` arrays. The package has
-no required configuration values, so enablement should not report missing
-configuration diagnostics.
+`configuration` schema with the `archive_policy` field. The package has no
+required configuration values, so enablement should not report missing
+configuration diagnostics. A valid `packages config set` persists the selected
+package-global default through the hub package configuration path; an unsupported
+select value or unknown field should fail through the same path with a package
+configuration diagnostic. Reload the package after changing configuration so the
+plugin worker receives the refreshed effective values before creating new
+workspace records.
 
 For app/settings discovery, verify that the package row exposes the descriptor
 surfaces:
 
-- app surface: `workspaces`
-- settings surface: `workspaces-settings`
+- app surface: `workspaces`, icon `rectangle-group`
+- settings surface: `workspaces-settings`, icon `cog-6-tooth`
+
+Hub route descriptors are derived from the package surface descriptors and
+configuration schema. Clients should use these stable ids and paths:
+
+- app route id: `surface:workspaces`
+- app route path: `/packages/botster-workspaces/surfaces/workspaces`
+- package settings route id: `settings`
+- package settings route path: `/packages/botster-workspaces/settings`
 
 Both surfaces render structural UI from plugin-owned workspace state through the
 same hub plugin surface contract consumed by browser and TUI clients. The package

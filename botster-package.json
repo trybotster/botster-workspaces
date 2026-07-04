@@ -12,8 +12,25 @@
     { "surface": "filesystem", "scope": "workspace" }
   ],
   "configuration": {
-    "groups": [],
-    "fields": []
+    "groups": [
+      {
+        "id": "workspace_defaults",
+        "label": "Workspace defaults"
+      }
+    ],
+    "fields": [
+      {
+        "key": "archive_policy",
+        "type": "select",
+        "label": "Archive policy",
+        "group": "workspace_defaults",
+        "default": { "type": "select", "value": "mark_deleted" },
+        "options": [
+          { "value": "mark_deleted", "label": "Mark deleted" },
+          { "value": "archive", "label": "Archive" }
+        ]
+      }
+    ]
   },
   "surfaces": [
     {
@@ -21,6 +38,7 @@
       "kind": "app",
       "title": "Workspaces",
       "description": "Descriptor-backed workspace package surface bound to workspace entity state.",
+      "icon": "rectangle-group",
       "order": 1,
       "category": "workspace",
       "supports": ["render"]
@@ -29,7 +47,8 @@
       "id": "workspaces-settings",
       "kind": "settings",
       "title": "Workspaces Settings",
-      "description": "Descriptor-backed workspace settings surface with empty required configuration.",
+      "description": "Descriptor-backed workspace settings surface for package-level workspace defaults.",
+      "icon": "cog-6-tooth",
       "order": 2,
       "category": "workspace",
       "supports": ["render"]

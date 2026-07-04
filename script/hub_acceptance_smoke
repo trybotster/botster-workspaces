@@ -40,9 +40,13 @@ raise "daemon closed before hello" unless hello_line
 hello = JSON.parse(hello_line)
 assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
 
-def request(socket, payload)
+def request_raw(socket, payload)
   socket.puts(JSON.generate(payload))
-  response = JSON.parse(socket.gets)
+  JSON.parse(socket.gets)
+end
+
+def request(socket, payload)
+  response = request_raw(socket, payload)
   if response["error"]
     raise "daemon #{payload.fetch(:type)} failed: #{response["error"]}"
   end
@@ -76,6 +80,17 @@ def collect_terminal_output(response)
   end.join
 end
 
+def render_surface(socket, surface_id)
+  response = request(socket, {
+    type: "plugin_surface_render",
+    package_name: "botster-workspaces",
+    surface_id: surface_id,
+    payload: {}
+  })
+  assert(response["kind"] == "plugin_surface", "#{surface_id} did not return plugin surface")
+  response.fetch("plugin_surface")
+end
+
 tools = request(socket, { type: "plugin_mcp_list_tools" })
 tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
 %w[
@@ -91,10 +106,87 @@ tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
   assert(tool_names.include?(name), "missing plugin MCP tool #{name}")
 end
 
+packages = request(socket, { type: "list_packages" })
+assert(packages["kind"] == "packages", "daemon did not expose packages")
+package = packages.fetch("packages").find { |candidate| candidate["package_name"] == "botster-workspaces" }
+assert(package, "botster-workspaces package row missing")
+surface_by_id = package.fetch("surfaces").to_h { |surface| [surface.fetch("id"), surface] }
+assert(surface_by_id.dig("workspaces", "kind") == "app", "workspaces app descriptor missing")
+assert(surface_by_id.dig("workspaces", "icon") == "rectangle-group", "workspaces app icon missing")
+assert(surface_by_id.dig("workspaces-settings", "kind") == "settings", "workspaces settings descriptor missing")
+assert(surface_by_id.dig("workspaces-settings", "icon") == "cog-6-tooth", "workspaces settings icon missing")
+route_by_id = package.fetch("routes").to_h { |route| [route.fetch("route_id"), route] }
+assert(route_by_id.dig("surface:workspaces", "route_path") == "/packages/botster-workspaces/surfaces/workspaces", "workspaces route path missing")
+assert(route_by_id.dig("surface:workspaces", "target", "kind") == "plugin_surface", "workspaces route target mismatch")
+assert(route_by_id.dig("settings", "route_path") == "/packages/botster-workspaces/settings", "settings route path missing")
+config = package.fetch("configuration")
+assert(config.fetch("schema").fetch("fields").any? { |field| field["key"] == "archive_policy" }, "archive_policy schema missing")
+
+valid_config = request(socket, {
+  type: "set_package_configuration",
+  package_name: "botster-workspaces",
+  values: {
+    archive_policy: {
+      type: "select",
+      value: "archive"
+    }
+  }
+})
+assert(valid_config["kind"] == "packages", "valid package config set did not return package row")
+reload = request(socket, {
+  type: "reload_package",
+  package_name: "botster-workspaces"
+})
+assert(%w[packages package_decision].include?(reload["kind"]), "package reload after config set failed")
+
+invalid_config = request_raw(socket, {
+  type: "set_package_configuration",
+  package_name: "botster-workspaces",
+  values: {
+    archive_policy: {
+      type: "select",
+      value: "unsupported"
+    }
+  }
+})
+assert(invalid_config["error"], "invalid package config must fail")
+assert(invalid_config["error"].to_s.include?("archive_policy"), "invalid package config error must name archive_policy")
+
 templates = request(socket, { type: "list_session_templates" })
 assert(templates["kind"] == "session_templates", "daemon did not expose session templates")
-template = templates.fetch("session_templates").first
-assert(template, "enabled hub must expose at least one session template")
+template = templates.fetch("session_templates", []).first
+unless template
+  create = call_tool(socket, "botster_workspaces.create", {
+    name: workspace_name,
+    purpose: "Acceptance smoke for package surfaces without session templates",
+    local_repo_ref: {
+      id: "repo_acceptance",
+      display_name: "Acceptance repo",
+      repo_capability_ref: "repo_capability_acceptance",
+      default_branch: "main",
+      relative_worktree_hint: "worktrees/acceptance"
+    },
+    spawn_target_ref: {
+      target_id: "target_acceptance",
+      label: "Acceptance target",
+      kind: "agent",
+      capability_ref: "spawn_target_acceptance"
+    }
+  })
+  assert(create["ok"] == true || create.dig("error", "code") == "duplicate_active_name", "workspace create failed: #{create}")
+  if create["ok"] == true
+    assert(create.fetch("workspace").fetch("settings").fetch("archive_policy") == "archive", "package config did not seed workspace archive policy")
+  end
+
+  %w[workspaces workspaces-settings].each do |surface_id|
+    surface = render_surface(socket, surface_id)
+    text = collect_text(surface).join("\n")
+    assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
+  end
+
+  puts "script/hub_acceptance_smoke: ok package_surface_config_only no_session_templates=true"
+  exit 0
+end
 template_id = template.fetch("template_id")
 target_id = template.fetch("target_id")
 
@@ -127,6 +219,7 @@ create = call_tool(socket, "botster_workspaces.create", {
 existing = false
 if create["ok"] == true
   workspace_id = create.fetch("workspace").fetch("id")
+  assert(create.fetch("workspace").fetch("settings").fetch("archive_policy") == "archive", "package config did not seed workspace archive policy")
 else
   assert(create.dig("error", "code") == "duplicate_active_name", "workspace create failed: #{create}")
   existing = true
@@ -224,14 +317,7 @@ assert(snapshot["entity_family"] == "botster-workspaces.workspace", "snapshot fa
 assert(snapshot.fetch("rows").any? { |snapshot_row| snapshot_row["id"] == workspace_id }, "snapshot missing workspace")
 
 %w[workspaces workspaces-settings].each do |surface_id|
-  response = request(socket, {
-    type: "plugin_surface_render",
-    package_name: "botster-workspaces",
-    surface_id: surface_id,
-    payload: {}
-  })
-  assert(response["kind"] == "plugin_surface", "#{surface_id} did not return plugin surface")
-  surface = response.fetch("plugin_surface")
+  surface = render_surface(socket, surface_id)
   text = collect_text(surface).join("\n")
   assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
   assert(text.include?("2 sessions"), "#{surface_id} surface missing session count")

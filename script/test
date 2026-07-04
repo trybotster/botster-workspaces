@@ -42,6 +42,11 @@ assert(manifest["capabilities"] == manifest_capabilities, "manifest capabilities
 configuration = manifest.fetch("configuration")
 assert(configuration["groups"].is_a?(Array), "configuration.groups must be an array")
 assert(configuration["fields"].is_a?(Array), "configuration.fields must be an array")
+archive_policy = configuration["fields"].find { |field| field["key"] == "archive_policy" }
+assert(archive_policy, "configuration must declare archive_policy")
+assert(archive_policy["type"] == "select", "archive_policy must be a select field")
+assert(archive_policy["default"] == { "type" => "select", "value" => "mark_deleted" }, "archive_policy default must be mark_deleted")
+assert(archive_policy["options"].map { |option| option["value"] } == %w[mark_deleted archive], "archive_policy options must be stable")
 
 entrypoints = manifest.fetch("entrypoints")
 assert(entrypoints.is_a?(Array) && entrypoints.length == 1, "exactly one Lua entrypoint is expected")
@@ -70,6 +75,14 @@ end
 
 surfaces = manifest.fetch("surfaces")
 assert(surfaces.is_a?(Array), "surfaces must be an array")
+supported_surface_keys = %w[id kind title description icon order category supports]
+surfaces.each do |surface|
+  unsupported = surface.keys - supported_surface_keys
+  assert(unsupported.empty?, "surface #{surface["id"]} uses unsupported descriptor keys: #{unsupported.join(", ")}")
+  assert(surface["supports"] == ["render"], "surface #{surface["id"]} must support render")
+  assert(surface["icon"].is_a?(String) && !surface["icon"].empty?, "surface #{surface["id"]} must declare an icon")
+  assert(surface["category"] == "workspace", "surface #{surface["id"]} must declare workspace category")
+end
 surface_by_kind = surfaces.group_by { |surface| surface["kind"] }
 assert(surface_by_kind["app"]&.any? { |surface| surface["id"] == "workspaces" }, "workspaces app surface is required")
 assert(surface_by_kind["settings"]&.any? { |surface| surface["id"] == "workspaces-settings" }, "workspaces settings surface is required")
@@ -219,6 +232,15 @@ assert(entity_families.any? { |family| family["name"] == "botster-workspaces.wor
   packages\ show
   packages\ enable
   packages\ list
+  packages\ config
+  packages\ config\ set
+  packages\ reload
+  surface:workspaces
+  /packages/botster-workspaces/surfaces/workspaces
+  /packages/botster-workspaces/settings
+  archive_policy
+  rectangle-group
+  cog-6-tooth
   --path\ ../botster-workspaces
   app\ surface
   settings\ surface

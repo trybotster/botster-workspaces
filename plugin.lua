@@ -44,6 +44,31 @@ local function copy(value)
   return out
 end
 
+local function package_config_values()
+  local capabilities = botster and botster.capabilities or {}
+  local config = capabilities.config
+  if not config or type(config.get) ~= "function" then
+    return {}
+  end
+
+  local ok, result = pcall(config.get)
+  if not ok or type(result) ~= "table" or type(result.values) ~= "table" then
+    return {}
+  end
+  return result.values
+end
+
+local function configured_archive_policy()
+  local value = package_config_values().archive_policy
+  if type(value) == "table" then
+    value = value.value
+  end
+  if value == "archive" or value == "mark_deleted" then
+    return value
+  end
+  return "mark_deleted"
+end
+
 local function trim(value)
   if type(value) ~= "string" then
     return nil
@@ -198,7 +223,7 @@ local function default_settings(workspace_id, repo_ref, spawn_target_ref, templa
     default_spawn_target_id = spawn_target_ref.target_id,
     default_session_template_id = template_id,
     default_session_template_refs = {},
-    archive_policy = "mark_deleted",
+    archive_policy = configured_archive_policy(),
   }
 end
 

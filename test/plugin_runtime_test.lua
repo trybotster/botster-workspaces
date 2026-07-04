@@ -48,6 +48,17 @@ botster = {
         }
       end,
     },
+    config = {
+      get = function()
+        return {
+          values = {
+            archive_policy = { type = "select", value = "mark_deleted" },
+          },
+          missing_required = {},
+          diagnostics = {},
+        }
+      end,
+    },
   },
   register = function(spec)
     registrations[#registrations + 1] = spec
@@ -265,6 +276,7 @@ assert_eq(created.ok, true, "create succeeds")
 assert_eq(created.workspace.status, "active", "create marks active")
 assert_eq(created.workspace.session_group.workspace_id, created.workspace.id, "session group is workspace scoped")
 assert_eq(#created.workspace.session_group.session_refs, 0, "create starts with no session refs")
+assert_eq(created.workspace.settings.archive_policy, "mark_deleted", "package config seeds workspace archive policy")
 assert_eq(created.entity.entity_family, "botster-workspaces.workspace", "entity family is correct")
 assert_eq(created.entity.repo_label, "Main application repo", "entity exposes repo label")
 assert_eq(created.entity.spawn_target_label, "Codex local", "entity exposes spawn target label")
@@ -440,9 +452,35 @@ local recreated = create({
 })
 assert_eq(recreated.ok, true, "deleted names do not block new active workspace")
 
+botster.capabilities.config.get = function()
+  return {
+    values = {
+      archive_policy = { type = "select", value = "archive" },
+    },
+    missing_required = {},
+    diagnostics = {},
+  }
+end
+local archived_default = create({
+  name = "Archive default",
+  purpose = "Configured package default",
+  local_repo_ref = repo_ref("repo_archive_default", "Archive default repo"),
+  spawn_target_ref = spawn_target_ref("target_codex_local", "Codex local"),
+})
+assert_eq(archived_default.workspace.settings.archive_policy, "archive", "configured archive policy seeds new workspaces")
+botster.capabilities.config.get = function()
+  return {
+    values = {
+      archive_policy = { type = "select", value = "mark_deleted" },
+    },
+    missing_required = {},
+    diagnostics = {},
+  }
+end
+
 local restart_spec = dofile("plugin.lua")
 local restart_list = tool(restart_spec, "botster_workspaces.list")({})
-assert_eq(#restart_list.workspaces, 3, "state persists through plugin reload")
+assert_eq(#restart_list.workspaces, 4, "state persists through plugin reload")
 
 local app_surface = handler(spec, "workspaces_surface")({})
 assert_eq(app_surface.id, "botster-workspaces-app", "app surface renders")

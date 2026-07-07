@@ -142,6 +142,52 @@ local function error_result(code, message, fields)
   return result
 end
 
+local function action_result(arguments, surface_id, action_id, node_id, state, extra)
+  local result = {
+    request_id = arguments.request_id or action_id,
+    surface_id = surface_id,
+    action_id = action_id,
+    node_id = node_id,
+    state = state,
+  }
+  for key, value in pairs(extra or {}) do
+    result[key] = value
+  end
+  return result
+end
+
+local function ui_field_errors(fields, message)
+  local errors = {}
+  local field_ids = {
+    name = "botster-workspaces-create-name",
+    purpose = "botster-workspaces-create-purpose",
+    local_repo_ref = "botster-workspaces-create-repo-id",
+    spawn_target_ref = "botster-workspaces-create-spawn-target-id",
+  }
+  for _, field in ipairs(fields or {}) do
+    errors[field_ids[field] or field] = { message }
+  end
+  return errors
+end
+
+local function form_value(arguments, key, node_id)
+  local values = type(arguments.values) == "table" and arguments.values or {}
+  local value = values[node_id] or values[key] or arguments[node_id] or arguments[key]
+  if type(value) == "table" and value.value ~= nil then
+    return value.value
+  end
+  return value
+end
+
+local function action_error(arguments, surface_id, action_id, node_id, result)
+  local validation = result.error and result.error.code == "validation_failed"
+  return action_result(arguments, surface_id, action_id, node_id, validation and "rejected" or "error", {
+    field_errors = validation and ui_field_errors(result.fields, result.error.message) or {},
+    form_errors = { result.error and result.error.message or "workspace action failed" },
+    error = result.error and result.error.message or "workspace action failed",
+  })
+end
+
 local function validate_repo_ref(ref)
   if type(ref) ~= "table" then
     return false
@@ -725,6 +771,82 @@ local function entity_snapshot()
   return { ok = true, entity_family = ENTITY_FAMILY, rows = rows }
 end
 
+local function create_workspace_from_surface(arguments)
+  local result = create_workspace({
+    name = form_value(arguments, "name", "botster-workspaces-create-name"),
+    purpose = form_value(arguments, "purpose", "botster-workspaces-create-purpose"),
+    local_repo_ref = {
+      id = form_value(arguments, "repo_id", "botster-workspaces-create-repo-id"),
+      display_name = form_value(arguments, "repo_display_name", "botster-workspaces-create-repo-display-name"),
+      repo_capability_ref = form_value(arguments, "repo_capability_ref", "botster-workspaces-create-repo-capability-ref"),
+      default_branch = form_value(arguments, "repo_default_branch", "botster-workspaces-create-repo-default-branch"),
+      relative_worktree_hint = form_value(arguments, "repo_worktree_hint", "botster-workspaces-create-repo-worktree-hint"),
+    },
+    spawn_target_ref = {
+      target_id = form_value(arguments, "spawn_target_id", "botster-workspaces-create-spawn-target-id"),
+      label = form_value(arguments, "spawn_target_label", "botster-workspaces-create-spawn-target-label"),
+      kind = form_value(arguments, "spawn_target_kind", "botster-workspaces-create-spawn-target-kind"),
+      capability_ref = form_value(arguments, "spawn_target_capability_ref", "botster-workspaces-create-spawn-target-capability-ref"),
+    },
+    default_session_template_id = form_value(arguments, "default_session_template_id", "botster-workspaces-create-default-session-template-id"),
+  })
+  if not result.ok then
+    return action_error(
+      arguments,
+      "workspaces",
+      "botster_workspaces.create_workspace",
+      "botster-workspaces-create-form",
+      result
+    )
+  end
+  return action_result(arguments, "workspaces", "botster_workspaces.create_workspace", "botster-workspaces-create-form", "accepted", {
+    normalized_values = {
+      name = result.workspace.name,
+      purpose = result.workspace.purpose,
+      workspace_id = result.workspace.id,
+    },
+    payload = {
+      message = "Workspace created",
+      workspace = result.workspace,
+      entity = result.entity,
+    },
+  })
+end
+
+local function spawn_default_session_from_surface(arguments)
+  local result = spawn_default_session({
+    id = form_value(arguments, "workspace_id", "botster-workspaces-spawn-workspace-id") or arguments.id,
+    template_id = form_value(arguments, "template_id", "botster-workspaces-spawn-template-id"),
+    session_id = form_value(arguments, "session_id", "botster-workspaces-spawn-session-id"),
+    prompt = form_value(arguments, "prompt", "botster-workspaces-spawn-prompt"),
+    ticket_id = form_value(arguments, "ticket_id", "botster-workspaces-spawn-ticket-id"),
+    branch_name = form_value(arguments, "branch_name", "botster-workspaces-spawn-branch-name"),
+  })
+  if not result.ok then
+    return action_error(
+      arguments,
+      "workspaces",
+      "botster_workspaces.spawn_default_session",
+      "botster-workspaces-spawn-form",
+      result
+    )
+  end
+  return action_result(arguments, "workspaces", "botster_workspaces.spawn_default_session", "botster-workspaces-spawn-form", "accepted", {
+    normalized_values = {
+      workspace_id = result.workspace_id,
+      template_id = result.template_ref.template_id,
+      session_id = result.daemon_request.session_id,
+    },
+    payload = {
+      message = "Workspace session spawn request prepared",
+      workspace_id = result.workspace_id,
+      template_ref = result.template_ref,
+      hub_api = result.hub_api,
+      daemon_request = result.daemon_request,
+    },
+  })
+end
+
 local function text_node(id, text, tone)
   local props = { text = text }
   if tone then
@@ -734,6 +856,126 @@ local function text_node(id, text, tone)
     type = "text",
     id = id,
     props = props,
+  }
+end
+
+local function form_field(id, name, label, options)
+  options = options or {}
+  local schema = {
+    kind = "text",
+    name = name,
+    label = label,
+  }
+  for key, value in pairs(options) do
+    schema[key] = value
+  end
+  return {
+    type = "form_field",
+    id = id,
+    props = {
+      schema = schema,
+    },
+  }
+end
+
+local function button_node(id, label, action)
+  return {
+    type = "button",
+    id = id,
+    props = {
+      label = label,
+      action = {
+        id = action,
+      },
+    },
+  }
+end
+
+local function create_workspace_form()
+  return {
+    type = "form",
+    id = "botster-workspaces-create-form",
+    children = {
+      form_field("botster-workspaces-create-name", "name", "Name", {
+        placeholder = "Product refactor",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-purpose", "purpose", "Purpose", {
+        placeholder = "Coordinate implementation and review sessions",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-repo-id", "repo_id", "Repo reference id", {
+        placeholder = "repo_main",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-repo-display-name", "repo_display_name", "Repo label", {
+        placeholder = "Main application repo",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-repo-capability-ref", "repo_capability_ref", "Repo capability", {
+        placeholder = "repo_capability_main",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-repo-default-branch", "repo_default_branch", "Default branch", {
+        default = "main",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-repo-worktree-hint", "repo_worktree_hint", "Worktree hint", {
+        placeholder = "worktrees/product-refactor",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-spawn-target-id", "spawn_target_id", "Spawn target id", {
+        placeholder = "target_codex_local",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-spawn-target-label", "spawn_target_label", "Spawn target label", {
+        placeholder = "Codex local",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-spawn-target-kind", "spawn_target_kind", "Spawn target kind", {
+        default = "agent",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-spawn-target-capability-ref", "spawn_target_capability_ref", "Spawn capability", {
+        placeholder = "spawn_target_codex_local",
+        required = true,
+      }),
+      form_field("botster-workspaces-create-default-session-template-id", "default_session_template_id", "Default template", {
+        placeholder = "template_codex_implement",
+      }),
+      button_node("botster-workspaces-create-submit", "Create workspace", "botster_workspaces.create_workspace"),
+    },
+  }
+end
+
+local function spawn_session_form(rows)
+  local first_workspace_id = rows[1] and rows[1].id or nil
+  return {
+    type = "form",
+    id = "botster-workspaces-spawn-form",
+    children = {
+      form_field("botster-workspaces-spawn-workspace-id", "workspace_id", "Workspace id", {
+        default = first_workspace_id,
+        placeholder = "ws_product_refactor_1",
+        required = true,
+      }),
+      form_field("botster-workspaces-spawn-template-id", "template_id", "Template override", {
+        placeholder = "Use selected default when blank",
+      }),
+      form_field("botster-workspaces-spawn-session-id", "session_id", "Session id", {
+        placeholder = "Generated when blank",
+      }),
+      form_field("botster-workspaces-spawn-prompt", "prompt", "Prompt", {
+        placeholder = "Start from this workspace context",
+      }),
+      form_field("botster-workspaces-spawn-ticket-id", "ticket_id", "Ticket id", {
+        placeholder = "Optional",
+      }),
+      form_field("botster-workspaces-spawn-branch-name", "branch_name", "Branch", {
+        placeholder = "Optional",
+      }),
+      button_node("botster-workspaces-spawn-submit", "Spawn default session", "botster_workspaces.spawn_default_session"),
+    },
   }
 end
 
@@ -805,6 +1047,10 @@ local function workspaces_surface()
     },
     children = {
       text_node("botster-workspaces-read-model", "Read model: " .. ENTITY_FAMILY, "muted"),
+      text_node("botster-workspaces-create-heading", "Create workspace"),
+      create_workspace_form(),
+      text_node("botster-workspaces-spawn-heading", "Spawn workspace session"),
+      spawn_session_form(rows),
       {
         type = "list",
         id = "botster-workspaces-list",
@@ -866,6 +1112,26 @@ return botster.register({
         surface_id = "workspaces-settings",
       },
       call = settings_surface,
+    },
+    {
+      id = "create_workspace_action",
+      kind = "ui_action",
+      descriptor_id = "botster_workspaces.create_workspace",
+      descriptor = {
+        action_id = "botster_workspaces.create_workspace",
+        surface_id = "workspaces",
+      },
+      call = create_workspace_from_surface,
+    },
+    {
+      id = "spawn_default_session_action",
+      kind = "ui_action",
+      descriptor_id = "botster_workspaces.spawn_default_session",
+      descriptor = {
+        action_id = "botster_workspaces.spawn_default_session",
+        surface_id = "workspaces",
+      },
+      call = spawn_default_session_from_surface,
     },
   },
   tools = {

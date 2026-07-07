@@ -96,6 +96,15 @@ local function handler(spec, id)
   error("missing handler " .. id)
 end
 
+local function registered_handler(spec, id)
+  for _, candidate in ipairs(spec.handlers or {}) do
+    if candidate.id == id then
+      return candidate
+    end
+  end
+  error("missing handler " .. id)
+end
+
 local function repo_ref(id, label)
   return {
     id = id,
@@ -236,6 +245,8 @@ assert_true(tool(spec, "botster_workspaces.delete"), "delete tool is registered"
 assert_true(tool(spec, "botster_workspaces.refresh_template_diagnostics"), "template diagnostics tool is registered")
 assert_true(tool(spec, "botster_workspaces.spawn_default_session"), "template spawn tool is registered")
 assert_true(tool(spec, "botster_workspaces.entity_snapshot"), "entity snapshot tool is registered")
+assert_eq(registered_handler(spec, "create_workspace_action").kind, "ui_action", "create workspace action is registered")
+assert_eq(registered_handler(spec, "spawn_default_session_action").kind, "ui_action", "spawn default session action is registered")
 
 local create = tool(spec, "botster_workspaces.create")
 local list = tool(spec, "botster_workspaces.list")
@@ -245,10 +256,16 @@ local delete = tool(spec, "botster_workspaces.delete")
 local refresh_templates = tool(spec, "botster_workspaces.refresh_template_diagnostics")
 local spawn_default_session = tool(spec, "botster_workspaces.spawn_default_session")
 local snapshot = tool(spec, "botster_workspaces.entity_snapshot")
+local create_workspace_action = handler(spec, "create_workspace_action")
+local spawn_default_session_action = handler(spec, "spawn_default_session_action")
 
 local missing = create({})
 assert_eq(missing.ok, false, "create rejects missing required fields")
 assert_eq(missing.error.code, "validation_failed", "missing fields returns validation_failed")
+
+local missing_action = create_workspace_action({})
+assert_eq(missing_action.state, "rejected", "create action rejects missing fields")
+assert_true(missing_action.field_errors["botster-workspaces-create-name"] ~= nil, "create action returns field errors")
 
 local created = create({
   name = "Product refactor",
@@ -482,10 +499,50 @@ local restart_spec = dofile("plugin.lua")
 local restart_list = tool(restart_spec, "botster_workspaces.list")({})
 assert_eq(#restart_list.workspaces, 4, "state persists through plugin reload")
 
+local ui_created = create_workspace_action({
+  values = {
+    ["botster-workspaces-create-name"] = { type = "string", value = "UI created workspace" },
+    ["botster-workspaces-create-purpose"] = { type = "string", value = "Create through plugin surface action" },
+    ["botster-workspaces-create-repo-id"] = { type = "string", value = "repo_ui" },
+    ["botster-workspaces-create-repo-display-name"] = { type = "string", value = "UI repo" },
+    ["botster-workspaces-create-repo-capability-ref"] = { type = "string", value = "repo_capability_ui" },
+    ["botster-workspaces-create-repo-default-branch"] = { type = "string", value = "main" },
+    ["botster-workspaces-create-repo-worktree-hint"] = { type = "string", value = "worktrees/ui" },
+    ["botster-workspaces-create-spawn-target-id"] = { type = "string", value = "target_ui" },
+    ["botster-workspaces-create-spawn-target-label"] = { type = "string", value = "UI target" },
+    ["botster-workspaces-create-spawn-target-kind"] = { type = "string", value = "agent" },
+    ["botster-workspaces-create-spawn-target-capability-ref"] = { type = "string", value = "spawn_target_ui" },
+    ["botster-workspaces-create-default-session-template-id"] = { type = "string", value = "template_ui" },
+  },
+})
+assert_eq(ui_created.state, "accepted", "create action accepts valid workspace")
+assert_eq(ui_created.payload.entity.name, "UI created workspace", "create action returns entity")
+
+local ui_spawn = spawn_default_session_action({
+  values = {
+    ["botster-workspaces-spawn-workspace-id"] = { type = "string", value = ui_created.payload.workspace.id },
+    ["botster-workspaces-spawn-prompt"] = { type = "string", value = "Start from UI workspace" },
+  },
+})
+assert_eq(ui_spawn.state, "accepted", "spawn action accepts workspace with default template")
+assert_eq(ui_spawn.payload.hub_api, "spawn_session_template", "spawn action returns hub API")
+assert_eq(ui_spawn.payload.daemon_request.template_id, "template_ui", "spawn action uses workspace default template")
+assert_eq(ui_spawn.payload.daemon_request.request.context.prompt, "Start from UI workspace", "spawn action passes prompt context")
+
 local app_surface = handler(spec, "workspaces_surface")({})
 assert_eq(app_surface.id, "botster-workspaces-app", "app surface renders")
 assert_valid_surface_node(app_surface)
-assert_eq(app_surface.children[2].type, "list", "app surface uses valid list node")
+assert_eq(app_surface.children[2].props.text, "Create workspace", "app surface labels create form")
+assert_eq(app_surface.children[3].type, "form", "app surface renders create form")
+assert_eq(app_surface.children[3].children[1].type, "form_field", "create form exposes core form fields")
+assert_eq(app_surface.children[3].children[1].props.schema.name, "name", "create form field schema has submit name")
+assert_eq(app_surface.children[3].children[#app_surface.children[3].children].props.action.id, "botster_workspaces.create_workspace", "create form targets UI action")
+assert_eq(app_surface.children[4].props.text, "Spawn workspace session", "app surface labels spawn form")
+assert_eq(app_surface.children[5].type, "form", "app surface renders spawn form")
+assert_eq(app_surface.children[5].children[1].type, "form_field", "spawn form exposes core form fields")
+assert_eq(app_surface.children[5].children[1].props.schema.name, "workspace_id", "spawn form field schema has submit name")
+assert_eq(app_surface.children[5].children[#app_surface.children[5].children].props.action.id, "botster_workspaces.spawn_default_session", "spawn form targets UI action")
+assert_eq(app_surface.children[6].type, "list", "app surface uses valid list node")
 local app_text = {}
 collect_text(app_surface, app_text)
 assert_true(table.concat(app_text, "\n"):find("Product refactor", 1, true), "app surface renders workspace state")

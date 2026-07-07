@@ -13,7 +13,8 @@ declares the current admission shape:
 - `{ "surface": "mcp" }`: expose CRUD operations as plugin tools.
 - `{ "surface": "plugin_db", "scope": "botster-workspaces" }`: persist
   workspace runtime state under this plugin's namespace.
-- `{ "surface": "surfaces" }`: expose descriptor-backed app/settings surfaces.
+- `{ "surface": "surfaces" }`: expose descriptor-backed app/settings surfaces
+  targeted by explicit package navigation entries.
 - `{ "surface": "filesystem", "scope": "workspace" }`: resolve approved
   workspace-scoped repository references without raw host traversal.
 
@@ -24,7 +25,9 @@ The logical workspace contract remains:
   settings in plugin runtime data.
 - `mcp`: expose create/list/show/update/delete and entity snapshot operations
   through Botster plugin tools.
-- `surfaces`: expose the package app and settings descriptors.
+- `surfaces`: expose the package app and settings descriptors. Package
+  `navigation` entries make those surfaces discoverable; host clients own
+  ordering, pinning, hiding, layout, padding, and sidebar placement.
 - `spawn_targets:read`: list or validate references to hub-owned spawn targets.
 - `sessions:read`: resolve hub-owned session references for grouping.
 - `process:spawn`: request a hub-owned process/session only through the hub
@@ -77,6 +80,9 @@ or read arbitrary host filesystem paths.
   `workspace_id`, `prompt`, `ticket_id`, and `branch_name`; cwd/env setup stays
   in hub-approved template data, and plugin requests must not add target,
   metadata, executable, argument, PTY, or filesystem overrides.
+- Navigation entries must target declared plugin surfaces and must not declare
+  global ordering, priority, pinning, hiding, placement, route layout, padding,
+  or local navigation policy.
 - Docs and fixtures must remain path-neutral and free of operator-specific
   identifiers.
 - Project Pipelines behavior is outside this package contract.

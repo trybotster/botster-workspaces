@@ -25,6 +25,7 @@ socket.puts(JSON.generate({
       sessions
       terminal_streaming
       resize
+      package_navigation
       plugin_surface_render
       plugin_surface_action
     ],
@@ -88,7 +89,15 @@ def render_surface(socket, surface_id)
     payload: {}
   })
   assert(response["kind"] == "plugin_surface", "#{surface_id} did not return plugin surface")
-  response.fetch("plugin_surface")
+  plugin_surface = response.fetch("plugin_surface")
+  assert(plugin_surface.fetch("package_name") == "botster-workspaces", "#{surface_id} package identity mismatch")
+  assert(plugin_surface.fetch("surface_id") == surface_id, "#{surface_id} surface identity mismatch")
+  snapshot = plugin_surface["ui_tree_snapshot"]
+  if snapshot
+    assert(snapshot.fetch("package_name") == "botster-workspaces", "#{surface_id} snapshot package identity mismatch")
+    assert(snapshot.fetch("surface_id") == surface_id, "#{surface_id} snapshot surface identity mismatch")
+  end
+  plugin_surface.fetch("body")
 end
 
 tools = request(socket, { type: "plugin_mcp_list_tools" })
@@ -115,12 +124,44 @@ assert(surface_by_id.dig("workspaces", "kind") == "app", "workspaces app descrip
 assert(surface_by_id.dig("workspaces", "icon") == "rectangle-group", "workspaces app icon missing")
 assert(surface_by_id.dig("workspaces-settings", "kind") == "settings", "workspaces settings descriptor missing")
 assert(surface_by_id.dig("workspaces-settings", "icon") == "cog-6-tooth", "workspaces settings icon missing")
+package.fetch("surfaces").each do |surface|
+  %w[order priority pinned hidden placement sidebar_position sort].each do |field|
+    assert(!surface.key?(field), "surface descriptor must not expose placement authority #{field}")
+  end
+end
 route_by_id = package.fetch("routes").to_h { |route| [route.fetch("route_id"), route] }
 assert(route_by_id.dig("surface:workspaces", "route_path") == "/packages/botster-workspaces/surfaces/workspaces", "workspaces route path missing")
 assert(route_by_id.dig("surface:workspaces", "target", "kind") == "plugin_surface", "workspaces route target mismatch")
+assert(route_by_id.dig("surface:workspaces-settings", "route_path") == "/packages/botster-workspaces/surfaces/workspaces-settings", "workspaces settings surface route path missing")
+assert(route_by_id.dig("surface:workspaces-settings", "target", "kind") == "plugin_surface", "workspaces settings surface route target mismatch")
 assert(route_by_id.dig("settings", "route_path") == "/packages/botster-workspaces/settings", "settings route path missing")
 config = package.fetch("configuration")
 assert(config.fetch("schema").fetch("fields").any? { |field| field["key"] == "archive_policy" }, "archive_policy schema missing")
+
+navigation_response = request(socket, { type: "list_package_navigation" })
+assert(navigation_response["kind"] == "package_navigation", "daemon did not expose package navigation registry")
+navigation_entries = navigation_response.fetch("package_navigation").select { |entry| entry["package_name"] == "botster-workspaces" }
+navigation_by_id = navigation_entries.to_h { |entry| [entry.fetch("item_id"), entry] }
+{
+  "workspaces" => "/packages/botster-workspaces/surfaces/workspaces",
+  "workspaces-settings" => "/packages/botster-workspaces/surfaces/workspaces-settings"
+}.each do |item_id, route_path|
+  entry = navigation_by_id.fetch(item_id) { raise "missing Workspaces navigation entry #{item_id}" }
+  assert(entry.fetch("route_id") == "surface:#{item_id}", "#{item_id} navigation route id mismatch")
+  assert(entry.fetch("route_path") == route_path, "#{item_id} navigation route path mismatch")
+  assert(entry.dig("target", "kind") == "plugin_surface", "#{item_id} navigation target kind mismatch")
+  assert(entry.dig("target", "surface_id") == item_id, "#{item_id} navigation target surface mismatch")
+  assert(entry.dig("source", "kind") == "surface", "#{item_id} navigation source kind mismatch")
+  assert(entry.dig("source", "surface_id") == item_id, "#{item_id} navigation source surface mismatch")
+  assert(entry["enabled"] == true, "#{item_id} navigation must be enabled")
+  assert(entry["blocked"] == false, "#{item_id} navigation must not be blocked")
+  assert(entry.fetch("diagnostics", []).empty?, "#{item_id} navigation diagnostics must be empty")
+  %w[order priority pinned hidden placement sidebar_position sort].each do |field|
+    assert(!entry.key?(field), "#{item_id} navigation must not expose placement authority #{field}")
+  end
+  surface = render_surface(socket, entry.dig("target", "surface_id"))
+  assert(surface.is_a?(Hash) && surface["type"].is_a?(String), "#{item_id} navigation target did not render a UiNode surface")
+end
 
 valid_config = request(socket, {
   type: "set_package_configuration",

@@ -112,17 +112,29 @@ configuration diagnostic. Reload the package after changing configuration so the
 plugin worker receives the refreshed effective values before creating new
 workspace records.
 
-For app/settings discovery, verify that the package row exposes the descriptor
-surfaces:
+For app/settings discovery, verify that the package row exposes explicit
+package navigation entries and descriptor surfaces. Navigation entries declare
+that existing plugin surfaces are discoverable by host clients; they do not
+declare global ordering, priority, pinning, hiding, sidebar placement, route
+layout, padding, or local navigation. Browser and TUI clients own presentation
+placement over the stable navigation and route ids. Surface root `UiNode`s own
+only the page content rendered through the plugin surface contract.
+The daemon production path is `list_package_navigation`, which returns
+`package_navigation` rows admitted by the hub.
 
 - app surface: `workspaces`, icon `rectangle-group`
-- settings surface: `workspaces-settings`, icon `cog-6-tooth`
+- settings surface: `workspaces-settings`, label `Workspaces Settings`, icon
+  `cog-6-tooth`
 
 Hub route descriptors are derived from the package surface descriptors and
 configuration schema. Clients should use these stable ids and paths:
 
+- app navigation item id: `workspaces`
+- settings navigation item id: `workspaces-settings`
 - app route id: `surface:workspaces`
 - app route path: `/packages/botster-workspaces/surfaces/workspaces`
+- settings surface route id: `surface:workspaces-settings`
+- settings surface route path: `/packages/botster-workspaces/surfaces/workspaces-settings`
 - package settings route id: `settings`
 - package settings route path: `/packages/botster-workspaces/settings`
 

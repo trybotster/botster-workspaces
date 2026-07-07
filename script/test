@@ -75,10 +75,14 @@ end
 
 surfaces = manifest.fetch("surfaces")
 assert(surfaces.is_a?(Array), "surfaces must be an array")
-supported_surface_keys = %w[id kind title description icon order category supports]
+supported_surface_keys = %w[id kind title description icon category supports]
+forbidden_placement_keys = %w[order priority pinned hidden placement sidebar_position sort section]
 surfaces.each do |surface|
   unsupported = surface.keys - supported_surface_keys
   assert(unsupported.empty?, "surface #{surface["id"]} uses unsupported descriptor keys: #{unsupported.join(", ")}")
+  forbidden_placement_keys.each do |key|
+    assert(!surface.key?(key), "surface #{surface["id"]} must not declare placement authority #{key}")
+  end
   assert(surface["supports"] == ["render"], "surface #{surface["id"]} must support render")
   assert(surface["icon"].is_a?(String) && !surface["icon"].empty?, "surface #{surface["id"]} must declare an icon")
   assert(surface["category"] == "workspace", "surface #{surface["id"]} must declare workspace category")
@@ -86,6 +90,25 @@ end
 surface_by_kind = surfaces.group_by { |surface| surface["kind"] }
 assert(surface_by_kind["app"]&.any? { |surface| surface["id"] == "workspaces" }, "workspaces app surface is required")
 assert(surface_by_kind["settings"]&.any? { |surface| surface["id"] == "workspaces-settings" }, "workspaces settings surface is required")
+surface_ids = surfaces.map { |surface| surface.fetch("id") }
+
+navigation = manifest.fetch("navigation")
+assert(navigation == workspace_contract.fetch("navigation"), "manifest navigation must match workspace contract")
+assert(navigation.is_a?(Array) && navigation.length == 2, "explicit navigation entries are required")
+navigation.each do |entry|
+  unsupported = entry.keys - %w[id label icon description target]
+  assert(unsupported.empty?, "navigation #{entry["id"]} uses unsupported keys: #{unsupported.join(", ")}")
+  forbidden_placement_keys.each do |key|
+    assert(!entry.key?(key), "navigation #{entry["id"]} must not declare placement authority #{key}")
+  end
+  assert(entry["id"].is_a?(String) && !entry["id"].empty?, "navigation entry id is required")
+  assert(entry["label"].is_a?(String) && !entry["label"].empty?, "navigation #{entry["id"]} label is required")
+  assert(entry["icon"].is_a?(String) && !entry["icon"].empty?, "navigation #{entry["id"]} icon is required")
+  target = entry.fetch("target")
+  assert(target == { "kind" => "surface", "surface_id" => entry["id"] }, "navigation #{entry["id"]} must target matching surface")
+  assert(surface_ids.include?(target.fetch("surface_id")), "navigation #{entry["id"]} must target a declared surface")
+end
+assert(navigation.map { |entry| entry.fetch("id") } == %w[workspaces workspaces-settings], "navigation ids must stay stable")
 
 %w[
   Workspace\ Record
@@ -236,7 +259,12 @@ assert(entity_families.any? { |family| family["name"] == "botster-workspaces.wor
   packages\ config\ set
   packages\ reload
   surface:workspaces
+  list_package_navigation
+  package_navigation
+  navigation
+  Workspaces\ Settings
   /packages/botster-workspaces/surfaces/workspaces
+  /packages/botster-workspaces/surfaces/workspaces-settings
   /packages/botster-workspaces/settings
   archive_policy
   rectangle-group

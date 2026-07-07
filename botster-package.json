@@ -39,7 +39,6 @@
       "title": "Workspaces",
       "description": "Descriptor-backed workspace package surface bound to workspace entity state.",
       "icon": "rectangle-group",
-      "order": 1,
       "category": "workspace",
       "supports": ["render"]
     },
@@ -49,9 +48,24 @@
       "title": "Workspaces Settings",
       "description": "Descriptor-backed workspace settings surface for package-level workspace defaults.",
       "icon": "cog-6-tooth",
-      "order": 2,
       "category": "workspace",
       "supports": ["render"]
+    }
+  ],
+  "navigation": [
+    {
+      "id": "workspaces",
+      "label": "Workspaces",
+      "icon": "rectangle-group",
+      "description": "Open the workspace records surface.",
+      "target": { "kind": "surface", "surface_id": "workspaces" }
+    },
+    {
+      "id": "workspaces-settings",
+      "label": "Workspaces Settings",
+      "icon": "cog-6-tooth",
+      "description": "Open workspace package defaults.",
+      "target": { "kind": "surface", "surface_id": "workspaces-settings" }
     }
   ],
   "entrypoints": [

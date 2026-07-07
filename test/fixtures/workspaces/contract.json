@@ -24,6 +24,28 @@
       "scope": "workspace"
     }
   ],
+  "navigation": [
+    {
+      "id": "workspaces",
+      "label": "Workspaces",
+      "icon": "rectangle-group",
+      "description": "Open the workspace records surface.",
+      "target": {
+        "kind": "surface",
+        "surface_id": "workspaces"
+      }
+    },
+    {
+      "id": "workspaces-settings",
+      "label": "Workspaces Settings",
+      "icon": "cog-6-tooth",
+      "description": "Open workspace package defaults.",
+      "target": {
+        "kind": "surface",
+        "surface_id": "workspaces-settings"
+      }
+    }
+  ],
   "workspaces": [
     {
       "id": "ws_product_refactor",

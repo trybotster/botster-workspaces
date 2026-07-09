@@ -196,7 +196,7 @@ navigation_by_id = navigation_entries.to_h { |entry| [entry.fetch("item_id"), en
   if item_id == "workspaces"
     assert_primitives(surface, item_id, %w[panel toolbar metric_grid section list])
   else
-    assert_primitives(surface, item_id, %w[panel metric_grid section list status_badge])
+    assert_primitives(surface, item_id, %w[panel metric_grid section list])
   end
   if text.include?("No active workspaces")
     assert_primitives(surface, item_id, %w[empty_state])
@@ -414,7 +414,7 @@ assert(snapshot.fetch("rows").any? { |snapshot_row| snapshot_row["id"] == worksp
   assert(text.include?("Templates:"), "#{surface_id} surface missing template summary")
   assert(text.include?("Acceptance repo"), "#{surface_id} surface missing repo label")
   assert(text.include?("Acceptance template target"), "#{surface_id} surface missing spawn target label")
-  assert(text.include?("Archive policy: archive"), "#{surface_id} surface missing archive-policy content") if surface_id == "workspaces-settings"
+  assert(text.include?("Archive policy: Archive"), "#{surface_id} surface missing archive-policy content") if surface_id == "workspaces-settings"
 end
 
 puts "script/hub_acceptance_smoke: ok workspace_id=#{workspace_id} template_id=#{template_id} existing=#{existing}"

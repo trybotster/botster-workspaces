@@ -441,7 +441,6 @@ local function read_model(workspace)
     default_session_template_labels = template_summary.labels,
     template_diagnostic_count = #template_summary.diagnostics,
     invalid_template_count = template_summary.invalid_count,
-    archive_policy = workspace.settings and workspace.settings.archive_policy or configured_archive_policy(),
     entity_family = ENTITY_FAMILY,
   }
 end
@@ -927,6 +926,15 @@ local function status_badge(id, label, status)
   }
 end
 
+local function archive_policy_label(policy)
+  if policy == "mark_deleted" then
+    return "Mark deleted"
+  elseif policy == "archive" then
+    return "Archive"
+  end
+  return tostring(policy or "mark_deleted")
+end
+
 local function template_summary_text(row)
   if row.default_session_template_labels and #row.default_session_template_labels > 0 then
     return table.concat(row.default_session_template_labels, ", ")
@@ -1202,6 +1210,7 @@ end
 local function settings_surface()
   local rows = active_read_models(load_state())
   local archive_policy = configured_archive_policy()
+  local archive_policy_text = archive_policy_label(archive_policy)
   return {
     type = "panel",
     id = "botster-workspaces-settings",
@@ -1219,8 +1228,7 @@ local function settings_surface()
           },
           slots = {
             body = {
-              status_badge("botster-workspaces-settings-archive-policy", archive_policy, archive_policy),
-              text_node("botster-workspaces-settings-summary", "Archive policy: " .. archive_policy),
+              text_node("botster-workspaces-settings-summary", "Archive policy: " .. archive_policy_text),
               text_node("botster-workspaces-settings-defaults", "Defaults: workspace repo, spawn target, and template references stay plugin-owned.", "muted"),
             },
           },

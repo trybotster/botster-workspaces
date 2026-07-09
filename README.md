@@ -148,14 +148,13 @@ name, purpose, repo reference label, spawn target label, status, session count,
 default template summary, and cached template diagnostics.
 
 The settings surface uses the same primitive vocabulary to show the effective
-archive policy, package defaults, and workspace template diagnostics. Mutating
-create/spawn affordances remain inside the supported UINode forms where the
-client submits the required fields through the registered action contracts
-`botster_workspaces.create_workspace` and
-`botster_workspaces.spawn_default_session`; rows and toolbars do not claim
-activation or selection behavior until shipped clients consume those interaction
-props. The package does not emit iframe, custom HTML, private binding nodes, or
-`action_bar`.
+archive policy, package defaults, and workspace template diagnostics. Create and
+spawn remain declared as supported UINode `form` plus `button` action contracts;
+shipped clients do not yet submit those forms through `plugin_surface_action`.
+The working invocation paths today are the plugin MCP tools and hub action API.
+Rows, forms, and toolbars do not claim activation, selection, or browser-submit
+behavior until shipped clients consume those interaction props. The package does
+not emit iframe, custom HTML, private binding nodes, or `action_bar`.
 
 The package intentionally does not declare a `runnable_entrypoints` item because
 there is no workspace process to launch yet.

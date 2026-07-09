@@ -174,11 +174,13 @@ consume the corresponding core interaction props.
 
 The settings surface renders the effective archive policy, package/workspace
 defaults, spawn target references, and cached template diagnostics with the same
-primitive vocabulary. Supported affordances are UINode action contracts wired to
-the registered create and spawn form submit handlers. Surfaces must not use
-iframe/custom HTML for the basic index, private node kinds, `action_bar`,
-payload-bearing row actions, toolbar dispatch buttons without required data, or
-renderer-specific props.
+primitive vocabulary. Create and spawn are declared as UINode `form` plus
+`button` action contracts, but shipped clients do not yet submit those forms
+through `plugin_surface_action`; current working invocation paths are the plugin
+MCP tools and hub action API. Surfaces must not use iframe/custom HTML for the
+basic index, private node kinds, `action_bar`, payload-bearing row actions,
+toolbar dispatch buttons without required data, renderer-specific props, or
+browser-submit claims until clients support them.
 
 The fixture read model includes:
 

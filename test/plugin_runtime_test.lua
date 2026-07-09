@@ -609,7 +609,8 @@ local settings_text = {}
 collect_text(settings_surface, settings_text)
 local settings_text_blob = table.concat(settings_text, "\n")
 assert_true(settings_text_blob:find("UI created workspace", 1, true), "settings surface renders workspace state")
-assert_true(settings_text_blob:find("Archive policy: mark_deleted", 1, true), "settings surface renders archive policy")
+assert_true(settings_text_blob:find("Archive policy: Mark deleted", 1, true), "settings surface renders humanized archive policy")
+assert_true(settings_text_blob:find("Archive policy: mark_deleted", 1, true) == nil, "settings surface does not render raw archive policy enum")
 assert_true(settings_text_blob:find("Templates:", 1, true), "settings surface renders template summary")
 
 dump_surfaces(os.getenv("BOTSTER_WORKSPACES_SURFACE_JSON"), {

@@ -127,8 +127,8 @@ end
 local invalid_surface_types = {
   bind_list = true,
   row = true,
-  section = true,
   binding = true,
+  action_bar = true,
 }
 
 local function assert_valid_surface_node(node)
@@ -154,12 +154,44 @@ local function collect_text(node, out)
   if node.type == "empty_state" and node.props and node.props.title then
     out[#out + 1] = node.props.title
   end
+  if node.type == "status_badge" and node.props and node.props.label then
+    out[#out + 1] = node.props.label
+  end
   for _, child in ipairs(node.children or {}) do
     collect_text(child, out)
   end
   for _, slot_children in pairs(node.slots or {}) do
     for _, child in ipairs(slot_children or {}) do
       collect_text(child, out)
+    end
+  end
+end
+
+local function collect_types(node, out)
+  out[node.type] = (out[node.type] or 0) + 1
+  for _, child in ipairs(node.children or {}) do
+    collect_types(child, out)
+  end
+  for _, slot_children in pairs(node.slots or {}) do
+    for _, child in ipairs(slot_children or {}) do
+      collect_types(child, out)
+    end
+  end
+end
+
+local function assert_no_inert_interactions(node)
+  if node.props then
+    assert_true(node.props.activation == nil, "surface must not emit inert activation")
+    assert_true(node.props.primary_action == nil, "surface must not emit inert primary_action")
+    assert_true(node.props.selection == nil, "surface must not emit inert selection")
+    assert_true(node.props.action == nil or node.props.action.payload == nil, "surface must not emit payload-bearing actions until clients consume payload")
+  end
+  for _, child in ipairs(node.children or {}) do
+    assert_no_inert_interactions(child)
+  end
+  for _, slot_children in pairs(node.slots or {}) do
+    for _, child in ipairs(slot_children or {}) do
+      assert_no_inert_interactions(child)
     end
   end
 end
@@ -258,6 +290,13 @@ local spawn_default_session = tool(spec, "botster_workspaces.spawn_default_sessi
 local snapshot = tool(spec, "botster_workspaces.entity_snapshot")
 local create_workspace_action = handler(spec, "create_workspace_action")
 local spawn_default_session_action = handler(spec, "spawn_default_session_action")
+
+local empty_app_surface = handler(spec, "workspaces_surface")({})
+assert_valid_surface_node(empty_app_surface)
+assert_no_inert_interactions(empty_app_surface)
+local empty_app_types = {}
+collect_types(empty_app_surface, empty_app_types)
+assert_true(empty_app_types.empty_state ~= nil, "empty app surface includes empty_state")
 
 local missing = create({})
 assert_eq(missing.ok, false, "create rejects missing required fields")
@@ -532,29 +571,47 @@ assert_eq(ui_spawn.payload.daemon_request.request.context.prompt, "Start from UI
 local app_surface = handler(spec, "workspaces_surface")({})
 assert_eq(app_surface.id, "botster-workspaces-app", "app surface renders")
 assert_valid_surface_node(app_surface)
-assert_eq(app_surface.children[2].props.text, "Create workspace", "app surface labels create form")
-assert_eq(app_surface.children[3].type, "form", "app surface renders create form")
-assert_eq(app_surface.children[3].children[1].type, "form_field", "create form exposes core form fields")
-assert_eq(app_surface.children[3].children[1].props.schema.name, "name", "create form field schema has submit name")
-assert_eq(app_surface.children[3].children[#app_surface.children[3].children].props.action.id, "botster_workspaces.create_workspace", "create form targets UI action")
-assert_eq(app_surface.children[4].props.text, "Spawn workspace session", "app surface labels spawn form")
-assert_eq(app_surface.children[5].type, "form", "app surface renders spawn form")
-assert_eq(app_surface.children[5].children[1].type, "form_field", "spawn form exposes core form fields")
-assert_eq(app_surface.children[5].children[1].props.schema.name, "workspace_id", "spawn form field schema has submit name")
-assert_eq(app_surface.children[5].children[#app_surface.children[5].children].props.action.id, "botster_workspaces.spawn_default_session", "spawn form targets UI action")
-assert_eq(app_surface.children[6].type, "list", "app surface uses valid list node")
+assert_no_inert_interactions(app_surface)
+assert_eq(app_surface.slots.toolbar[1].type, "toolbar", "app surface exposes toolbar")
+assert_true(app_surface.slots.toolbar[1].slots == nil or app_surface.slots.toolbar[1].slots.actions == nil, "toolbar is presentational until clients support interaction props")
+local app_types = {}
+collect_types(app_surface, app_types)
+assert_true(app_types.metric_grid ~= nil, "app surface includes metric_grid")
+assert_true(app_types.toolbar ~= nil, "app surface includes toolbar")
+assert_true(app_types.section ~= nil, "app surface includes sections")
+assert_true(app_types.list ~= nil, "app surface includes workspace list")
+assert_true(app_types.list_item ~= nil, "app surface includes list items")
+assert_true(app_types.status_badge ~= nil, "app surface includes status badges")
 local app_text = {}
 collect_text(app_surface, app_text)
-assert_true(table.concat(app_text, "\n"):find("Product refactor", 1, true), "app surface renders workspace state")
-assert_true(table.concat(app_text, "\n"):find("botster%-workspaces%.workspace") ~= nil, "app surface names read-model family")
+local app_text_blob = table.concat(app_text, "\n")
+assert_true(app_text_blob:find("UI created workspace", 1, true), "app surface renders workspace state")
+assert_true(app_text_blob:find("Create through plugin surface action", 1, true), "app surface renders workspace purpose")
+assert_true(app_text_blob:find("UI repo", 1, true), "app surface renders repo label")
+assert_true(app_text_blob:find("UI target", 1, true), "app surface renders spawn target label")
+assert_true(app_text_blob:find("active", 1, true), "app surface renders status badge")
+assert_true(app_text_blob:find("sessions", 1, true), "app surface renders session count")
+assert_true(app_text_blob:find("template_ui", 1, true), "app surface renders selected template summary")
+assert_true(app_text_blob:find("template diagnostics", 1, true), "app surface renders diagnostics")
+assert_true(app_text_blob:find("botster%-workspaces%.workspace") ~= nil, "app surface names read-model family")
 
 local settings_surface = handler(spec, "workspaces_settings_surface")({})
 assert_eq(settings_surface.id, "botster-workspaces-settings", "settings surface renders")
 assert_valid_surface_node(settings_surface)
-assert_eq(settings_surface.children[2].type, "list", "settings surface uses valid list node")
+assert_no_inert_interactions(settings_surface)
+local settings_types = {}
+collect_types(settings_surface, settings_types)
+assert_true(settings_types.metric_grid ~= nil, "settings surface includes metric_grid")
+assert_true(settings_types.section ~= nil, "settings surface includes sections")
+assert_true(settings_types.list ~= nil, "settings surface includes list")
+assert_true(settings_types.status_badge ~= nil, "settings surface includes status badge")
 local settings_text = {}
 collect_text(settings_surface, settings_text)
-assert_true(table.concat(settings_text, "\n"):find("Product refactor", 1, true), "settings surface renders workspace state")
+local settings_text_blob = table.concat(settings_text, "\n")
+assert_true(settings_text_blob:find("UI created workspace", 1, true), "settings surface renders workspace state")
+assert_true(settings_text_blob:find("Archive policy: Mark deleted", 1, true), "settings surface renders humanized archive policy")
+assert_true(settings_text_blob:find("Archive policy: mark_deleted", 1, true) == nil, "settings surface does not render raw archive policy enum")
+assert_true(settings_text_blob:find("Templates:", 1, true), "settings surface renders template summary")
 
 dump_surfaces(os.getenv("BOTSTER_WORKSPACES_SURFACE_JSON"), {
   app_surface,

@@ -139,9 +139,25 @@ configuration schema. Clients should use these stable ids and paths:
 - package settings route path: `/packages/botster-workspaces/settings`
 
 Both surfaces render structural UI from plugin-owned workspace state through the
-same hub plugin surface contract consumed by browser and TUI clients. The package
-intentionally does not declare a `runnable_entrypoints` item because there is no
-workspace process to launch yet.
+same hub plugin surface contract consumed by browser and TUI clients. The app
+surface is an operator workspace index composed from UINode application
+primitives: a `metric_grid` summary, presentational `toolbar`, `section` and
+`panel` regions, a `list`/`list_item` workspace index, `status_badge` status
+display, and an `empty_state` for no active workspaces. Workspace rows show
+name, purpose, repo reference label, spawn target label, status, session count,
+default template summary, and cached template diagnostics.
+
+The settings surface uses the same primitive vocabulary to show the effective
+archive policy, package defaults, and workspace template diagnostics. Create and
+spawn remain declared as supported UINode `form` plus `button` action contracts;
+shipped clients do not yet submit those forms through `plugin_surface_action`.
+The working invocation paths today are the plugin MCP tools and hub action API.
+Rows, forms, and toolbars do not claim activation, selection, or browser-submit
+behavior until shipped clients consume those interaction props. The package does
+not emit iframe, custom HTML, private binding nodes, or `action_bar`.
+
+The package intentionally does not declare a `runnable_entrypoints` item because
+there is no workspace process to launch yet.
 
 ## Verification
 

@@ -68,11 +68,41 @@ def collect_text(node, out = [])
   props = node["props"] || {}
   out << props["text"] if node["type"] == "text" && props["text"]
   out << props["title"] if node["type"] == "empty_state" && props["title"]
+  out << props["label"] if node["type"] == "status_badge" && props["label"]
   Array(node["children"]).each { |child| collect_text(child, out) }
   (node["slots"] || {}).each_value do |children|
     Array(children).each { |child| collect_text(child, out) }
   end
   out
+end
+
+def collect_types(node, out = Hash.new(0))
+  out[node["type"]] += 1 if node["type"]
+  Array(node["children"]).each { |child| collect_types(child, out) }
+  (node["slots"] || {}).each_value do |children|
+    Array(children).each { |child| collect_types(child, out) }
+  end
+  out
+end
+
+def assert_primitives(surface, surface_id, expected)
+  types = collect_types(surface)
+  expected.each do |type|
+    assert(types[type].positive?, "#{surface_id} rendered body missing #{type}")
+  end
+end
+
+def assert_no_inert_interactions(node)
+  props = node["props"] || {}
+  %w[activation primary_action selection].each do |field|
+    assert(!props.key?(field), "#{node["id"] || node["type"]} must not emit inert #{field}")
+  end
+  action = props["action"]
+  assert(!action.is_a?(Hash) || !action.key?("payload"), "#{node["id"] || node["type"]} must not emit payload-bearing action")
+  Array(node["children"]).each { |child| assert_no_inert_interactions(child) }
+  (node["slots"] || {}).each_value do |children|
+    Array(children).each { |child| assert_no_inert_interactions(child) }
+  end
 end
 
 def collect_terminal_output(response)
@@ -161,6 +191,18 @@ navigation_by_id = navigation_entries.to_h { |entry| [entry.fetch("item_id"), en
   end
   surface = render_surface(socket, entry.dig("target", "surface_id"))
   assert(surface.is_a?(Hash) && surface["type"].is_a?(String), "#{item_id} navigation target did not render a UiNode surface")
+  assert_no_inert_interactions(surface)
+  text = collect_text(surface).join("\n")
+  if item_id == "workspaces"
+    assert_primitives(surface, item_id, %w[panel toolbar metric_grid section list])
+  else
+    assert_primitives(surface, item_id, %w[panel metric_grid section list status_badge])
+  end
+  if text.include?("No active workspaces")
+    assert_primitives(surface, item_id, %w[empty_state])
+  else
+    assert_primitives(surface, item_id, %w[list_item status_badge])
+  end
 end
 
 valid_config = request(socket, {
@@ -221,8 +263,12 @@ unless template
 
   %w[workspaces workspaces-settings].each do |surface_id|
     surface = render_surface(socket, surface_id)
+    assert_no_inert_interactions(surface)
+    assert_primitives(surface, surface_id, %w[panel metric_grid section list list_item status_badge])
     text = collect_text(surface).join("\n")
     assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
+    assert(text.include?("Acceptance repo"), "#{surface_id} surface missing repo label")
+    assert(text.include?("Acceptance target"), "#{surface_id} surface missing spawn target label")
   end
 
   puts "script/hub_acceptance_smoke: ok package_surface_config_only no_session_templates=true"
@@ -359,10 +405,16 @@ assert(snapshot.fetch("rows").any? { |snapshot_row| snapshot_row["id"] == worksp
 
 %w[workspaces workspaces-settings].each do |surface_id|
   surface = render_surface(socket, surface_id)
+  assert_no_inert_interactions(surface)
+  assert_primitives(surface, surface_id, %w[panel metric_grid section list list_item status_badge])
+  assert_primitives(surface, surface_id, %w[toolbar]) if surface_id == "workspaces"
   text = collect_text(surface).join("\n")
   assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
   assert(text.include?("2 sessions"), "#{surface_id} surface missing session count")
   assert(text.include?("Templates:"), "#{surface_id} surface missing template summary")
+  assert(text.include?("Acceptance repo"), "#{surface_id} surface missing repo label")
+  assert(text.include?("Acceptance template target"), "#{surface_id} surface missing spawn target label")
+  assert(text.include?("Archive policy: archive"), "#{surface_id} surface missing archive-policy content") if surface_id == "workspaces-settings"
 end
 
 puts "script/hub_acceptance_smoke: ok workspace_id=#{workspace_id} template_id=#{template_id} existing=#{existing}"

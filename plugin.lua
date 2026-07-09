@@ -441,6 +441,7 @@ local function read_model(workspace)
     default_session_template_labels = template_summary.labels,
     template_diagnostic_count = #template_summary.diagnostics,
     invalid_template_count = template_summary.invalid_count,
+    archive_policy = workspace.settings and workspace.settings.archive_policy or configured_archive_policy(),
     entity_family = ENTITY_FAMILY,
   }
 end
@@ -891,6 +892,57 @@ local function button_node(id, label, action)
   }
 end
 
+local function metric_node(id, label, value, caption)
+  local props = {
+    label = label,
+    value = tostring(value),
+  }
+  if caption then
+    props.caption = caption
+  end
+  return {
+    type = "metric",
+    id = id,
+    props = props,
+  }
+end
+
+local function status_badge(id, label, status)
+  local tone = "default"
+  if status == "active" then
+    tone = "success"
+  elseif status == "archived" then
+    tone = "warning"
+  elseif status == "deleted" then
+    tone = "danger"
+  end
+  return {
+    type = "status_badge",
+    id = id,
+    props = {
+      label = label,
+      status = status,
+      tone = tone,
+    },
+  }
+end
+
+local function template_summary_text(row)
+  if row.default_session_template_labels and #row.default_session_template_labels > 0 then
+    return table.concat(row.default_session_template_labels, ", ")
+  end
+  return "No default templates"
+end
+
+local function diagnostic_summary_text(row)
+  local count = tonumber(row.template_diagnostic_count or 0) or 0
+  local invalid = tonumber(row.invalid_template_count or 0) or 0
+  if invalid > 0 then
+    return tostring(invalid) .. " invalid template diagnostics"
+  end
+  return tostring(count) .. " template diagnostics"
+end
+
 local function create_workspace_form()
   return {
     type = "form",
@@ -991,11 +1043,8 @@ local function empty_state(id, title, description)
 end
 
 local function list_item(row)
-  local template_text = "No default templates"
-  if row.default_session_template_labels and #row.default_session_template_labels > 0 then
-    template_text = table.concat(row.default_session_template_labels, ", ")
-  end
-  local diagnostic_text = tostring(row.template_diagnostic_count or 0) .. " template diagnostics"
+  local template_text = template_summary_text(row)
+  local diagnostic_text = diagnostic_summary_text(row)
   return {
     type = "list_item",
     id = "workspace-row-" .. tostring(row.id),
@@ -1008,11 +1057,12 @@ local function list_item(row)
       },
       subtitle = {
         text_node("workspace-row-" .. tostring(row.id) .. "-purpose", row.purpose),
-        text_node("workspace-row-" .. tostring(row.id) .. "-repo", row.repo_label .. " / " .. row.spawn_target_label, "muted"),
+        text_node("workspace-row-" .. tostring(row.id) .. "-repo", "Repo: " .. tostring(row.repo_label or "Unknown repo"), "muted"),
+        text_node("workspace-row-" .. tostring(row.id) .. "-spawn-target", "Spawn target: " .. tostring(row.spawn_target_label or "Unknown target"), "muted"),
         text_node("workspace-row-" .. tostring(row.id) .. "-templates", "Templates: " .. template_text, "muted"),
       },
       meta = {
-        text_node("workspace-row-" .. tostring(row.id) .. "-status", row.status),
+        status_badge("workspace-row-" .. tostring(row.id) .. "-status", row.status, row.status),
         text_node("workspace-row-" .. tostring(row.id) .. "-sessions", tostring(row.session_count) .. " sessions"),
         text_node("workspace-row-" .. tostring(row.id) .. "-template-diagnostics", diagnostic_text),
       },
@@ -1037,6 +1087,95 @@ local function workspace_list_children(rows)
   return children
 end
 
+local function workspace_metrics(rows)
+  local session_count = 0
+  local template_count = 0
+  local diagnostic_count = 0
+  for _, row in ipairs(rows) do
+    session_count = session_count + (tonumber(row.session_count or 0) or 0)
+    template_count = template_count + (tonumber(row.default_session_template_count or 0) or 0)
+    diagnostic_count = diagnostic_count + (tonumber(row.template_diagnostic_count or 0) or 0)
+  end
+  return {
+    type = "metric_grid",
+    id = "botster-workspaces-metrics",
+    props = {
+      density = "compact",
+      variant = "subtle",
+    },
+    children = {
+      metric_node("botster-workspaces-metric-workspaces", "Workspaces", #rows, "Active workspace records"),
+      metric_node("botster-workspaces-metric-sessions", "Sessions", session_count, "Referenced hub sessions"),
+      metric_node("botster-workspaces-metric-templates", "Default templates", template_count, "Stored template references"),
+      metric_node("botster-workspaces-metric-diagnostics", "Diagnostics", diagnostic_count, "Cached template checks"),
+    },
+  }
+end
+
+local function workspaces_toolbar()
+  return {
+    type = "toolbar",
+    id = "botster-workspaces-toolbar",
+    props = {
+      label = "Workspace actions",
+      density = "compact",
+    },
+  }
+end
+
+local function workspace_index_section(rows)
+  return {
+    type = "section",
+    id = "botster-workspaces-index-section",
+    props = {
+      title = "Workspace index",
+      description = "Plugin-owned workspace records and hub-owned references.",
+    },
+    slots = {
+      body = {
+        {
+          type = "list",
+          id = "botster-workspaces-list",
+          props = {
+            aria_label = "Workspaces",
+          },
+          children = workspace_list_children(rows),
+        },
+      },
+    },
+  }
+end
+
+local function create_workspace_section()
+  return {
+    type = "section",
+    id = "botster-workspaces-create-section",
+    props = {
+      title = "Create workspace",
+    },
+    slots = {
+      body = {
+        create_workspace_form(),
+      },
+    },
+  }
+end
+
+local function spawn_workspace_section(rows)
+  return {
+    type = "section",
+    id = "botster-workspaces-spawn-section",
+    props = {
+      title = "Spawn workspace session",
+    },
+    slots = {
+      body = {
+        spawn_session_form(rows),
+      },
+    },
+  }
+end
+
 local function workspaces_surface()
   local rows = active_read_models(load_state())
   return {
@@ -1045,19 +1184,16 @@ local function workspaces_surface()
     props = {
       title = "Workspaces",
     },
-    children = {
-      text_node("botster-workspaces-read-model", "Read model: " .. ENTITY_FAMILY, "muted"),
-      text_node("botster-workspaces-create-heading", "Create workspace"),
-      create_workspace_form(),
-      text_node("botster-workspaces-spawn-heading", "Spawn workspace session"),
-      spawn_session_form(rows),
-      {
-        type = "list",
-        id = "botster-workspaces-list",
-        props = {
-          aria_label = "Workspaces",
-        },
-        children = workspace_list_children(rows),
+    slots = {
+      toolbar = {
+        workspaces_toolbar(),
+      },
+      body = {
+        text_node("botster-workspaces-read-model", "Read model: " .. ENTITY_FAMILY, "muted"),
+        workspace_metrics(rows),
+        workspace_index_section(rows),
+        create_workspace_section(),
+        spawn_workspace_section(rows),
       },
     },
   }
@@ -1065,27 +1201,51 @@ end
 
 local function settings_surface()
   local rows = active_read_models(load_state())
+  local archive_policy = configured_archive_policy()
   return {
     type = "panel",
     id = "botster-workspaces-settings",
     props = {
       title = "Workspaces Settings",
     },
-    children = {
-      {
-        type = "text",
-        id = "botster-workspaces-settings-summary",
-        props = {
-          text = "No required configuration fields",
+    slots = {
+      body = {
+        {
+          type = "section",
+          id = "botster-workspaces-settings-policy",
+          props = {
+            title = "Effective archive policy",
+            description = "Package defaults applied to newly created workspace records.",
+          },
+          slots = {
+            body = {
+              status_badge("botster-workspaces-settings-archive-policy", archive_policy, archive_policy),
+              text_node("botster-workspaces-settings-summary", "Archive policy: " .. archive_policy),
+              text_node("botster-workspaces-settings-defaults", "Defaults: workspace repo, spawn target, and template references stay plugin-owned.", "muted"),
+            },
+          },
         },
-      },
-      {
-        type = "list",
-        id = "botster-workspaces-settings-list",
-        props = {
-          aria_label = "Workspace settings",
+        {
+          type = "section",
+          id = "botster-workspaces-settings-diagnostics",
+          props = {
+            title = "Workspace diagnostics",
+            description = "Cached spawn target and template diagnostics for active workspaces.",
+          },
+          slots = {
+            body = {
+              workspace_metrics(rows),
+              {
+                type = "list",
+                id = "botster-workspaces-settings-list",
+                props = {
+                  aria_label = "Workspace settings",
+                },
+                children = workspace_list_children(rows),
+              },
+            },
+          },
         },
-        children = workspace_list_children(rows),
       },
     },
   }

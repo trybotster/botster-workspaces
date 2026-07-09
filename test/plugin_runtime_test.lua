@@ -48,6 +48,24 @@ botster = {
         }
       end,
     },
+    spawn_targets = {
+      list = function()
+        return {
+          {
+            target_id = "target_codex_local",
+            label = "Codex local",
+            enabled = true,
+            kind = "directory",
+          },
+          {
+            target_id = "target_disabled",
+            label = "Disabled target",
+            enabled = false,
+            kind = "directory",
+          },
+        }
+      end,
+    },
     config = {
       get = function()
         return {
@@ -177,6 +195,27 @@ local function collect_types(node, out)
       collect_types(child, out)
     end
   end
+end
+
+local function find_node_by_id(node, id)
+  if node.id == id then
+    return node
+  end
+  for _, child in ipairs(node.children or {}) do
+    local found = find_node_by_id(child, id)
+    if found then
+      return found
+    end
+  end
+  for _, slot_children in pairs(node.slots or {}) do
+    for _, child in ipairs(slot_children or {}) do
+      local found = find_node_by_id(child, id)
+      if found then
+        return found
+      end
+    end
+  end
+  return nil
 end
 
 local function assert_no_inert_interactions(node)
@@ -560,6 +599,7 @@ assert_eq(ui_created.payload.entity.name, "UI created workspace", "create action
 local ui_spawn = spawn_default_session_action({
   values = {
     ["botster-workspaces-spawn-workspace-id"] = { type = "string", value = ui_created.payload.workspace.id },
+    ["botster-workspaces-spawn-point-id"] = { type = "string", value = "spawn_point_review" },
     ["botster-workspaces-spawn-prompt"] = { type = "string", value = "Start from UI workspace" },
   },
 })
@@ -567,8 +607,14 @@ assert_eq(ui_spawn.state, "accepted", "spawn action accepts workspace with defau
 assert_eq(ui_spawn.payload.hub_api, "spawn_session_template", "spawn action returns hub API")
 assert_eq(ui_spawn.payload.daemon_request.template_id, "template_ui", "spawn action uses workspace default template")
 assert_eq(ui_spawn.payload.daemon_request.request.context.prompt, "Start from UI workspace", "spawn action passes prompt context")
+assert_eq(ui_spawn.payload.daemon_request.request.context.metadata.spawn_point_id, "spawn_point_review", "spawn action carries selected spawn point")
 
-local app_surface = handler(spec, "workspaces_surface")({})
+local app_surface = handler(spec, "workspaces_surface")({
+  spawn_points = {
+    { id = "spawn_point_implement", label = "Implement" },
+    { id = "spawn_point_review", label = "Review" },
+  },
+})
 assert_eq(app_surface.id, "botster-workspaces-app", "app surface renders")
 assert_valid_surface_node(app_surface)
 assert_no_inert_interactions(app_surface)
@@ -582,6 +628,20 @@ assert_true(app_types.section ~= nil, "app surface includes sections")
 assert_true(app_types.list ~= nil, "app surface includes workspace list")
 assert_true(app_types.list_item ~= nil, "app surface includes list items")
 assert_true(app_types.status_badge ~= nil, "app surface includes status badges")
+local create_form = find_node_by_id(app_surface, "botster-workspaces-create-form")
+assert_eq(create_form.type, "form", "app surface renders create form")
+assert_eq(create_form.children[1].type, "form_field", "create form exposes core form fields")
+assert_eq(create_form.children[1].props.schema.name, "name", "create form field schema has submit name")
+assert_eq(create_form.children[#create_form.children].props.action.id, "botster_workspaces.create_workspace", "create form targets UI action")
+local spawn_form = find_node_by_id(app_surface, "botster-workspaces-spawn-form")
+assert_eq(spawn_form.type, "form", "app surface renders spawn form")
+assert_eq(spawn_form.children[1].type, "form_field", "spawn form exposes core form fields")
+assert_eq(spawn_form.children[1].props.schema.name, "workspace_id", "spawn form field schema has submit name")
+assert_eq(spawn_form.children[2].props.schema.kind, "select", "spawn point field is a select")
+assert_eq(spawn_form.children[2].props.schema.name, "spawn_point_id", "spawn point field schema has submit name")
+assert_eq(spawn_form.children[2].props.schema.options[1].value, "target_codex_local", "spawn point select uses configured spawn targets")
+assert_eq(#spawn_form.children[2].props.schema.options, 1, "spawn point select excludes disabled targets")
+assert_eq(spawn_form.children[#spawn_form.children].props.action.id, "botster_workspaces.spawn_default_session", "spawn form targets UI action")
 local app_text = {}
 collect_text(app_surface, app_text)
 local app_text_blob = table.concat(app_text, "\n")

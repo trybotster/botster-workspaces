@@ -179,6 +179,57 @@ local function form_value(arguments, key, node_id)
   return value
 end
 
+local function spawn_point_options(arguments)
+  local capabilities = botster and botster.capabilities or {}
+  local spawn_targets = capabilities.spawn_targets
+  if spawn_targets and type(spawn_targets.list) == "function" then
+    local ok, targets = pcall(spawn_targets.list)
+    if ok and type(targets) == "table" then
+      local options = {}
+      for _, target in ipairs(targets) do
+        if type(target) == "table" and target.enabled ~= false then
+          local value = trim(target.target_id or target.id or target.value)
+          if value then
+            local label = trim(target.label or target.name or target.title) or value
+            options[#options + 1] = {
+              value = value,
+              label = label,
+            }
+          end
+        end
+      end
+      if #options > 0 then
+        return options
+      end
+    end
+  end
+
+  local source = type(arguments) == "table" and (arguments.spawn_points or arguments.spawnPoints) or nil
+  local options = {}
+  if type(source) ~= "table" then
+    return options
+  end
+
+  for _, spawn_point in ipairs(source) do
+    local value = nil
+    local label = nil
+    if type(spawn_point) == "table" then
+      value = trim(spawn_point.id or spawn_point.value or spawn_point.spawn_point_id)
+      label = trim(spawn_point.label or spawn_point.name or spawn_point.title) or value
+    else
+      value = trim(spawn_point)
+      label = value
+    end
+    if value then
+      options[#options + 1] = {
+        value = value,
+        label = label,
+      }
+    end
+  end
+  return options
+end
+
 local function action_error(arguments, surface_id, action_id, node_id, result)
   local validation = result.error and result.error.code == "validation_failed"
   return action_result(arguments, surface_id, action_id, node_id, validation and "rejected" or "error", {
@@ -725,6 +776,12 @@ local function spawn_default_session(arguments)
       },
     },
   }
+  local spawn_point_id = trim(arguments.spawn_point_id)
+  if spawn_point_id then
+    request.request.context.metadata = {
+      spawn_point_id = spawn_point_id,
+    }
+  end
 
   return {
     ok = true,
@@ -816,6 +873,7 @@ end
 local function spawn_default_session_from_surface(arguments)
   local result = spawn_default_session({
     id = form_value(arguments, "workspace_id", "botster-workspaces-spawn-workspace-id") or arguments.id,
+    spawn_point_id = form_value(arguments, "spawn_point_id", "botster-workspaces-spawn-point-id"),
     template_id = form_value(arguments, "template_id", "botster-workspaces-spawn-template-id"),
     session_id = form_value(arguments, "session_id", "botster-workspaces-spawn-session-id"),
     prompt = form_value(arguments, "prompt", "botster-workspaces-spawn-prompt"),
@@ -834,6 +892,9 @@ local function spawn_default_session_from_surface(arguments)
   return action_result(arguments, "workspaces", "botster_workspaces.spawn_default_session", "botster-workspaces-spawn-form", "accepted", {
     normalized_values = {
       workspace_id = result.workspace_id,
+      spawn_point_id = result.daemon_request.request.context.metadata
+        and result.daemon_request.request.context.metadata.spawn_point_id
+        or nil,
       template_id = result.template_ref.template_id,
       session_id = result.daemon_request.session_id,
     },
@@ -1008,34 +1069,45 @@ local function create_workspace_form()
   }
 end
 
-local function spawn_session_form(rows)
+local function spawn_session_form(rows, arguments)
   local first_workspace_id = rows[1] and rows[1].id or nil
+  local options = spawn_point_options(arguments)
+  local selected_spawn_point = options[1] and options[1].value or nil
+  local children = {
+    form_field("botster-workspaces-spawn-workspace-id", "workspace_id", "Workspace id", {
+      default = first_workspace_id,
+      placeholder = "ws_product_refactor_1",
+      required = true,
+    }),
+  }
+  if #options > 0 then
+    children[#children + 1] = form_field("botster-workspaces-spawn-point-id", "spawn_point_id", "Spawn point", {
+      kind = "select",
+      default = selected_spawn_point,
+      required = true,
+      options = options,
+    })
+  end
+  children[#children + 1] = form_field("botster-workspaces-spawn-template-id", "template_id", "Template override", {
+    placeholder = "Use selected default when blank",
+  })
+  children[#children + 1] = form_field("botster-workspaces-spawn-session-id", "session_id", "Session id", {
+    placeholder = "Generated when blank",
+  })
+  children[#children + 1] = form_field("botster-workspaces-spawn-prompt", "prompt", "Prompt", {
+    placeholder = "Start from this workspace context",
+  })
+  children[#children + 1] = form_field("botster-workspaces-spawn-ticket-id", "ticket_id", "Ticket id", {
+    placeholder = "Optional",
+  })
+  children[#children + 1] = form_field("botster-workspaces-spawn-branch-name", "branch_name", "Branch", {
+    placeholder = "Optional",
+  })
+  children[#children + 1] = button_node("botster-workspaces-spawn-submit", "Spawn default session", "botster_workspaces.spawn_default_session")
   return {
     type = "form",
     id = "botster-workspaces-spawn-form",
-    children = {
-      form_field("botster-workspaces-spawn-workspace-id", "workspace_id", "Workspace id", {
-        default = first_workspace_id,
-        placeholder = "ws_product_refactor_1",
-        required = true,
-      }),
-      form_field("botster-workspaces-spawn-template-id", "template_id", "Template override", {
-        placeholder = "Use selected default when blank",
-      }),
-      form_field("botster-workspaces-spawn-session-id", "session_id", "Session id", {
-        placeholder = "Generated when blank",
-      }),
-      form_field("botster-workspaces-spawn-prompt", "prompt", "Prompt", {
-        placeholder = "Start from this workspace context",
-      }),
-      form_field("botster-workspaces-spawn-ticket-id", "ticket_id", "Ticket id", {
-        placeholder = "Optional",
-      }),
-      form_field("botster-workspaces-spawn-branch-name", "branch_name", "Branch", {
-        placeholder = "Optional",
-      }),
-      button_node("botster-workspaces-spawn-submit", "Spawn default session", "botster_workspaces.spawn_default_session"),
-    },
+    children = children,
   }
 end
 
@@ -1169,7 +1241,7 @@ local function create_workspace_section()
   }
 end
 
-local function spawn_workspace_section(rows)
+local function spawn_workspace_section(rows, arguments)
   return {
     type = "section",
     id = "botster-workspaces-spawn-section",
@@ -1178,13 +1250,13 @@ local function spawn_workspace_section(rows)
     },
     slots = {
       body = {
-        spawn_session_form(rows),
+        spawn_session_form(rows, arguments),
       },
     },
   }
 end
 
-local function workspaces_surface()
+local function workspaces_surface(arguments)
   local rows = active_read_models(load_state())
   return {
     type = "panel",
@@ -1201,7 +1273,7 @@ local function workspaces_surface()
         workspace_metrics(rows),
         workspace_index_section(rows),
         create_workspace_section(),
-        spawn_workspace_section(rows),
+        spawn_workspace_section(rows, arguments),
       },
     },
   }

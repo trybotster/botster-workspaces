@@ -2,8 +2,10 @@ local database = {}
 local registrations = {}
 local set_calls = 0
 local fail_next_set = false
+local fail_next_get = false
 local spawn_calls = {}
 local template_list_calls = {}
+local fail_template_list_for = nil
 local spawn_mode = "success"
 local next_spawn_uuid = "11111111-1111-4111-8111-111111111111"
 
@@ -22,9 +24,13 @@ botster = {
   capabilities = {
     plugin_db = {
       get = function(request)
+        if fail_next_get then
+          fail_next_get = false
+          error("injected read failure")
+        end
         local record = database[request.key]
         if not record then
-          error("record not found")
+          return { kind = "record" }
         end
         return { record = copy(record) }
       end,
@@ -45,6 +51,7 @@ botster = {
       list = function()
         return {
           { target_id = "tgt_git", label = "Local Git", kind = "git", enabled = true },
+          { target_id = "tgt_empty", label = "Git without templates", kind = "git", enabled = true },
           { target_id = "tgt_disabled", label = "Disabled Git", kind = "git", enabled = false },
           { target_id = "tgt_directory", label = "Directory", kind = "directory", enabled = true },
         }
@@ -53,6 +60,9 @@ botster = {
     session_templates = {
       list = function(request)
         template_list_calls[#template_list_calls + 1] = copy(request)
+        if request.target_id == fail_template_list_for then
+          error("injected template projection failure")
+        end
         if request.target_id == "tgt_git" then
           return {
             { template_id = "implement", label = "Implement" },
@@ -119,6 +129,15 @@ local function tool(spec, name)
   for _, candidate in ipairs(spec.tools or {}) do
     if candidate.name == name then
       return candidate.call
+    end
+  end
+  error("missing tool " .. name)
+end
+
+local function registered_tool(spec, name)
+  for _, candidate in ipairs(spec.tools or {}) do
+    if candidate.name == name then
+      return candidate
     end
   end
   error("missing tool " .. name)
@@ -321,6 +340,29 @@ local remove_session = tool(spec, "botster_workspaces.remove_session")
 local spawn = tool(spec, "botster_workspaces.spawn")
 local snapshot = tool(spec, "botster_workspaces.entity_snapshot")
 
+assert_eq(#list({}).workspaces, 0, "missing plugin_db record is a cold empty state")
+local writes_before_read_failure = set_calls
+fail_next_get = true
+assert_eq(list({}).error.code, "workspace_state_read_failed", "plugin_db read failure fails closed")
+assert_eq(set_calls, writes_before_read_failure, "plugin_db read failure cannot trigger a destructive write")
+
+assert_keys(
+  registered_tool(spec, "botster_workspaces.show").input_schema.properties,
+  { "id" },
+  "show schema has one canonical identifier"
+)
+assert_eq(registered_tool(spec, "botster_workspaces.show").input_schema.required[1], "id", "show schema requires id")
+assert_keys(
+  registered_tool(spec, "botster_workspaces.add_session").input_schema.properties,
+  { "workspace_id", "session_id" },
+  "add schema has no id alias"
+)
+assert_keys(
+  registered_tool(spec, "botster_workspaces.move_session").input_schema.properties,
+  { "destination_workspace_id", "session_id" },
+  "move schema has one destination identifier"
+)
+
 local empty_surface = handler(spec, "workspaces_surface")({})
 assert_eq(empty_surface.id, "botster-workspaces-app", "stable app surface renders")
 local initial_materialized = materialize(empty_surface, {})
@@ -329,6 +371,11 @@ collect_type(initial_materialized, "form", initial_forms)
 assert_eq(#initial_forms, 0, "contextual forms are absent before an accepted open action")
 assert_true(find_node(initial_materialized, "botster-workspaces-new"), "empty index has New workspace action")
 assert_true(find_node(initial_materialized, "botster-workspaces-empty"), "empty index has empty state")
+assert_eq(
+  find_node(initial_materialized, "botster-workspaces-empty-create").props.label,
+  "New workspace",
+  "empty state has an explicitly labelled sibling action"
+)
 
 local open = handler(spec, "open_workspace_presentation_action")
 local new_button = find_node(empty_surface, "botster-workspaces-new")
@@ -349,7 +396,9 @@ local rejected_create = create_action({
   values = {},
 })
 assert_eq(rejected_create.state, "rejected", "invalid create retains contextual form")
-assert_true(rejected_create.field_errors["botster-workspaces-name"], "invalid create returns field error")
+local create_name_input = find_node(create_visible, "botster-workspaces-create-name")
+assert_true(create_name_input, "create form renders its name input")
+assert_true(rejected_create.field_errors[create_name_input.id], "invalid create keys its error to the rendered field")
 assert_eq(rejected_create.presentation, nil, "rejected create cannot mutate presentation")
 assert_eq(rejected_create.replacement, nil, "rejected create cannot replace the tree")
 
@@ -410,18 +459,20 @@ assert_eq(rename_obsolete.error.code, "unknown_field", "rename rejects obsolete 
 local session_one = "22222222-2222-4222-8222-222222222222"
 local session_two = "33333333-3333-4333-8333-333333333333"
 local before_add = set_calls
-local added = add_session({ id = renamed.workspace.id, session_id = session_one })
+local added = add_session({ workspace_id = renamed.workspace.id, session_id = session_one })
 assert_eq(added.ok, true, "add existing session succeeds")
 assert_eq(set_calls, before_add + 1, "add persists complete state once")
 assert_eq(added.workspace.session_refs[1], session_one, "add preserves canonical session identity")
 
-local duplicate_add = add_session({ id = second.workspace.id, session_id = session_one })
+local duplicate_add = add_session({ workspace_id = second.workspace.id, session_id = session_one })
 assert_eq(duplicate_add.error.code, "session_already_owned", "add rejects another owner")
 assert_eq(duplicate_add.owner_workspace_id, renamed.workspace.id, "duplicate identifies current owner")
-local invalid_session = add_session({ id = second.workspace.id, session_id = "not-a-uuid" })
+local invalid_session = add_session({ workspace_id = second.workspace.id, session_id = "not-a-uuid" })
 assert_eq(invalid_session.error.code, "validation_failed", "membership requires canonical UUID")
+local short_uuid = add_session({ workspace_id = second.workspace.id, session_id = "1-2-3-4-5" })
+assert_eq(short_uuid.error.code, "validation_failed", "membership rejects non-canonical UUID group lengths")
 
-local added_second = add_session({ id = renamed.workspace.id, session_id = session_two })
+local added_second = add_session({ workspace_id = renamed.workspace.id, session_id = session_two })
 assert_eq(added_second.ok, true, "second reference adds")
 local before_move = set_calls
 local moved = move_session({ destination_workspace_id = second.workspace.id, session_id = session_one })
@@ -431,7 +482,7 @@ assert_eq(#moved.source.session_refs, 1, "move removes source membership")
 assert_eq(moved.destination.session_refs[1], session_one, "move inserts destination membership")
 
 local before_remove = set_calls
-local removed = remove_session({ id = renamed.workspace.id, session_id = session_two })
+local removed = remove_session({ workspace_id = renamed.workspace.id, session_id = session_two })
 assert_eq(removed.ok, true, "remove membership succeeds")
 assert_eq(set_calls, before_remove + 1, "remove persists once")
 assert_eq(#removed.workspace.session_refs, 0, "remove changes grouping only")
@@ -519,7 +570,13 @@ assert_keys(
   "entity row contains grouping read model only"
 )
 
+local template_calls_before_surface = #template_list_calls
 local surface = handler(spec, "workspaces_surface")({})
+assert_eq(
+  #template_list_calls,
+  template_calls_before_surface + 2,
+  "one surface render lists templates once per enabled Git target"
+)
 local raw_forms = {}
 collect_type(surface, "form", raw_forms)
 assert_true(#raw_forms > 0, "owner-authored contextual forms exist behind presentation predicates")
@@ -560,8 +617,24 @@ local target_dialog = materialize(surface, presentation_state)
 local target_form = find_node(target_dialog, "botster-workspaces-spawn-target-form-" .. renamed.workspace.id)
 assert_true(target_form, "Spawn opens target-first dialog")
 local target_select = find_node(target_form, "botster-workspaces-spawn-target")
-assert_eq(#target_select.slots.options, 1, "spawn point projection excludes disabled and non-Git targets")
+assert_eq(#target_select.slots.options, 2, "spawn point projection includes enabled Git targets only")
 assert_eq(target_select.slots.options[1].props.value, "tgt_git", "spawn point uses Hub target id")
+
+presentation_state["workspace-dialog"] = "spawn:" .. renamed.workspace.id .. ":tgt_empty"
+local empty_template_dialog = materialize(surface, presentation_state)
+assert_true(
+  find_node(empty_template_dialog, "botster-workspaces-spawn-empty-" .. renamed.workspace.id .. "-tgt_empty"),
+  "target with no effective session types renders an explicit empty state"
+)
+fail_template_list_for = "tgt_empty"
+local failed_projection_surface = handler(spec, "workspaces_surface")({})
+local failed_projection_dialog = materialize(failed_projection_surface, presentation_state)
+assert_true(
+  find_node(failed_projection_dialog, "botster-workspaces-spawn-error-" .. renamed.workspace.id .. "-tgt_empty"),
+  "template projection failure renders an explicit unavailable state"
+)
+fail_template_list_for = nil
+presentation_state["workspace-dialog"] = "spawn-target:" .. renamed.workspace.id
 
 local select_target = handler(spec, "select_spawn_target_action")
 local selected_target = select_target({
@@ -587,7 +660,10 @@ assert_eq(spawn_form.children[3].props.label, "Branch / worktree", "branch/workt
 assert_eq(spawn_form.children[4].props.label, "Session type", "effective session type follows branch/worktree")
 assert_eq(#spawn_form.children[4].slots.options, 2, "session type options are target-filtered")
 for _, request in ipairs(template_list_calls) do
-  assert_eq(request.target_id, "tgt_git", "every template projection is scoped to selected target")
+  assert_true(
+    request.target_id == "tgt_git" or request.target_id == "tgt_empty",
+    "every template projection is scoped to an enabled Git target"
+  )
 end
 
 local accepted_create = create_action({
@@ -604,9 +680,28 @@ assert_eq(accepted_create.presentation[1].kind, "clear", "accepted submit clears
 assert_true(accepted_create.replacement, "accepted submit installs owner-authored replacement")
 assert_eq(accepted_create.payload.workspace.name, "Action-created", "accepted action returns created workspace")
 
+local action_remove_session_id = "77777777-7777-4777-8777-777777777777"
+assert_eq(add_session({
+  workspace_id = accepted_create.payload.workspace.id,
+  session_id = action_remove_session_id,
+}).ok, true, "remove action fixture membership adds")
+local removed_action = handler(spec, "remove_session_action")({
+  request_id = "request-remove-session",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.remove_session",
+  node_id = "botster-workspaces-remove-" .. action_remove_session_id,
+  payload = {
+    workspace_id = accepted_create.payload.workspace.id,
+    session_id = action_remove_session_id,
+  },
+})
+assert_eq(removed_action.state, "accepted", "remove membership action is accepted")
+assert_eq(removed_action.presentation, nil, "remove membership omits empty presentation operations")
+assert_true(removed_action.replacement, "remove membership installs owner-authored replacement")
+
 local delete_target = create({ name = "Disposable grouping" })
 local session_to_preserve = "66666666-6666-4666-8666-666666666666"
-assert_eq(add_session({ id = delete_target.workspace.id, session_id = session_to_preserve }).ok, true, "delete fixture membership adds")
+assert_eq(add_session({ workspace_id = delete_target.workspace.id, session_id = session_to_preserve }).ok, true, "delete fixture membership adds")
 local spawn_call_count = #spawn_calls
 local deleted = delete({ id = delete_target.workspace.id })
 assert_eq(deleted.ok, true, "delete removes grouping")
@@ -639,9 +734,36 @@ assert_eq(legacy_surface.id, "botster-workspaces-schema-error", "legacy state re
 
 local output_path = os.getenv("BOTSTER_WORKSPACES_SURFACE_JSON")
 if output_path and output_path ~= "" then
-  database = {}
+  database = {
+    workspace_state = {
+      schema_version = 1,
+      payload = {
+        next_workspace = 2,
+        next_timestamp = 2,
+        workspaces = {
+          {
+            id = "ws_contract_alpha",
+            name = "Contract alpha",
+            session_refs = { "88888888-8888-4888-8888-888888888888" },
+            created_at = "plugin-clock-000001",
+            updated_at = "plugin-clock-000001",
+          },
+          {
+            id = "ws_contract_beta",
+            name = "Contract beta",
+            session_refs = {},
+            created_at = "plugin-clock-000002",
+            updated_at = "plugin-clock-000002",
+          },
+        },
+      },
+    },
+  }
   local file = assert(io.open(output_path, "w"))
-  file:write(json_encode({ handler(spec, "workspaces_surface")({}) }))
+  file:write(json_encode({
+    empty_surface,
+    handler(spec, "workspaces_surface")({}),
+  }))
   file:write("\n")
   file:close()
 end

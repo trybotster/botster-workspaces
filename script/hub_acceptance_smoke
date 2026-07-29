@@ -103,6 +103,14 @@ def action(socket, id:, node_id:, kind:, payload: nil, values: nil)
   response.fetch("plugin_action_result")
 end
 
+def assert_rejected(result, field_id, label)
+  assert(result["state"] == "rejected", "#{label} was not rejected")
+  assert(result.fetch("field_errors").key?(field_id), "#{label} did not key its error to #{field_id}")
+  assert(Array(result["form_errors"]).any?, "#{label} did not retain a form error")
+  assert(!result.key?("presentation"), "#{label} unexpectedly mutated presentation")
+  assert(!result.key?("replacement"), "#{label} unexpectedly replaced the surface")
+end
+
 socket = UNIXSocket.new(socket_path)
 socket.puts(JSON.generate({
   protocol: "botster-hub-daemon-v1",
@@ -187,6 +195,15 @@ assert(
   "New workspace did not author presentation state"
 )
 
+rejected_create = action(
+  socket,
+  id: "botster_workspaces.create",
+  node_id: "botster-workspaces-create-form",
+  kind: "submit",
+  values: {}
+)
+assert_rejected(rejected_create, "botster-workspaces-create-name", "missing workspace name")
+
 created_action = action(
   socket,
   id: "botster_workspaces.create",
@@ -226,6 +243,161 @@ assert(
   "workspace selection did not author scoped detail state"
 )
 
+rename_form = find_node(populated_surface, "botster-workspaces-rename-form-#{workspace_id}")
+assert(rename_form, "selected workspace is missing the rendered Rename form")
+rejected_rename = action(
+  socket,
+  id: rename_form.dig("props", "action", "id"),
+  node_id: rename_form.fetch("id"),
+  kind: "submit",
+  payload: rename_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-rename-name" => "" }
+)
+assert_rejected(rejected_rename, "botster-workspaces-rename-name", "missing rename value")
+renamed_workspace_name = "#{workspace_name} Renamed"
+renamed_action = action(
+  socket,
+  id: rename_form.dig("props", "action", "id"),
+  node_id: rename_form.fetch("id"),
+  kind: "submit",
+  payload: rename_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-rename-name" => renamed_workspace_name }
+)
+assert(renamed_action["state"] == "accepted", "Rename action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "name") == renamed_workspace_name,
+  "Rename action did not persist the new name"
+)
+
+destination_name = "#{workspace_name} Destination"
+destination_action = action(
+  socket,
+  id: "botster_workspaces.create",
+  node_id: "botster-workspaces-create-form",
+  kind: "submit",
+  values: { "botster-workspaces-create-name" => destination_name }
+)
+if destination_action["state"] == "accepted"
+  destination_workspace_id = destination_action.dig("payload", "workspace", "id")
+else
+  assert(destination_action["state"] == "error", "destination create returned unexpected state")
+  destination_workspace_id = call_tool(socket, "botster_workspaces.list", {})
+    .fetch("workspaces")
+    .find { |candidate| candidate["name"] == destination_name }
+    &.fetch("id")
+end
+assert(destination_workspace_id, "destination workspace id missing")
+
+membership_session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+action_surface = render_surface(socket)
+add_form = find_node(action_surface, "botster-workspaces-add-form-#{workspace_id}")
+assert(add_form, "selected workspace is missing the rendered Add session form")
+rejected_add = action(
+  socket,
+  id: add_form.dig("props", "action", "id"),
+  node_id: add_form.fetch("id"),
+  kind: "submit",
+  payload: add_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-add-session-id" => "1-2-3-4-5" }
+)
+assert_rejected(rejected_add, "botster-workspaces-add-session-id", "non-canonical Add session UUID")
+added_action = action(
+  socket,
+  id: add_form.dig("props", "action", "id"),
+  node_id: add_form.fetch("id"),
+  kind: "submit",
+  payload: add_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-add-session-id" => membership_session_id }
+)
+assert(added_action["state"] == "accepted", "Add session action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == [membership_session_id],
+  "Add session action did not persist membership"
+)
+
+move_surface = render_surface(socket)
+move_form = find_node(move_surface, "botster-workspaces-move-form-#{workspace_id}")
+assert(move_form, "selected workspace is missing the rendered Move session form")
+rejected_move = action(
+  socket,
+  id: move_form.dig("props", "action", "id"),
+  node_id: move_form.fetch("id"),
+  kind: "submit",
+  payload: move_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-move-destination-id" => destination_workspace_id,
+    "botster-workspaces-move-session-id" => "",
+  }
+)
+assert_rejected(rejected_move, "botster-workspaces-move-session-id", "missing Move session UUID")
+moved_action = action(
+  socket,
+  id: move_form.dig("props", "action", "id"),
+  node_id: move_form.fetch("id"),
+  kind: "submit",
+  payload: move_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-move-destination-id" => destination_workspace_id,
+    "botster-workspaces-move-session-id" => membership_session_id,
+  }
+)
+assert(moved_action["state"] == "accepted", "Move session action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").empty?,
+  "Move session action did not clear source membership"
+)
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs") == [membership_session_id],
+  "Move session action did not persist destination membership"
+)
+
+remove_surface = render_surface(socket)
+remove_button = find_node(remove_surface, "botster-workspaces-remove-#{membership_session_id}")
+assert(remove_button, "destination workspace is missing the rendered Remove session action")
+remove_metadata = remove_button.dig("props", "action")
+removed_action = action(
+  socket,
+  id: remove_metadata.fetch("id"),
+  node_id: remove_button.fetch("id"),
+  kind: "submit",
+  payload: remove_metadata["payload"]
+)
+assert(removed_action["state"] == "accepted", "Remove session action was not accepted")
+assert(!removed_action.key?("presentation"), "Remove session action emitted empty presentation operations")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs").empty?,
+  "Remove session action did not remove destination membership"
+)
+
+delete_destination_surface = render_surface(socket)
+delete_destination_form = find_node(
+  delete_destination_surface,
+  "botster-workspaces-delete-form-#{destination_workspace_id}"
+)
+assert(delete_destination_form, "destination workspace is missing the rendered Delete form")
+rejected_delete = action(
+  socket,
+  id: delete_destination_form.dig("props", "action", "id"),
+  node_id: delete_destination_form.fetch("id"),
+  kind: "submit",
+  payload: delete_destination_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-delete-workspace-id" => "" }
+)
+assert_rejected(rejected_delete, "botster-workspaces-delete-workspace-id", "missing Delete workspace id")
+deleted_destination = action(
+  socket,
+  id: delete_destination_form.dig("props", "action", "id"),
+  node_id: delete_destination_form.fetch("id"),
+  kind: "submit",
+  payload: delete_destination_form.dig("props", "action", "payload")
+)
+assert(deleted_destination["state"] == "accepted", "Delete destination action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("error", "code") == "workspace_not_found",
+  "Delete destination action left the grouping"
+)
+
+populated_surface = render_surface(socket)
 targets = request(socket, { type: "list_spawn_targets" }).fetch("spawn_targets")
 target = targets.find { |candidate| candidate["enabled"] && candidate["kind"] == "git" }
 assert(target, "acceptance Hub needs one enabled Git spawn target")
@@ -259,14 +431,35 @@ assert(template_option, "selected Git target has no effective session template")
 template_id = template_option.dig("props", "value")
 assert(template_id, "effective session template is missing its id")
 
-spawned = call_tool(socket, "botster_workspaces.spawn", {
-  workspace_id: workspace_id,
-  target_id: target.fetch("target_id"),
-  branch: branch,
-  template_id: template_id,
-  prompt: "Workspaces acceptance smoke",
-})
-assert(spawned["ok"] == true, "real atomic Hub spawn failed: #{spawned}")
+spawn_form = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-form-#{workspace_id}-#{target.fetch("target_id")}")
+assert(spawn_form, "target selection did not render the Spawn form")
+rejected_spawn_action = action(
+  socket,
+  id: spawn_form.dig("props", "action", "id"),
+  node_id: spawn_form.fetch("id"),
+  kind: "submit",
+  payload: spawn_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-spawn-branch" => "",
+    "botster-workspaces-spawn-template" => template_id,
+  }
+)
+assert_rejected(rejected_spawn_action, "botster-workspaces-spawn-branch", "missing Spawn branch")
+spawned_action = action(
+  socket,
+  id: spawn_form.dig("props", "action", "id"),
+  node_id: spawn_form.fetch("id"),
+  kind: "submit",
+  payload: spawn_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-spawn-branch" => branch,
+    "botster-workspaces-spawn-template" => template_id,
+    "botster-workspaces-spawn-prompt" => "Workspaces acceptance smoke",
+  }
+)
+assert(spawned_action["state"] == "accepted", "real atomic Hub Spawn action failed: #{spawned_action}")
+spawned = spawned_action.fetch("payload")
+assert(spawned["ok"] == true, "real atomic Hub spawn payload failed: #{spawned}")
 session_id = spawned.fetch("session_id")
 assert(session_id == spawned.dig("hub_result", "session_id"), "workspace did not persist returned Hub UUID")
 assert(spawned.fetch("workspace").fetch("session_refs").count(session_id) == 1, "returned UUID not persisted exactly once")
@@ -302,8 +495,18 @@ assert(
   "post-action surface did not render returned session identity"
 )
 
-deleted = call_tool(socket, "botster_workspaces.delete", { id: workspace_id })
-assert(deleted["ok"] == true, "workspace delete failed")
+delete_form = find_node(post_action_surface, "botster-workspaces-delete-form-#{workspace_id}")
+assert(delete_form, "spawned workspace is missing the rendered Delete form")
+deleted_action = action(
+  socket,
+  id: delete_form.dig("props", "action", "id"),
+  node_id: delete_form.fetch("id"),
+  kind: "submit",
+  payload: delete_form.dig("props", "action", "payload")
+)
+assert(deleted_action["state"] == "accepted", "workspace Delete action failed")
+deleted = deleted_action.fetch("payload")
+assert(deleted["ok"] == true, "workspace Delete action payload failed")
 assert(call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("error", "code") == "workspace_not_found", "grouping still exists")
 sessions_after_delete = request(socket, { type: "list_sessions" }).fetch("sessions")
 assert(sessions_after_delete.any? { |session| session["session_id"] == session_id }, "workspace delete terminated Hub session")

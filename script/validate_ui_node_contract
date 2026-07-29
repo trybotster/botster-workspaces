@@ -28,7 +28,7 @@ Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
   abort_with("surface payload was not generated") unless File.exist?(surfaces_path)
 
   payload = JSON.parse(File.read(surfaces_path))
-  abort_with("expected exactly one app surface payload") unless payload.is_a?(Array) && payload.length == 1
+  abort_with("expected empty and populated app surface payloads") unless payload.is_a?(Array) && payload.length == 2
 
   File.write(File.join(dir, "Cargo.toml"), <<~TOML)
     [package]

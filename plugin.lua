@@ -118,7 +118,7 @@ end
 local function valid_session_id(value)
   local id = trim(value)
   return id ~= nil
-    and id:match("^[0-9a-fA-F]+%-[0-9a-fA-F]+%-[0-9a-fA-F]+%-[0-9a-fA-F]+%-[0-9a-fA-F]+$") ~= nil
+    and id:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") ~= nil
 end
 
 local function validate_state(state)
@@ -169,9 +169,6 @@ local function load_state()
 
   local ok, result = pcall(plugin_db.get, { key = STATE_KEY })
   if not ok then
-    if tostring(result):lower():find("not found", 1, true) then
-      return default_state(), nil
-    end
     return nil, error_result("workspace_state_read_failed", "failed to read workspace state")
   end
   if not result or not result.record then
@@ -317,11 +314,11 @@ local function list_workspaces(arguments)
 end
 
 local function show_workspace(arguments)
-  local rejected = unknown_field(arguments, { id = true, workspace_id = true })
+  local rejected = unknown_field(arguments, { id = true })
   if rejected then
     return error_result("unknown_field", "workspace show does not accept field: " .. rejected, { rejected })
   end
-  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  local workspace_id = trim(arguments.id)
   if not workspace_id then
     return error_result("validation_failed", "workspace id is required", { "id" })
   end
@@ -337,11 +334,11 @@ local function show_workspace(arguments)
 end
 
 local function rename_workspace(arguments)
-  local rejected = unknown_field(arguments, { id = true, workspace_id = true, name = true })
+  local rejected = unknown_field(arguments, { id = true, name = true })
   if rejected then
     return error_result("unknown_field", "workspace rename does not accept field: " .. rejected, { rejected })
   end
-  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  local workspace_id = trim(arguments.id)
   local name = trim(arguments.name)
   local missing = {}
   if not workspace_id then
@@ -375,11 +372,11 @@ local function rename_workspace(arguments)
 end
 
 local function delete_workspace(arguments)
-  local rejected = unknown_field(arguments, { id = true, workspace_id = true })
+  local rejected = unknown_field(arguments, { id = true })
   if rejected then
     return error_result("unknown_field", "workspace delete does not accept field: " .. rejected, { rejected })
   end
-  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  local workspace_id = trim(arguments.id)
   if not workspace_id then
     return error_result("validation_failed", "workspace id is required", { "id" })
   end
@@ -411,15 +408,15 @@ local function delete_workspace(arguments)
 end
 
 local function add_session(arguments)
-  local rejected = unknown_field(arguments, { id = true, workspace_id = true, session_id = true })
+  local rejected = unknown_field(arguments, { workspace_id = true, session_id = true })
   if rejected then
     return error_result("unknown_field", "add session does not accept field: " .. rejected, { rejected })
   end
-  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  local workspace_id = trim(arguments.workspace_id)
   local session_id = trim(arguments.session_id)
   local missing = {}
   if not workspace_id then
-    missing[#missing + 1] = "id"
+    missing[#missing + 1] = "workspace_id"
   end
   if not valid_session_id(session_id) then
     missing[#missing + 1] = "session_id"
@@ -453,15 +450,13 @@ end
 
 local function move_session(arguments)
   local rejected = unknown_field(arguments, {
-    id = true,
-    workspace_id = true,
     destination_workspace_id = true,
     session_id = true,
   })
   if rejected then
     return error_result("unknown_field", "move session does not accept field: " .. rejected, { rejected })
   end
-  local destination_id = trim(arguments.destination_workspace_id or arguments.workspace_id or arguments.id)
+  local destination_id = trim(arguments.destination_workspace_id)
   local session_id = trim(arguments.session_id)
   local missing = {}
   if not destination_id then
@@ -515,17 +510,17 @@ local function move_session(arguments)
 end
 
 local function remove_session(arguments)
-  local rejected = unknown_field(arguments, { id = true, workspace_id = true, session_id = true })
+  local rejected = unknown_field(arguments, { workspace_id = true, session_id = true })
   if rejected then
     return error_result("unknown_field", "remove session does not accept field: " .. rejected, { rejected })
   end
-  local workspace_id = trim(arguments.id or arguments.workspace_id)
+  local workspace_id = trim(arguments.workspace_id)
   local session_id = trim(arguments.session_id)
   if not workspace_id or not valid_session_id(session_id) then
     return error_result(
       "validation_failed",
       "remove session requires a workspace and canonical session UUID",
-      { "id", "session_id" }
+      { "workspace_id", "session_id" }
     )
   end
 
@@ -606,7 +601,6 @@ end
 
 local function spawn_session(arguments)
   local rejected = unknown_field(arguments, {
-    id = true,
     workspace_id = true,
     target_id = true,
     branch = true,
@@ -618,7 +612,7 @@ local function spawn_session(arguments)
     return error_result("unknown_field", "spawn session does not accept field: " .. rejected, { rejected })
   end
 
-  local workspace_id = trim(arguments.workspace_id or arguments.id)
+  local workspace_id = trim(arguments.workspace_id)
   local target_id = trim(arguments.target_id)
   local branch = trim(arguments.branch)
   local template_id = trim(arguments.template_id)
@@ -721,21 +715,10 @@ local function action_result(arguments, state, extra)
   return result
 end
 
-local FIELD_IDS = {
-  name = "botster-workspaces-name",
-  id = "botster-workspaces-workspace-id",
-  workspace_id = "botster-workspaces-workspace-id",
-  destination_workspace_id = "botster-workspaces-destination-id",
-  session_id = "botster-workspaces-session-id",
-  target_id = "botster-workspaces-spawn-target",
-  branch = "botster-workspaces-spawn-branch",
-  template_id = "botster-workspaces-spawn-template",
-}
-
-local function action_error(arguments, result)
+local function action_error(arguments, result, field_ids)
   local field_errors = {}
   for _, field in ipairs(result.fields or {}) do
-    local id = FIELD_IDS[field] or field
+    local id = (field_ids or {})[field] or field
     field_errors[id] = { result.error.message }
   end
   return action_result(arguments, result.error.code == "validation_failed" and "rejected" or "error", {
@@ -772,15 +755,17 @@ local function open_presentation(arguments)
   if payload.dialog then
     operations[#operations + 1] = presentation_set("workspace-dialog", payload.dialog)
   end
-  return action_result(arguments, "accepted", { presentation = operations })
+  return action_result(arguments, "accepted", {
+    presentation = #operations > 0 and operations or nil,
+  })
 end
 
 local workspaces_surface
 
-local function mutation_action(arguments, operation, values, close_dialog)
+local function mutation_action(arguments, operation, values, close_dialog, field_ids)
   local result = operation(values)
   if not result.ok then
-    return action_error(arguments, result)
+    return action_error(arguments, result, field_ids)
   end
   local presentation = {}
   if close_dialog then
@@ -788,7 +773,7 @@ local function mutation_action(arguments, operation, values, close_dialog)
   end
   return action_result(arguments, "accepted", {
     normalized_values = values,
-    presentation = presentation,
+    presentation = #presentation > 0 and presentation or nil,
     replacement = workspaces_surface(),
     payload = result,
   })
@@ -797,14 +782,19 @@ end
 local function create_workspace_action(arguments)
   return mutation_action(arguments, create_workspace, {
     name = form_value(arguments, "name", "botster-workspaces-create-name"),
-  }, true)
+  }, true, {
+    name = "botster-workspaces-create-name",
+  })
 end
 
 local function rename_workspace_action(arguments)
   return mutation_action(arguments, rename_workspace, {
     id = form_value(arguments, "workspace_id", "botster-workspaces-rename-workspace-id"),
     name = form_value(arguments, "name", "botster-workspaces-rename-name"),
-  }, true)
+  }, true, {
+    id = "botster-workspaces-rename-workspace-id",
+    name = "botster-workspaces-rename-name",
+  })
 end
 
 local function delete_workspace_action(arguments)
@@ -812,7 +802,9 @@ local function delete_workspace_action(arguments)
     id = form_value(arguments, "workspace_id", "botster-workspaces-delete-workspace-id"),
   })
   if not result.ok then
-    return action_error(arguments, result)
+    return action_error(arguments, result, {
+      id = "botster-workspaces-delete-workspace-id",
+    })
   end
   return action_result(arguments, "accepted", {
     presentation = {
@@ -826,9 +818,12 @@ end
 
 local function add_session_action(arguments)
   return mutation_action(arguments, add_session, {
-    id = form_value(arguments, "workspace_id", "botster-workspaces-add-workspace-id"),
+    workspace_id = form_value(arguments, "workspace_id", "botster-workspaces-add-workspace-id"),
     session_id = form_value(arguments, "session_id", "botster-workspaces-add-session-id"),
-  }, true)
+  }, true, {
+    workspace_id = "botster-workspaces-add-workspace-id",
+    session_id = "botster-workspaces-add-session-id",
+  })
 end
 
 local function move_session_action(arguments)
@@ -839,15 +834,21 @@ local function move_session_action(arguments)
       "botster-workspaces-move-destination-id"
     ),
     session_id = form_value(arguments, "session_id", "botster-workspaces-move-session-id"),
-  }, true)
+  }, true, {
+    destination_workspace_id = "botster-workspaces-move-destination-id",
+    session_id = "botster-workspaces-move-session-id",
+  })
 end
 
 local function remove_session_action(arguments)
   local payload = type(arguments.payload) == "table" and arguments.payload or {}
   return mutation_action(arguments, remove_session, {
-    id = payload.workspace_id,
+    workspace_id = payload.workspace_id,
     session_id = payload.session_id,
-  }, false)
+  }, false, {
+    workspace_id = "botster-workspaces-remove-workspace-id",
+    session_id = "botster-workspaces-remove-session-id",
+  })
 end
 
 local function select_spawn_target_action(arguments)
@@ -858,7 +859,9 @@ local function select_spawn_target_action(arguments)
       "validation_failed",
       "choose a spawn point",
       { "target_id" }
-    ))
+    ), {
+      target_id = "botster-workspaces-spawn-target",
+    })
   end
   return action_result(arguments, "accepted", {
     normalized_values = {
@@ -880,7 +883,12 @@ local function spawn_session_action(arguments)
     template_id = form_value(arguments, "template_id", "botster-workspaces-spawn-template"),
     prompt = form_value(arguments, "prompt", "botster-workspaces-spawn-prompt"),
     ticket_id = form_value(arguments, "ticket_id", "botster-workspaces-spawn-ticket"),
-  }, true)
+  }, true, {
+    workspace_id = "botster-workspaces-spawn-workspace-id",
+    target_id = "botster-workspaces-spawn-target-id",
+    branch = "botster-workspaces-spawn-branch",
+    template_id = "botster-workspaces-spawn-template",
+  })
 end
 
 local function text_node(id, text, tone)
@@ -1001,7 +1009,7 @@ local function create_dialog()
   )
 end
 
-local function workspace_dialogs(workspace, rows, targets)
+local function workspace_dialogs(workspace, rows, targets, templates_by_target)
   local move_destinations = {}
   for _, row in ipairs(rows) do
     if row.id ~= workspace.id then
@@ -1171,51 +1179,76 @@ local function workspace_dialogs(workspace, rows, targets)
   end
 
   for _, target in ipairs(targets) do
-    local templates = templates_for_target(target.id) or {}
-    if #templates > 0 then
-      dialogs[#dialogs + 1] = dialog_if(
-        "workspace-dialog",
-        "spawn:" .. workspace.id .. ":" .. target.id,
-        "botster-workspaces-spawn-dialog-" .. workspace.id .. "-" .. target.id,
-        "Spawn session",
+    local projection = templates_by_target[target.id]
+    local templates = projection.templates
+    local spawn_body
+    if projection.error then
+      spawn_body = {
         {
-          form_node(
-            "botster-workspaces-spawn-form-" .. workspace.id .. "-" .. target.id,
-            "botster_workspaces.spawn",
-            "Spawn session",
-            {
-              text_input(
-                "botster-workspaces-spawn-target-id",
-                "target_id",
-                "Spawn point",
-                { value = target.id, disabled = true }
-              ),
-              text_input(
-                "botster-workspaces-spawn-workspace-id",
-                "workspace_id",
-                "Workspace",
-                { value = workspace.id, disabled = true }
-              ),
-              text_input(
-                "botster-workspaces-spawn-branch",
-                "branch",
-                "Branch / worktree",
-                { required = true }
-              ),
-              select_input(
-                "botster-workspaces-spawn-template",
-                "template_id",
-                "Session type",
-                templates
-              ),
-              text_input("botster-workspaces-spawn-prompt", "prompt", "Prompt"),
-              text_input("botster-workspaces-spawn-ticket", "ticket_id", "Ticket"),
-            },
-            { workspace_id = workspace.id, target_id = target.id }
-          ),
-        }
-      )
+          type = "empty_state",
+          id = "botster-workspaces-spawn-error-" .. workspace.id .. "-" .. target.id,
+          props = {
+            title = "Session types unavailable",
+            description = projection.error.error.message,
+          },
+        },
+      }
+    elseif #templates == 0 then
+      spawn_body = {
+        {
+          type = "empty_state",
+          id = "botster-workspaces-spawn-empty-" .. workspace.id .. "-" .. target.id,
+          props = {
+            title = "No session types",
+            description = "No session types are available for this spawn point.",
+          },
+        },
+      }
+    else
+      spawn_body = {
+        form_node(
+          "botster-workspaces-spawn-form-" .. workspace.id .. "-" .. target.id,
+          "botster_workspaces.spawn",
+          "Spawn session",
+          {
+            text_input(
+              "botster-workspaces-spawn-target-id",
+              "target_id",
+              "Spawn point",
+              { value = target.id, disabled = true }
+            ),
+            text_input(
+              "botster-workspaces-spawn-workspace-id",
+              "workspace_id",
+              "Workspace",
+              { value = workspace.id, disabled = true }
+            ),
+            text_input(
+              "botster-workspaces-spawn-branch",
+              "branch",
+              "Branch / worktree",
+              { required = true }
+            ),
+            select_input(
+              "botster-workspaces-spawn-template",
+              "template_id",
+              "Session type",
+              templates
+            ),
+            text_input("botster-workspaces-spawn-prompt", "prompt", "Prompt"),
+            text_input("botster-workspaces-spawn-ticket", "ticket_id", "Ticket"),
+          },
+          { workspace_id = workspace.id, target_id = target.id }
+        ),
+      }
     end
+    dialogs[#dialogs + 1] = dialog_if(
+      "workspace-dialog",
+      "spawn:" .. workspace.id .. ":" .. target.id,
+      "botster-workspaces-spawn-dialog-" .. workspace.id .. "-" .. target.id,
+      "Spawn session",
+      spawn_body
+    )
   end
   return dialogs
 end
@@ -1263,7 +1296,7 @@ local function session_list(workspace)
   }
 end
 
-local function workspace_detail(workspace, rows, targets)
+local function workspace_detail(workspace, rows, targets, templates_by_target)
   local actions = {
     button_node(
       "botster-workspaces-spawn-" .. workspace.id,
@@ -1313,7 +1346,7 @@ local function workspace_detail(workspace, rows, targets)
       },
     },
   }
-  for _, dialog in ipairs(workspace_dialogs(workspace, rows, targets)) do
+  for _, dialog in ipairs(workspace_dialogs(workspace, rows, targets, templates_by_target)) do
     body[#body + 1] = dialog
   end
   return {
@@ -1345,12 +1378,14 @@ local function workspace_index(rows)
       props = {
         title = "No workspaces",
         description = "Create a workspace to group related Botster sessions.",
-        action = {
-          id = "botster_workspaces.open",
-          payload = { dialog = "create" },
-        },
       },
     }
+    children[#children + 1] = button_node(
+      "botster-workspaces-empty-create",
+      "New workspace",
+      "botster_workspaces.open",
+      { dialog = "create" }
+    )
   else
     for _, row in ipairs(rows) do
       children[#children + 1] = {
@@ -1404,12 +1439,20 @@ workspaces_surface = function()
   end
   local rows = sorted_rows(state)
   local targets = spawn_targets() or {}
+  local templates_by_target = {}
+  for _, target in ipairs(targets) do
+    local templates, template_error = templates_for_target(target.id)
+    templates_by_target[target.id] = {
+      templates = templates or {},
+      error = template_error,
+    }
+  end
   local body = {
     workspace_index(rows),
     create_dialog(),
   }
   for _, workspace in ipairs(state.workspaces) do
-    body[#body + 1] = workspace_detail(workspace, rows, targets)
+    body[#body + 1] = workspace_detail(workspace, rows, targets, templates_by_target)
   end
   return {
     type = "panel",
@@ -1546,8 +1589,8 @@ return botster.register({
         type = "object",
         properties = {
           id = { type = "string" },
-          workspace_id = { type = "string" },
         },
+        required = { "id" },
         additionalProperties = false,
       },
       handler = "show_workspace",
@@ -1560,10 +1603,9 @@ return botster.register({
         type = "object",
         properties = {
           id = { type = "string" },
-          workspace_id = { type = "string" },
           name = { type = "string" },
         },
-        required = { "name" },
+        required = { "id", "name" },
         additionalProperties = false,
       },
       handler = "rename_workspace",
@@ -1576,8 +1618,8 @@ return botster.register({
         type = "object",
         properties = {
           id = { type = "string" },
-          workspace_id = { type = "string" },
         },
+        required = { "id" },
         additionalProperties = false,
       },
       handler = "delete_workspace",
@@ -1589,11 +1631,10 @@ return botster.register({
       input_schema = {
         type = "object",
         properties = {
-          id = { type = "string" },
           workspace_id = { type = "string" },
           session_id = { type = "string" },
         },
-        required = { "session_id" },
+        required = { "workspace_id", "session_id" },
         additionalProperties = false,
       },
       handler = "add_session",
@@ -1605,12 +1646,10 @@ return botster.register({
       input_schema = {
         type = "object",
         properties = {
-          id = { type = "string" },
-          workspace_id = { type = "string" },
           destination_workspace_id = { type = "string" },
           session_id = { type = "string" },
         },
-        required = { "session_id" },
+        required = { "destination_workspace_id", "session_id" },
         additionalProperties = false,
       },
       handler = "move_session",
@@ -1622,11 +1661,10 @@ return botster.register({
       input_schema = {
         type = "object",
         properties = {
-          id = { type = "string" },
           workspace_id = { type = "string" },
           session_id = { type = "string" },
         },
-        required = { "session_id" },
+        required = { "workspace_id", "session_id" },
         additionalProperties = false,
       },
       handler = "remove_session",
@@ -1638,7 +1676,6 @@ return botster.register({
       input_schema = {
         type = "object",
         properties = {
-          id = { type = "string" },
           workspace_id = { type = "string" },
           target_id = { type = "string" },
           branch = { type = "string" },
@@ -1646,7 +1683,7 @@ return botster.register({
           prompt = { type = "string" },
           ticket_id = { type = "string" },
         },
-        required = { "target_id", "branch", "template_id" },
+        required = { "workspace_id", "target_id", "branch", "template_id" },
         additionalProperties = false,
       },
       handler = "spawn_session",

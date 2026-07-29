@@ -9,29 +9,8 @@
     { "surface": "mcp" },
     { "surface": "plugin_db", "scope": "botster-workspaces" },
     { "surface": "surfaces" },
-    { "surface": "filesystem", "scope": "workspace" }
+    { "surface": "session_actions", "scope": "session_template_managed_git_spawn" }
   ],
-  "configuration": {
-    "groups": [
-      {
-        "id": "workspace_defaults",
-        "label": "Workspace defaults"
-      }
-    ],
-    "fields": [
-      {
-        "key": "archive_policy",
-        "type": "select",
-        "label": "Archive policy",
-        "group": "workspace_defaults",
-        "default": { "type": "select", "value": "mark_deleted" },
-        "options": [
-          { "value": "mark_deleted", "label": "Mark deleted" },
-          { "value": "archive", "label": "Archive" }
-        ]
-      }
-    ]
-  },
   "surfaces": [
     {
       "id": "workspaces",
@@ -39,15 +18,6 @@
       "title": "Workspaces",
       "description": "Descriptor-backed workspace package surface bound to workspace entity state.",
       "icon": "rectangle-group",
-      "category": "workspace",
-      "supports": ["render"]
-    },
-    {
-      "id": "workspaces-settings",
-      "kind": "settings",
-      "title": "Workspaces Settings",
-      "description": "Descriptor-backed workspace settings surface for package-level workspace defaults.",
-      "icon": "cog-6-tooth",
       "category": "workspace",
       "supports": ["render"]
     }
@@ -59,13 +29,6 @@
       "icon": "rectangle-group",
       "description": "Open the workspace records surface.",
       "target": { "kind": "surface", "surface_id": "workspaces" }
-    },
-    {
-      "id": "workspaces-settings",
-      "label": "Workspaces Settings",
-      "icon": "cog-6-tooth",
-      "description": "Open workspace package defaults.",
-      "target": { "kind": "surface", "surface_id": "workspaces-settings" }
     }
   ],
   "entrypoints": [

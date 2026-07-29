@@ -1,176 +1,130 @@
 # botster-workspaces
 
-First-party Botster workspace plugin.
+First-party Botster plugin for contextual session grouping.
 
-This package is intended to own workspace state for local projects, spawn targets,
-sessions, and workspace-scoped settings without moving that product policy into
-botster-hub.
+## Contextual session grouping
 
-## Current scope
+A workspace is a user-named grouping of Hub session identities. Its persisted
+record is exactly:
 
-This repository is an installable workspace plugin. It declares package
-metadata, package-level workspace defaults, descriptor-backed app/settings surfaces,
-explicit workspace contract capabilities, and a Lua entrypoint with plugin-owned
-runtime operations.
+```text
+{ id, name, session_refs, created_at, updated_at }
+```
 
-The first workspace domain contract is defined in:
+The package owns names, grouping membership, and the workspace workflow. The
+Hub remains authoritative for spawn points, effective session types, managed
+Git worktrees, session UUIDs, processes, terminals, and lifecycle.
 
-- `docs/workspace-domain.md`
-- `docs/capabilities.md`
-- `test/fixtures/workspaces/contract.json`
-
-The contract defines create/list/show/update/delete workspace behavior,
-plugin-owned workspace records, local repo reference metadata, spawn target
-references, session grouping, default session template references, workspace
-settings, and workspace entity read models.
-
-Runtime workspace records persist through `plugin_db`. The public operation path
-is exposed through Botster plugin tools:
+The public plugin tools are:
 
 - `botster_workspaces.create`
 - `botster_workspaces.list`
 - `botster_workspaces.show`
-- `botster_workspaces.update`
+- `botster_workspaces.rename`
 - `botster_workspaces.delete`
-- `botster_workspaces.refresh_template_diagnostics`
-- `botster_workspaces.spawn_default_session`
+- `botster_workspaces.add_session`
+- `botster_workspaces.move_session`
+- `botster_workspaces.remove_session`
+- `botster_workspaces.spawn`
 - `botster_workspaces.entity_snapshot`
 
-The operations create/list/show/update/delete workspace records, attach sanitized
-repo and spawn-target references, group hub session UUID references with
-plugin-owned role/template/status metadata, cache diagnostics for referenced hub
-session templates, and return read models identified as
-`botster-workspaces.workspace`. A workspace can request a selected default
-template through the hub-owned `spawn_session_template` API with workspace
-context limited to the proven workspace id, prompt, ticket id, and branch name
-fields. Cwd/env materialization remains hub template data, not plugin-authored
-spawn payload. The plugin does not construct raw process, PTY, spawn target,
-command, cwd/env override, metadata, or filesystem requests. Delete marks a
-workspace deleted and does not delete hub sessions, package records, spawn
-targets, repository content, or host filesystem content.
+One session UUID belongs to at most one workspace. Add rejects an existing
+owner; move removes the source membership and adds the destination membership
+in one `plugin_db` write; remove changes only grouping. Deleting a workspace
+removes only that grouping record. It never terminates a session or removes a
+worktree, branch, or repository.
 
-Default template selection is currently tool-driven. Clients select a workspace
-default by calling `botster_workspaces.update` with
-`default_session_template_refs` and exactly one `selected` reference; app and
-settings surfaces render the selected/cached read model, while
-`botster_workspaces.spawn_default_session` consumes that selected reference for
-the hub-owned template spawn request. This package does not register a separate
-UI action descriptor for template selection in this milestone.
+## Workspace app
 
-This package does not implement agent orchestration, session actions, or a
-runnable app process yet. Runtime paths use plugin-owned persistence and hub
-capability references rather than direct host filesystem access or hub storage
-rewrites.
+The package declares one app surface and one navigation item, both named
+`workspaces`. The stable Hub surface path is
+`/packages/botster-workspaces/surfaces/workspaces`.
 
-## Authority boundary
+The initial index contains a contextual **New workspace** action, workspace
+rows, and an empty state. Forms are materialized only after an accepted plugin
+action sets scoped client-local presentation state. Selecting a row reveals the
+detail presentation on the same route and remains stable across rerenders.
 
-Plugin-owned state:
+Detail preserves every referenced session UUID and exposes:
 
-- workspace records
-- local repo reference metadata
-- spawn target reference metadata
-- session group references
-- default session template references and cached diagnostics
-- workspace settings
-- workspace entity read models
+- Spawn
+- rename
+- delete
+- Add or move an existing session
+- remove membership
 
-Hub-owned authority:
+Current-versus-ended lifecycle grouping is intentionally deferred until the Hub
+provides the canonical projection. This package does not persist, poll, or
+guess lifecycle truth.
 
-- package install, provenance, lock metadata, and enablement
-- spawn target admission and spawn authorization
-- session-template registry, resolution, context injection, and spawn
-  materialization
-- process and PTY lifecycle
-- session UUIDs, terminal transport, scrollback, and recovery
-- scoped filesystem enforcement
+Spawn is target-first. The package lists enabled Git spawn points, then asks
+the Hub for effective session types for the selected target. It calls only
+`session_templates.ensure_worktree_and_spawn`. After success it records exactly
+the returned `result.session_id`; a rejection or worker error records nothing.
+If the Hub spawn succeeds but the following grouping write fails, the action
+reports the returned ungrouped UUID and does not claim membership.
+
+## Clean-start data
+
+This is a cold replacement of the pre-release workspace product. The package
+does not normalize or migrate old records. Existing pre-release users must stop
+the old Hub and either:
+
+1. start the current Hub with a new empty `--data-dir`; or
+2. back up and explicitly discard the old disposable Hub data directory before
+   reinstalling.
+
+The package performs no automatic reset or deletion. Encountering an old
+record returns the typed `legacy_workspace_schema` error with this clean-start
+guidance.
 
 ## Local development
 
-Use an isolated Botster data directory when proving package install and
-enablement:
+Use a fresh Hub data directory, isolated from any pre-release state:
 
 ```sh
 tmp_data_dir="$(mktemp -d /tmp/botster-workspaces.XXXXXX)"
 
 botster-hub packages install --data-dir "$tmp_data_dir" --path ../botster-workspaces
-botster-hub packages show --data-dir "$tmp_data_dir" botster-workspaces
 botster-hub packages enable --data-dir "$tmp_data_dir" botster-workspaces
 botster-hub packages show --data-dir "$tmp_data_dir" botster-workspaces
 botster-hub packages list --data-dir "$tmp_data_dir"
-botster-hub packages config --data-dir "$tmp_data_dir" botster-workspaces
-botster-hub packages config set --data-dir "$tmp_data_dir" botster-workspaces '{"archive_policy":{"type":"select","value":"archive"}}'
-botster-hub packages reload --data-dir "$tmp_data_dir" botster-workspaces
 ```
 
-The second `packages show` should report the package as enabled and expose the
-`configuration` schema with the `archive_policy` field. The package has no
-required configuration values, so enablement should not report missing
-configuration diagnostics. A valid `packages config set` persists the selected
-package-global default through the hub package configuration path; an unsupported
-select value or unknown field should fail through the same path with a package
-configuration diagnostic. Reload the package after changing configuration so the
-plugin worker receives the refreshed effective values before creating new
-workspace records.
-
-For app/settings discovery, verify that the package row exposes explicit
-package navigation entries and descriptor surfaces. Navigation entries declare
-that existing plugin surfaces are discoverable by host clients; they do not
-declare global ordering, priority, pinning, hiding, sidebar placement, route
-layout, padding, or local navigation. Browser and TUI clients own presentation
-placement over the stable navigation and route ids. Surface root `UiNode`s own
-only the page content rendered through the plugin surface contract.
-The daemon production path is `list_package_navigation`, which returns
-`package_navigation` rows admitted by the hub.
-
-- app surface: `workspaces`, icon `rectangle-group`
-- settings surface: `workspaces-settings`, label `Workspaces Settings`, icon
-  `cog-6-tooth`
-
-Hub route descriptors are derived from the package surface descriptors and
-configuration schema. Clients should use these stable ids and paths:
-
-- app navigation item id: `workspaces`
-- settings navigation item id: `workspaces-settings`
-- app route id: `surface:workspaces`
-- app route path: `/packages/botster-workspaces/surfaces/workspaces`
-- settings surface route id: `surface:workspaces-settings`
-- settings surface route path: `/packages/botster-workspaces/surfaces/workspaces-settings`
-- package settings route id: `settings`
-- package settings route path: `/packages/botster-workspaces/settings`
-
-Both surfaces render structural UI from plugin-owned workspace state through the
-same hub plugin surface contract consumed by browser and TUI clients. The app
-surface is an operator workspace index composed from UINode application
-primitives: a `metric_grid` summary, presentational `toolbar`, `section` and
-`panel` regions, a `list`/`list_item` workspace index, `status_badge` status
-display, and an `empty_state` for no active workspaces. Workspace rows show
-name, purpose, repo reference label, spawn target label, status, session count,
-default template summary, and cached template diagnostics.
-
-The settings surface uses the same primitive vocabulary to show the effective
-archive policy, package defaults, and workspace template diagnostics. Create and
-spawn remain declared as supported UINode `form` plus `button` action contracts;
-shipped clients do not yet submit those forms through `plugin_surface_action`.
-The working invocation paths today are the plugin MCP tools and hub action API.
-Rows, forms, and toolbars do not claim activation, selection, or browser-submit
-behavior until shipped clients consume those interaction props. The package does
-not emit iframe, custom HTML, private binding nodes, or `action_bar`.
-
-The package intentionally does not declare a `runnable_entrypoints` item because
-there is no workspace process to launch yet.
-
-## Verification
-
-Run the scaffold checks:
+Run the repository checks:
 
 ```sh
 script/test
+
+BOTSTER_UI_CONTRACT_PATH=/path/to/botster-hub/crates/botster-ui-contract \
+  script/validate_ui_node_contract
 ```
 
-The harness validates the manifest, docs, fixtures, create/list/show/update/delete
-contract examples, template diagnostics, selected-template spawn request shape,
-registered plugin operations, plugin.db-backed runtime semantics, entity read
-models, surface bindings, capability coverage, and leak scans for docs,
-fixtures, and runtime tests.
+The second command validates the owner-authored tree against the exact Hub
+`botster-ui-contract` artifact. There is no Core-backed fallback.
 
-Then run the local Botster smoke flow above against a real `botster-hub` binary.
+For real package behavior, start a current Hub from a fresh data directory,
+install and enable this checkout, then run:
+
+```sh
+script/hub_acceptance_smoke /path/to/current-hub.sock
+```
+
+That smoke crosses the registered package, plugin worker, atomic managed-Git
+spawn, persistence/restart, surface render, and non-destructive delete paths.
+
+The package-specific Web render/route smoke is:
+
+```sh
+BOTSTER_HUB_BIN=/path/to/botster-hub \
+BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
+BOTSTER_WORKSPACES_PACKAGE_PATH="$PWD" \
+  npm run smoke:live-packaged-protocol
+```
+
+Run it from the current `botster-web` repository. Final Workspaces-specific
+browser and TUI click-through is tracked by the coordinated integration ticket.
+
+See [docs/workspace-domain.md](docs/workspace-domain.md) and
+[docs/capabilities.md](docs/capabilities.md) for the exact domain and authority
+contracts.

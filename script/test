@@ -14,303 +14,172 @@ def assert(condition, message)
 end
 
 manifest = JSON.parse(read("botster-package.json"))
+contract = JSON.parse(read("test/fixtures/workspaces/contract.json"))
+plugin = read("plugin.lua")
 readme = read("README.md")
-gitignore = read(".gitignore")
-workspace_doc = read("docs/workspace-domain.md")
+domain_doc = read("docs/workspace-domain.md")
 capabilities_doc = read("docs/capabilities.md")
-workspace_contract = JSON.parse(read("test/fixtures/workspaces/contract.json"))
+gitignore = read(".gitignore")
 
 assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
 assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
-assert(manifest["version"].is_a?(String) && !manifest["version"].empty?, "manifest version is required")
-assert(manifest["botster"].is_a?(String) && !manifest["botster"].empty?, "Botster compatibility is required")
-assert(manifest["source"] == { "type" => "path", "path" => "." }, "source must describe local path install")
-assert(manifest["capabilities"].is_a?(Array), "capabilities must be an array")
+assert(manifest["source"] == { "type" => "path", "path" => "." }, "manifest source must be the package path")
+assert(manifest["capabilities"] == contract.fetch("manifest_capabilities"), "manifest capabilities must match contract")
+assert(!manifest.key?("configuration"), "manifest must not retain workspace settings")
 
-logical_capabilities = %w[
-  plugin_db
-  mcp
-  surfaces
-  spawn_targets:read
-  sessions:read
-  process:spawn
-  filesystem:scoped_repo
-]
-manifest_capabilities = workspace_contract.fetch("manifest_capabilities")
-assert(manifest["capabilities"] == manifest_capabilities, "manifest capabilities must match hub-compiled schema contract")
+surfaces = manifest.fetch("surfaces")
+assert(surfaces.length == 1, "manifest must declare one surface")
+assert(surfaces.first["id"] == "workspaces", "stable workspaces surface is required")
+assert(surfaces.first["kind"] == "app", "workspaces surface must be an app")
+assert(surfaces.first["supports"] == ["render"], "workspaces surface must support render")
 
-configuration = manifest.fetch("configuration")
-assert(configuration["groups"].is_a?(Array), "configuration.groups must be an array")
-assert(configuration["fields"].is_a?(Array), "configuration.fields must be an array")
-archive_policy = configuration["fields"].find { |field| field["key"] == "archive_policy" }
-assert(archive_policy, "configuration must declare archive_policy")
-assert(archive_policy["type"] == "select", "archive_policy must be a select field")
-assert(archive_policy["default"] == { "type" => "select", "value" => "mark_deleted" }, "archive_policy default must be mark_deleted")
-assert(archive_policy["options"].map { |option| option["value"] } == %w[mark_deleted archive], "archive_policy options must be stable")
+navigation = manifest.fetch("navigation")
+assert(navigation == contract.fetch("navigation"), "manifest navigation must match contract")
+assert(navigation.length == 1, "manifest must declare one navigation entry")
+assert(navigation.first.dig("target", "surface_id") == "workspaces", "navigation must target stable surface")
 
 entrypoints = manifest.fetch("entrypoints")
-assert(entrypoints.is_a?(Array) && entrypoints.length == 1, "exactly one Lua entrypoint is expected")
-entrypoint = entrypoints.first
-assert(entrypoint["runtime"] == "lua", "entrypoint runtime must be lua")
-assert(entrypoint["path"] == "plugin.lua", "entrypoint path must be plugin.lua")
-assert(entrypoint["bootstrap"] == false, "entrypoint bootstrap must be false")
-assert(File.file?(File.join(ROOT, entrypoint["path"])), "entrypoint file must exist")
-plugin_lua = read(entrypoint["path"])
-%w[
+assert(entrypoints == [{ "runtime" => "lua", "path" => "plugin.lua", "bootstrap" => false }], "one Lua entrypoint is required")
+
+required_plugin_tokens = %w[
   botster_workspaces.create
   botster_workspaces.list
   botster_workspaces.show
-  botster_workspaces.update
+  botster_workspaces.rename
   botster_workspaces.delete
-  botster_workspaces.refresh_template_diagnostics
-  botster_workspaces.spawn_default_session
+  botster_workspaces.add_session
+  botster_workspaces.move_session
+  botster_workspaces.remove_session
+  botster_workspaces.spawn
   botster_workspaces.entity_snapshot
+  botster_workspaces.open
+  botster_workspaces.select_spawn_target
+  ensure_worktree_and_spawn
+  session_templates
+  spawn_targets
   plugin_db
   surface_route
+  presentation_if
+  selected-workspace
+  workspace-dialog
   botster-workspaces.workspace
-  spawn_session_template
-].each do |needle|
-  assert(plugin_lua.include?(needle), "plugin entrypoint must wire #{needle}")
-end
-
-surfaces = manifest.fetch("surfaces")
-assert(surfaces.is_a?(Array), "surfaces must be an array")
-supported_surface_keys = %w[id kind title description icon category supports]
-forbidden_placement_keys = %w[order priority pinned hidden placement sidebar_position sort section]
-surfaces.each do |surface|
-  unsupported = surface.keys - supported_surface_keys
-  assert(unsupported.empty?, "surface #{surface["id"]} uses unsupported descriptor keys: #{unsupported.join(", ")}")
-  forbidden_placement_keys.each do |key|
-    assert(!surface.key?(key), "surface #{surface["id"]} must not declare placement authority #{key}")
-  end
-  assert(surface["supports"] == ["render"], "surface #{surface["id"]} must support render")
-  assert(surface["icon"].is_a?(String) && !surface["icon"].empty?, "surface #{surface["id"]} must declare an icon")
-  assert(surface["category"] == "workspace", "surface #{surface["id"]} must declare workspace category")
-end
-surface_by_kind = surfaces.group_by { |surface| surface["kind"] }
-assert(surface_by_kind["app"]&.any? { |surface| surface["id"] == "workspaces" }, "workspaces app surface is required")
-assert(surface_by_kind["settings"]&.any? { |surface| surface["id"] == "workspaces-settings" }, "workspaces settings surface is required")
-surface_ids = surfaces.map { |surface| surface.fetch("id") }
-
-navigation = manifest.fetch("navigation")
-assert(navigation == workspace_contract.fetch("navigation"), "manifest navigation must match workspace contract")
-assert(navigation.is_a?(Array) && navigation.length == 2, "explicit navigation entries are required")
-navigation.each do |entry|
-  unsupported = entry.keys - %w[id label icon description target]
-  assert(unsupported.empty?, "navigation #{entry["id"]} uses unsupported keys: #{unsupported.join(", ")}")
-  forbidden_placement_keys.each do |key|
-    assert(!entry.key?(key), "navigation #{entry["id"]} must not declare placement authority #{key}")
-  end
-  assert(entry["id"].is_a?(String) && !entry["id"].empty?, "navigation entry id is required")
-  assert(entry["label"].is_a?(String) && !entry["label"].empty?, "navigation #{entry["id"]} label is required")
-  assert(entry["icon"].is_a?(String) && !entry["icon"].empty?, "navigation #{entry["id"]} icon is required")
-  target = entry.fetch("target")
-  assert(target == { "kind" => "surface", "surface_id" => entry["id"] }, "navigation #{entry["id"]} must target matching surface")
-  assert(surface_ids.include?(target.fetch("surface_id")), "navigation #{entry["id"]} must target a declared surface")
-end
-assert(navigation.map { |entry| entry.fetch("id") } == %w[workspaces workspaces-settings], "navigation ids must stay stable")
-
-%w[
-  Workspace\ Record
-  Default\ Session\ Templates
-  Create
-  List
-  Show
-  Update
-  Delete\ Or\ Archive
-  Entity\ Read\ Models
-  Persistence\ Boundary
-].each do |heading|
-  assert(workspace_doc.include?(heading.tr("\\", "")), "workspace domain doc must include #{heading.tr("\\", "")}")
-end
-
-%w[
-  Declared\ Capabilities
-  Plugin-Owned\ State
-  Hub-Owned\ Authority
-  Contract\ Assertions
-].each do |heading|
-  assert(capabilities_doc.include?(heading.tr("\\", "")), "capabilities doc must include #{heading.tr("\\", "")}")
-end
-
-logical_capabilities.each do |capability|
-  assert(capabilities_doc.include?(capability), "capabilities doc must mention #{capability}")
-  assert(workspace_contract.fetch("required_capabilities").include?(capability), "fixture must require #{capability}")
-end
-manifest_capabilities.each do |capability|
-  assert(capability["surface"].is_a?(String) && !capability["surface"].empty?, "manifest capability surface is required")
-end
-
-def required_keys(hash, keys, label)
-  keys.each do |key|
-    assert(hash.key?(key), "#{label} must include #{key}")
-  end
-end
-
-workspace_keys = %w[
-  id
-  name
-  purpose
-  status
-  local_repo_ref
-  spawn_target_ref
-  session_group
-  default_session_template_id
-  default_session_template_refs
-  settings
-  created_at
-  updated_at
 ]
-
-workspaces = workspace_contract.fetch("workspaces")
-assert(workspaces.is_a?(Array) && workspaces.any?, "workspace fixtures are required")
-workspaces.each do |workspace|
-  required_keys(workspace, workspace_keys, "workspace")
-  assert(%w[active archived deleted].include?(workspace.fetch("status")), "workspace status must be contract-valid")
-  required_keys(workspace.fetch("local_repo_ref"), %w[id display_name repo_capability_ref default_branch relative_worktree_hint], "local_repo_ref")
-  required_keys(workspace.fetch("spawn_target_ref"), %w[target_id label kind capability_ref], "spawn_target_ref")
-  required_keys(workspace.fetch("session_group"), %w[workspace_id session_refs], "session_group")
-  assert(workspace.fetch("session_group").fetch("workspace_id") == workspace.fetch("id"), "session_group workspace_id must match workspace id")
-  required_keys(workspace.fetch("settings"), %w[workspace_id default_repo_ref_id default_spawn_target_id default_session_template_id default_session_template_refs archive_policy], "settings")
-  assert(workspace.fetch("settings").fetch("workspace_id") == workspace.fetch("id"), "settings workspace_id must match workspace id")
-  assert(workspace.fetch("default_session_template_refs").is_a?(Array), "workspace template refs must be an array")
+required_plugin_tokens.each do |token|
+  assert(plugin.include?(token), "plugin entrypoint must wire #{token}")
 end
 
-active_names = workspaces.select { |workspace| workspace.fetch("status") == "active" }.map { |workspace| workspace.fetch("name") }
-assert(active_names.uniq.length == active_names.length, "active workspace names must be unique")
-
-templates = workspace_contract.fetch("default_session_templates")
-assert(templates.is_a?(Array) && templates.any?, "default session template fixtures are required")
-templates.each do |template|
-  required_keys(template, %w[template_id label role group accessory selected validation_status diagnostic last_checked], "default_session_template")
+forbidden_implementation_tokens = %w[
+  spawn_default_session
+  refresh_template_diagnostics
+  configured_archive_policy
+  normalize_template_refs
+  settings_surface
+  spawn_session_template
+  BOTSTER_CORE_PATH
+]
+forbidden_implementation_tokens.each do |token|
+  assert(!plugin.include?(token), "plugin entrypoint must remove obsolete implementation #{token}")
 end
 
-operations = workspace_contract.fetch("operation_examples")
-%w[create list show update refresh_template_diagnostics spawn_default_session delete].each do |operation|
-  assert(operations.key?(operation), "#{operation} operation contract is required")
-end
+schema = contract.fetch("schema")
+workspace_fields = schema.fetch("workspace_fields").sort
+assert(workspace_fields == %w[created_at id name session_refs updated_at], "fixture must define exact five-field schema")
+assert(schema["additional_properties"] == false, "fixture schema must reject additional properties")
+assert(schema["legacy_state_error"] == "legacy_workspace_schema", "fixture must define typed legacy rejection")
 
-create_input = operations.fetch("create").fetch("input")
-%w[name purpose local_repo_ref spawn_target_ref].each do |field|
-  assert(create_input.key?(field), "create input must require #{field}")
+names = []
+memberships = []
+contract.fetch("workspaces").each do |workspace|
+  assert(workspace.keys.sort == workspace_fields, "fixture workspace must have exact five-field schema")
+  assert(workspace["name"] == workspace["name"].strip && !workspace["name"].empty?, "fixture workspace name must be trimmed")
+  assert(workspace["session_refs"].is_a?(Array), "session_refs must be an array")
+  names << workspace["name"]
+  memberships.concat(workspace["session_refs"])
 end
-assert(operations.fetch("create").fetch("expected_status") == "active", "create must produce an active workspace")
+assert(names.uniq.length == names.length, "workspace names must be unique")
+assert(memberships.uniq.length == memberships.length, "session membership must have one owner")
 
-list_contract = operations.fetch("list")
-assert(list_contract.fetch("default_statuses") == ["active"], "list defaults to active workspaces")
-assert(list_contract.fetch("sort") == "name", "list sort must be by name")
-%w[id name purpose status repo_label spawn_target_label session_count default_session_template_count default_session_template_labels template_diagnostic_count invalid_template_count entity_family].each do |field|
-  assert(list_contract.fetch("row_fields").include?(field), "list rows must include #{field}")
+operations = contract.fetch("operations")
+%w[create rename delete add_session move_session remove_session spawn].each do |operation|
+  assert(operations.key?(operation), "fixture must define #{operation}")
 end
-
-show_contract = operations.fetch("show")
-assert(workspaces.any? { |workspace| workspace.fetch("id") == show_contract.fetch("id") }, "show example id must exist")
-assert(show_contract.fetch("not_found_error") == "workspace_not_found", "show must define not-found error")
-
-update_contract = operations.fetch("update")
-%w[name purpose local_repo_ref spawn_target_ref default_session_template_id default_session_template_refs settings session_group.session_refs].each do |field|
-  assert(update_contract.fetch("allowed_fields").include?(field), "update must allow plugin-owned #{field}")
-end
-%w[process_state process_spawn_request pty_state pty_request raw_spawn_request spawn_command terminal_scrollback package_admission spawn_target_record session_manifest].each do |field|
-  assert(update_contract.fetch("rejected_hub_owned_fields").include?(field), "update must reject hub-owned #{field}")
-end
+assert(operations.dig("delete", "mode") == "remove_grouping_record", "delete must physically remove grouping")
+assert(operations.dig("move_session", "one_state_write") == true, "move must be one state write")
 assert(
-  update_contract.fetch("template_selection_path") == "botster_workspaces.update.default_session_template_refs.selected",
-  "template selection must be documented through the update tool path"
+  operations.dig("spawn", "hub_api") == "session_templates.ensure_worktree_and_spawn",
+  "spawn must call atomic Hub capability"
 )
-assert(update_contract.key?("surface_selection_action_descriptor"), "surface selection action descriptor policy must be explicit")
-assert(update_contract["surface_selection_action_descriptor"].nil?, "template selection must not claim an unregistered UI action")
+assert(operations.dig("spawn", "records") == "result.session_id", "spawn must record returned UUID")
+assert(operations.dig("spawn", "caller_supplied_session_id") == false, "spawn must reject caller session id")
 
+surface_contract = contract.fetch("surface")
+assert(surface_contract["id"] == "workspaces", "fixture must preserve stable route")
+assert(surface_contract["initial_form_count"] == 0, "initial surface must contain no visible form")
 assert(
-  readme.include?("Default template selection is currently tool-driven"),
-  "README must document the accepted template selection path"
+  surface_contract["detail_actions"].sort == %w[add_session delete move_session remove_session rename spawn],
+  "fixture must define all non-lifecycle detail actions"
 )
-assert(
-  workspace_doc.include?("Clients select the default template through this update path"),
-  "workspace doc must document update-driven template selection"
-)
+assert(surface_contract["lifecycle_grouping"] == "deferred", "fixture must not claim lifecycle grouping")
+assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", "fixture must name entity family")
 
-refresh_contract = operations.fetch("refresh_template_diagnostics")
-assert(refresh_contract.fetch("hub_api") == "resolve_session_template", "template diagnostics must use hub resolve API")
-assert(refresh_contract.fetch("invalid_references_preserved") == true, "invalid template refs must be preserved")
-
-spawn_contract = operations.fetch("spawn_default_session")
-assert(spawn_contract.fetch("hub_api") == "spawn_session_template", "template spawn must use hub spawn API")
-assert(spawn_contract.fetch("context_fields").include?("workspace_id"), "spawn context must include workspace_id")
-assert(spawn_contract.fetch("does_not_construct_raw_spawn") == true, "workspace plugin must not construct raw spawn")
-
-delete_contract = operations.fetch("delete")
-assert(delete_contract.fetch("mode") == "mark_deleted", "delete mode must be mark_deleted")
-assert(delete_contract.fetch("excluded_from_default_list") == true, "deleted workspaces must be excluded from default list")
-%w[hub_sessions package_records spawn_targets repository_content host_filesystem_content].each do |field|
-  assert(delete_contract.fetch("does_not_delete").include?(field), "delete must not delete #{field}")
+{
+  "README.md" => [
+    "Contextual session grouping",
+    "New workspace",
+    "Add or move an existing session",
+    "session_templates.ensure_worktree_and_spawn",
+    "fresh Hub data directory",
+    "script/hub_acceptance_smoke",
+  ],
+  "docs/workspace-domain.md" => [
+    "Exact Record",
+    "Membership Invariant",
+    "Rename and Delete",
+    "Atomic Spawn",
+    "Contextual Surface",
+    "Lifecycle Follow-on",
+  ],
+  "docs/capabilities.md" => [
+    "Declared Capabilities",
+    "Plugin-Owned State",
+    "Hub-Owned Authority",
+    "Failure Atomicity",
+  ],
+}.each do |path, tokens|
+  contents = read(path)
+  tokens.each do |token|
+    assert(contents.include?(token), "#{path} must mention #{token}")
+  end
 end
 
-entity_families = workspace_contract.fetch("entity_families")
-assert(entity_families.any? { |family| family["name"] == "botster-workspaces.workspace" && family["source"] == "plugin-owned" }, "workspace entity family must be plugin-owned")
-
-%w[
-  botster-hub
-  packages\ install
-  packages\ show
-  packages\ enable
-  packages\ list
-  packages\ config
-  packages\ config\ set
-  packages\ reload
-  surface:workspaces
-  list_package_navigation
-  package_navigation
-  navigation
-  Workspaces\ Settings
-  /packages/botster-workspaces/surfaces/workspaces
-  /packages/botster-workspaces/surfaces/workspaces-settings
-  /packages/botster-workspaces/settings
-  archive_policy
-  rectangle-group
-  cog-6-tooth
-  --path\ ../botster-workspaces
-  app\ surface
-  settings\ surface
+production_files = %w[
+  README.md
+  botster-package.json
   docs/workspace-domain.md
   docs/capabilities.md
-  script/test
-].each do |needle|
-  assert(readme.include?(needle.tr("\\", "")), "README must mention #{needle.tr("\\", "")}")
+]
+obsolete_tokens = %w[
+  purpose
+  local_repo_ref
+  spawn_target_ref
+  default_session_template
+  archive_policy
+  workspaces-settings
+  relative_worktree_hint
+  spawn_default_session
+]
+production_files.each do |path|
+  contents = read(path)
+  obsolete_tokens.each do |token|
+    assert(!contents.include?(token), "#{path} must not retain obsolete token #{token}")
+  end
 end
 
-%w[
-  project_pipelines
-  ProjectPipelines
-  project-pipelines
-].each do |needle|
-  assert(!read("plugin.lua").include?(needle), "plugin entrypoint must not implement Project Pipelines")
-  assert(!read("botster-package.json").include?(needle), "manifest must not implement Project Pipelines")
-  assert(!workspace_doc.include?(needle), "workspace doc must not implement Project Pipelines")
-  assert(!capabilities_doc.include?(needle), "capabilities doc must not implement Project Pipelines")
+%w[fs. io.open os.execute File.read( File.write(].each do |token|
+  assert(!plugin.include?(token), "plugin must not use direct filesystem API #{token}")
 end
 
-%w[
-  fs.
-  io.open
-  os.execute
-  File.read(
-  File.write(
-].each do |needle|
-  assert(!workspace_doc.include?(needle), "workspace doc must not prescribe direct host filesystem API #{needle}")
-  assert(!capabilities_doc.include?(needle), "capabilities doc must not prescribe direct host filesystem API #{needle}")
-  assert(!read("plugin.lua").include?(needle), "plugin entrypoint must not use direct host filesystem API #{needle}")
-end
-
-%w[
-  .env
-  mise.local.toml
-  *.log
-  tmp/
-  data/
-  dist/
-  build/
-].each do |pattern|
+%w[.env mise.local.toml *.log tmp/ data/ dist/ build/].each do |pattern|
   assert(gitignore.lines.map(&:strip).include?(pattern), ".gitignore must include #{pattern}")
 end
 
@@ -325,14 +194,12 @@ scanned_files = %w[
   test/fixtures/workspaces/contract.json
   test/plugin_runtime_test.lua
 ]
-
 leak_patterns = {
   "absolute home path" => %r{/Users/[A-Za-z0-9._-]+},
   "email address" => /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i,
   "session id" => /sess-[0-9A-Za-z-]+/,
-  "secret assignment" => /\b(secret|token|password|api[_-]?key)\b\s*[:=]/i
+  "secret assignment" => /\b(secret|token|password|api[_-]?key)\b\s*[:=]/i,
 }
-
 scanned_files.each do |path|
   contents = read(path)
   leak_patterns.each do |label, pattern|
@@ -341,8 +208,11 @@ scanned_files.each do |path|
 end
 
 lua = ENV.fetch("LUA", "lua")
-unless system(lua, File.join(ROOT, "test/plugin_runtime_test.lua"), chdir: ROOT)
-  raise "Lua runtime test failed"
-end
+test_path = File.join(ROOT, "test/plugin_runtime_test.lua")
+assert(system(lua, test_path, chdir: ROOT), "Lua runtime test failed")
+assert(
+  !system({ "BOTSTER_WORKSPACES_INJECT_FAILURE" => "1" }, lua, test_path, chdir: ROOT, out: File::NULL, err: File::NULL),
+  "Lua shell gate did not observe the deliberate failing assertion"
+)
 
 puts "script/test: ok"

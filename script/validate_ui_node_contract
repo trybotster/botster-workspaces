@@ -13,11 +13,10 @@ def abort_with(message)
   exit 1
 end
 
-botster_core_path = ENV["BOTSTER_CORE_PATH"]
-abort_with("BOTSTER_CORE_PATH must point at the locked botster-core crate") if botster_core_path.to_s.empty?
-abort_with("BOTSTER_CORE_PATH does not exist: #{botster_core_path}") unless Dir.exist?(botster_core_path)
-workspace_crate_path = File.join(botster_core_path, "crates", "botster-core")
-botster_core_path = workspace_crate_path if File.exist?(File.join(workspace_crate_path, "Cargo.toml"))
+ui_contract_path = ENV["BOTSTER_UI_CONTRACT_PATH"]
+abort_with("BOTSTER_UI_CONTRACT_PATH must point at the Hub botster-ui-contract crate") if ui_contract_path.to_s.empty?
+abort_with("BOTSTER_UI_CONTRACT_PATH does not exist: #{ui_contract_path}") unless Dir.exist?(ui_contract_path)
+abort_with("BOTSTER_UI_CONTRACT_PATH must contain Cargo.toml") unless File.exist?(File.join(ui_contract_path, "Cargo.toml"))
 
 lua = ENV.fetch("LUA", "lua")
 
@@ -29,7 +28,7 @@ Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
   abort_with("surface payload was not generated") unless File.exist?(surfaces_path)
 
   payload = JSON.parse(File.read(surfaces_path))
-  abort_with("expected app and settings surface payloads") unless payload.is_a?(Array) && payload.length == 2
+  abort_with("expected empty and populated app surface payloads") unless payload.is_a?(Array) && payload.length == 2
 
   File.write(File.join(dir, "Cargo.toml"), <<~TOML)
     [package]
@@ -38,13 +37,13 @@ Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
     edition = "2021"
 
     [dependencies]
-    botster-core = { path = #{botster_core_path.inspect} }
+    botster-ui-contract = { path = #{ui_contract_path.inspect} }
     serde_json = "1"
   TOML
 
   FileUtils.mkdir_p(File.join(dir, "src"))
   File.write(File.join(dir, "src/main.rs"), <<~RS)
-    use botster_core::UiNode;
+    use botster_ui_contract::UiNode;
     use std::{env, fs, process};
 
     fn main() {
@@ -70,7 +69,7 @@ Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
   unless status.success?
     warn stdout unless stdout.empty?
     warn stderr unless stderr.empty?
-    abort_with("botster_core UiNode contract validation failed")
+    abort_with("botster-ui-contract UiNode validation failed")
   end
 end
 

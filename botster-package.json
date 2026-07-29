@@ -19,7 +19,7 @@
       "description": "Descriptor-backed workspace package surface bound to workspace entity state.",
       "icon": "rectangle-group",
       "category": "workspace",
-      "supports": ["render"]
+      "supports": ["render", "action"]
     }
   ],
   "navigation": [

@@ -31,7 +31,10 @@ surfaces = manifest.fetch("surfaces")
 assert(surfaces.length == 1, "manifest must declare one surface")
 assert(surfaces.first["id"] == "workspaces", "stable workspaces surface is required")
 assert(surfaces.first["kind"] == "app", "workspaces surface must be an app")
-assert(surfaces.first["supports"] == ["render"], "workspaces surface must support render")
+assert(
+  surfaces.first["supports"] == ["render", "action"],
+  "workspaces surface must support render and action"
+)
 
 navigation = manifest.fetch("navigation")
 assert(navigation == contract.fetch("navigation"), "manifest navigation must match contract")

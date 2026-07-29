@@ -149,7 +149,14 @@ request(socket, { type: "reload_package", package_name: PACKAGE })
 packages = request(socket, { type: "list_packages" })
 package = packages.fetch("packages").find { |candidate| candidate["package_name"] == PACKAGE }
 assert(package && package["state"] == "enabled", "package must be enabled")
-assert(package.fetch("surfaces").map { |surface| surface["id"] } == [SURFACE], "package must expose one app surface")
+surfaces = package.fetch("surfaces")
+assert(surfaces.length == 1, "package must expose one app surface")
+assert(surfaces.first["id"] == SURFACE, "package must expose the stable Workspaces surface")
+assert(surfaces.first["kind"] == "app", "Workspaces surface must be an app")
+assert(
+  surfaces.first["supports"] == ["render", "action"],
+  "Workspaces surface must project exact render/action support"
+)
 assert(
   package.fetch("routes").any? { |route| route["route_id"] == "surface:workspaces" },
   "stable Workspaces route missing"

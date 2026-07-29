@@ -71,7 +71,8 @@ contextual-workspace cold switch. Human answer
 2. Change only the sole `workspaces` descriptor's operation declaration from
    `["render"]` to `["render", "action"]`.
 3. Tighten repository conformance assertions so the exact single surface
-   descriptor is preserved apart from its required operation list.
+   identity, kind, and required operation list are preserved without freezing
+   unrelated human-readable copy.
 4. Extend the real current-Hub smoke to assert the installed package projects
    the exact `["render", "action"]` operations before exercising the existing
    create and atomic spawn actions through `plugin_surface_action`.
@@ -82,6 +83,9 @@ contextual-workspace cold switch. Human answer
 - No Lua handler, action envelope, surface tree, presentation, form, atomic
   spawn workflow, capability grant, or navigation change.
 - No compatibility alias or fallback for `spawn_default_session_action`.
+  Existing `script/test` forbidden implementation and obsolete production
+  token checks enforce this cold-switch boundary; no redundant assertion is
+  needed.
 - No Hub, Core, UI-contract, Web, TUI, TUI-kit, or Project Pipelines source
   change.
 - No renderer proof beyond the unchanged owner-authored surface; this is a
@@ -122,9 +126,9 @@ contextual-workspace cold switch. Human answer
   - change the sole `workspaces` surface `supports` list to
     `["render", "action"]`.
 - `script/test`
-  - assert the complete single surface descriptor, including the new exact
-    operation list, so no second surface or unrelated descriptor field can
-    drift.
+  - assert the single surface count, id, kind, and new exact operation list;
+    use final diff inspection to prove unrelated descriptor fields did not
+    change.
 - `script/hub_acceptance_smoke`
   - assert the installed/enabled package projects the sole Workspaces surface
     with exact render/action support before the existing real create and spawn
@@ -140,8 +144,9 @@ are intentionally unaffected.
 1. Integrate current `origin/main` without overwriting the user-owned worktree
    changes in `.gitignore`, `.env`, or `mise.local.toml`.
 2. Make the one manifest operation-list edit.
-3. Replace the narrow render-only static assertion with an exact descriptor
-   assertion that protects the ticket's no-other-surface-change boundary.
+3. Replace the narrow render-only static assertion with exact count, id, kind,
+   and operation assertions; do not pin display copy unrelated to operation
+   admission.
 4. Add the exact installed-package operation assertion to the current real-Hub
    smoke. Reuse its existing `plugin_surface_action` create and atomic spawn
    calls; do not duplicate handlers or add a synthetic path.
@@ -170,6 +175,7 @@ Repository checks:
 
 ```sh
 script/test
+BOTSTER_UI_CONTRACT_PATH=<exact-hub-checkout>/crates/botster-ui-contract script/validate_ui_node_contract
 git diff --check
 git diff --stat origin/main
 git diff origin/main -- botster-package.json script/test script/hub_acceptance_smoke

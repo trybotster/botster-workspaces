@@ -4,46 +4,27 @@
 require "json"
 require "socket"
 
+ROOT = File.expand_path("..", __dir__)
+PACKAGE = "botster-workspaces"
+SURFACE = "workspaces"
+
 socket_path = ARGV.fetch(0) do
-  warn "usage: script/hub_acceptance_smoke <botster-hub.sock> [workspace-name]"
+  warn "usage: script/hub_acceptance_smoke <isolated-current-hub.sock> [workspace-name]"
   exit 1
 end
-
 workspace_name = ARGV[1] || "Acceptance Workspace"
+branch = ENV.fetch("BOTSTER_WORKSPACES_ACCEPTANCE_BRANCH", "botster-workspaces-acceptance-#{Process.pid}")
 
 def assert(condition, message)
   raise message unless condition
 end
 
-socket = UNIXSocket.new(socket_path)
-socket.puts(JSON.generate({
-  protocol: "botster-hub-daemon-v1",
-  compatibility: {
-    protocol: "botster-hub-daemon-v1",
-    minimum_protocol_version: 1,
-    required_features: %w[
-      sessions
-      terminal_streaming
-      resize
-      package_navigation
-      plugin_surface_render
-      plugin_surface_action
-    ],
-    # The locked hub used by this repository reports conformance fixture
-    # revision 1; hub lifecycle fixtures use the same minimum for plugin
-    # surface action/render coverage.
-    minimum_conformance_fixture_revision: 1,
-    client_name: "botster-workspaces-acceptance-smoke"
-  }
-}))
-hello_line = socket.gets
-raise "daemon closed before hello" unless hello_line
-hello = JSON.parse(hello_line)
-assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
-
 def request_raw(socket, payload)
   socket.puts(JSON.generate(payload))
-  JSON.parse(socket.gets)
+  line = socket.gets
+  raise "daemon closed before #{payload.fetch(:type)} response" unless line
+
+  JSON.parse(line)
 end
 
 def request(socket, payload)
@@ -58,77 +39,121 @@ def call_tool(socket, name, arguments)
   response = request(socket, {
     type: "plugin_mcp_call_tool",
     name: name,
-    arguments: arguments
+    arguments: arguments,
   })
   assert(response["kind"] == "plugin_mcp_tool_result", "#{name} returned #{response["kind"]}")
   response.fetch("plugin_tool_result")
 end
 
-def collect_text(node, out = [])
-  props = node["props"] || {}
-  out << props["text"] if node["type"] == "text" && props["text"]
-  out << props["title"] if node["type"] == "empty_state" && props["title"]
-  out << props["label"] if node["type"] == "status_badge" && props["label"]
-  Array(node["children"]).each { |child| collect_text(child, out) }
-  (node["slots"] || {}).each_value do |children|
-    Array(children).each { |child| collect_text(child, out) }
-  end
-  out
-end
-
-def collect_types(node, out = Hash.new(0))
-  out[node["type"]] += 1 if node["type"]
-  Array(node["children"]).each { |child| collect_types(child, out) }
-  (node["slots"] || {}).each_value do |children|
-    Array(children).each { |child| collect_types(child, out) }
-  end
-  out
-end
-
-def assert_primitives(surface, surface_id, expected)
-  types = collect_types(surface)
-  expected.each do |type|
-    assert(types[type].positive?, "#{surface_id} rendered body missing #{type}")
-  end
-end
-
-def assert_no_inert_interactions(node)
-  props = node["props"] || {}
-  %w[activation primary_action selection].each do |field|
-    assert(!props.key?(field), "#{node["id"] || node["type"]} must not emit inert #{field}")
-  end
-  action = props["action"]
-  assert(!action.is_a?(Hash) || !action.key?("payload"), "#{node["id"] || node["type"]} must not emit payload-bearing action")
-  Array(node["children"]).each { |child| assert_no_inert_interactions(child) }
-  (node["slots"] || {}).each_value do |children|
-    Array(children).each { |child| assert_no_inert_interactions(child) }
-  end
-end
-
-def collect_terminal_output(response)
-  Array(response["events"]).filter_map do |event|
-    event["data"] if event["type"] == "terminal_output"
-  end.join
-end
-
-def render_surface(socket, surface_id)
+def render_surface(socket)
   response = request(socket, {
     type: "plugin_surface_render",
-    package_name: "botster-workspaces",
-    surface_id: surface_id,
-    payload: {}
+    package_name: PACKAGE,
+    surface_id: SURFACE,
+    payload: {},
   })
-  assert(response["kind"] == "plugin_surface", "#{surface_id} did not return plugin surface")
-  plugin_surface = response.fetch("plugin_surface")
-  assert(plugin_surface.fetch("package_name") == "botster-workspaces", "#{surface_id} package identity mismatch")
-  assert(plugin_surface.fetch("surface_id") == surface_id, "#{surface_id} surface identity mismatch")
-  snapshot = plugin_surface["ui_tree_snapshot"]
-  if snapshot
-    assert(snapshot.fetch("package_name") == "botster-workspaces", "#{surface_id} snapshot package identity mismatch")
-    assert(snapshot.fetch("surface_id") == surface_id, "#{surface_id} snapshot surface identity mismatch")
-  end
-  plugin_surface.fetch("body")
+  assert(response["kind"] == "plugin_surface", "workspaces did not return plugin surface")
+  surface = response.fetch("plugin_surface")
+  assert(surface["package_name"] == PACKAGE, "surface package identity mismatch")
+  assert(surface["surface_id"] == SURFACE, "surface id mismatch")
+  snapshot = surface.fetch("ui_tree_snapshot")
+  assert(snapshot["package_name"] == PACKAGE, "snapshot package identity mismatch")
+  assert(snapshot["surface_id"] == SURFACE, "snapshot surface identity mismatch")
+  snapshot.fetch("body")
 end
+
+def children(node)
+  values = Array(node["children"])
+  (node["slots"] || {}).each_value { |slot| values.concat(Array(slot)) }
+  values << node["node"] if node["$kind"] == "presentation_if" && node["node"]
+  values
+end
+
+def find_node(node, id)
+  return node if node["id"] == id
+
+  children(node).each do |child|
+    found = find_node(child, id)
+    return found if found
+  end
+  nil
+end
+
+def collect_types(node, result = Hash.new(0))
+  result[node["type"]] += 1 if node["type"]
+  children(node).each { |child| collect_types(child, result) }
+  result
+end
+
+def action(socket, id:, node_id:, kind:, payload: nil, values: nil)
+  response = request(socket, {
+    type: "plugin_surface_action",
+    package_name: PACKAGE,
+    request: {
+      request_id: "workspaces-acceptance-#{Process.pid}-#{node_id}",
+      surface_id: SURFACE,
+      action_id: id,
+      node_id: node_id,
+      kind: kind,
+      payload: payload,
+      values: values,
+    }.compact,
+  })
+  assert(response["kind"] == "plugin_action_result", "#{id} did not return plugin action result")
+  response.fetch("plugin_action_result")
+end
+
+def assert_rejected(result, field_id, label)
+  assert(result["state"] == "rejected", "#{label} was not rejected")
+  assert(result.fetch("field_errors").key?(field_id), "#{label} did not key its error to #{field_id}")
+  assert(Array(result["form_errors"]).any?, "#{label} did not retain a form error")
+  assert(!result.key?("presentation"), "#{label} unexpectedly mutated presentation")
+  assert(!result.key?("replacement"), "#{label} unexpectedly replaced the surface")
+end
+
+socket = UNIXSocket.new(socket_path)
+socket.puts(JSON.generate({
+  protocol: "botster-hub-daemon-v1",
+  compatibility: {
+    protocol: "botster-hub-daemon-v1",
+    minimum_protocol_version: 1,
+    required_features: %w[
+      sessions
+      package_routes
+      package_navigation
+      plugin_surface_render
+      plugin_surface_action
+      spawn_targets
+      worktrees
+    ],
+    minimum_conformance_fixture_revision: 1,
+    client_name: "botster-workspaces-acceptance-smoke",
+  },
+}))
+hello = JSON.parse(socket.gets || raise("daemon closed before hello"))
+assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
+
+packages = request(socket, { type: "list_packages" })
+package = packages.fetch("packages").find { |candidate| candidate["package_name"] == PACKAGE }
+unless package
+  request(socket, { type: "install_package_local_path", path: ROOT })
+  packages = request(socket, { type: "list_packages" })
+  package = packages.fetch("packages").find { |candidate| candidate["package_name"] == PACKAGE }
+end
+assert(package, "package install did not register botster-workspaces")
+if package["state"] != "enabled"
+  request(socket, { type: "enable_package", package_name: PACKAGE })
+end
+request(socket, { type: "reload_package", package_name: PACKAGE })
+
+packages = request(socket, { type: "list_packages" })
+package = packages.fetch("packages").find { |candidate| candidate["package_name"] == PACKAGE }
+assert(package && package["state"] == "enabled", "package must be enabled")
+assert(package.fetch("surfaces").map { |surface| surface["id"] } == [SURFACE], "package must expose one app surface")
+assert(
+  package.fetch("routes").any? { |route| route["route_id"] == "surface:workspaces" },
+  "stable Workspaces route missing"
+)
 
 tools = request(socket, { type: "plugin_mcp_list_tools" })
 tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
@@ -136,285 +161,363 @@ tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
   botster_workspaces.create
   botster_workspaces.list
   botster_workspaces.show
-  botster_workspaces.update
+  botster_workspaces.rename
   botster_workspaces.delete
-  botster_workspaces.refresh_template_diagnostics
-  botster_workspaces.spawn_default_session
+  botster_workspaces.add_session
+  botster_workspaces.move_session
+  botster_workspaces.remove_session
+  botster_workspaces.spawn
   botster_workspaces.entity_snapshot
 ].each do |name|
   assert(tool_names.include?(name), "missing plugin MCP tool #{name}")
 end
 
-packages = request(socket, { type: "list_packages" })
-assert(packages["kind"] == "packages", "daemon did not expose packages")
-package = packages.fetch("packages").find { |candidate| candidate["package_name"] == "botster-workspaces" }
-assert(package, "botster-workspaces package row missing")
-surface_by_id = package.fetch("surfaces").to_h { |surface| [surface.fetch("id"), surface] }
-assert(surface_by_id.dig("workspaces", "kind") == "app", "workspaces app descriptor missing")
-assert(surface_by_id.dig("workspaces", "icon") == "rectangle-group", "workspaces app icon missing")
-assert(surface_by_id.dig("workspaces-settings", "kind") == "settings", "workspaces settings descriptor missing")
-assert(surface_by_id.dig("workspaces-settings", "icon") == "cog-6-tooth", "workspaces settings icon missing")
-package.fetch("surfaces").each do |surface|
-  %w[order priority pinned hidden placement sidebar_position sort].each do |field|
-    assert(!surface.key?(field), "surface descriptor must not expose placement authority #{field}")
-  end
-end
-route_by_id = package.fetch("routes").to_h { |route| [route.fetch("route_id"), route] }
-assert(route_by_id.dig("surface:workspaces", "route_path") == "/packages/botster-workspaces/surfaces/workspaces", "workspaces route path missing")
-assert(route_by_id.dig("surface:workspaces", "target", "kind") == "plugin_surface", "workspaces route target mismatch")
-assert(route_by_id.dig("surface:workspaces-settings", "route_path") == "/packages/botster-workspaces/surfaces/workspaces-settings", "workspaces settings surface route path missing")
-assert(route_by_id.dig("surface:workspaces-settings", "target", "kind") == "plugin_surface", "workspaces settings surface route target mismatch")
-assert(route_by_id.dig("settings", "route_path") == "/packages/botster-workspaces/settings", "settings route path missing")
-config = package.fetch("configuration")
-assert(config.fetch("schema").fetch("fields").any? { |field| field["key"] == "archive_policy" }, "archive_policy schema missing")
+initial_surface = render_surface(socket)
+types = collect_types(initial_surface)
+assert(types["panel"].positive?, "surface missing panel")
+assert(types["toolbar"].positive?, "surface missing toolbar")
+assert(types["list"].positive?, "surface missing workspace list")
+new_button = find_node(initial_surface, "botster-workspaces-new")
+assert(new_button, "surface missing contextual New workspace control")
+new_action = new_button.dig("props", "action")
+assert(new_action && new_action["id"], "New workspace control has no action metadata")
 
-navigation_response = request(socket, { type: "list_package_navigation" })
-assert(navigation_response["kind"] == "package_navigation", "daemon did not expose package navigation registry")
-navigation_entries = navigation_response.fetch("package_navigation").select { |entry| entry["package_name"] == "botster-workspaces" }
-navigation_by_id = navigation_entries.to_h { |entry| [entry.fetch("item_id"), entry] }
-{
-  "workspaces" => "/packages/botster-workspaces/surfaces/workspaces",
-  "workspaces-settings" => "/packages/botster-workspaces/surfaces/workspaces-settings"
-}.each do |item_id, route_path|
-  entry = navigation_by_id.fetch(item_id) { raise "missing Workspaces navigation entry #{item_id}" }
-  assert(entry.fetch("route_id") == "surface:#{item_id}", "#{item_id} navigation route id mismatch")
-  assert(entry.fetch("route_path") == route_path, "#{item_id} navigation route path mismatch")
-  assert(entry.dig("target", "kind") == "plugin_surface", "#{item_id} navigation target kind mismatch")
-  assert(entry.dig("target", "surface_id") == item_id, "#{item_id} navigation target surface mismatch")
-  assert(entry.dig("source", "kind") == "surface", "#{item_id} navigation source kind mismatch")
-  assert(entry.dig("source", "surface_id") == item_id, "#{item_id} navigation source surface mismatch")
-  assert(entry["enabled"] == true, "#{item_id} navigation must be enabled")
-  assert(entry["blocked"] == false, "#{item_id} navigation must not be blocked")
-  assert(entry.fetch("diagnostics", []).empty?, "#{item_id} navigation diagnostics must be empty")
-  %w[order priority pinned hidden placement sidebar_position sort].each do |field|
-    assert(!entry.key?(field), "#{item_id} navigation must not expose placement authority #{field}")
-  end
-  surface = render_surface(socket, entry.dig("target", "surface_id"))
-  assert(surface.is_a?(Hash) && surface["type"].is_a?(String), "#{item_id} navigation target did not render a UiNode surface")
-  assert_no_inert_interactions(surface)
-  text = collect_text(surface).join("\n")
-  if item_id == "workspaces"
-    assert_primitives(surface, item_id, %w[panel toolbar metric_grid section list])
-  else
-    assert_primitives(surface, item_id, %w[panel metric_grid section list])
-  end
-  if text.include?("No active workspaces")
-    assert_primitives(surface, item_id, %w[empty_state])
-  else
-    assert_primitives(surface, item_id, %w[list_item status_badge])
-  end
-end
+opened = action(
+  socket,
+  id: new_action.fetch("id"),
+  node_id: new_button.fetch("id"),
+  kind: "submit",
+  payload: new_action["payload"]
+)
+assert(opened["state"] == "accepted", "New workspace open action was not accepted")
+assert(
+  opened.fetch("presentation").any? { |operation| operation["kind"] == "set" && operation["key"] == "workspace-dialog" },
+  "New workspace did not author presentation state"
+)
 
-valid_config = request(socket, {
-  type: "set_package_configuration",
-  package_name: "botster-workspaces",
-  values: {
-    archive_policy: {
-      type: "select",
-      value: "archive"
-    }
-  }
-})
-assert(valid_config["kind"] == "packages", "valid package config set did not return package row")
-reload = request(socket, {
-  type: "reload_package",
-  package_name: "botster-workspaces"
-})
-assert(%w[packages package_decision].include?(reload["kind"]), "package reload after config set failed")
+rejected_create = action(
+  socket,
+  id: "botster_workspaces.create",
+  node_id: "botster-workspaces-create-form",
+  kind: "submit",
+  values: {}
+)
+assert_rejected(rejected_create, "botster-workspaces-create-name", "missing workspace name")
 
-invalid_config = request_raw(socket, {
-  type: "set_package_configuration",
-  package_name: "botster-workspaces",
-  values: {
-    archive_policy: {
-      type: "select",
-      value: "unsupported"
-    }
-  }
-})
-assert(invalid_config["error"], "invalid package config must fail")
-assert(invalid_config["error"].to_s.include?("archive_policy"), "invalid package config error must name archive_policy")
-
-templates = request(socket, { type: "list_session_templates" })
-assert(templates["kind"] == "session_templates", "daemon did not expose session templates")
-template = templates.fetch("session_templates", []).first
-unless template
-  create = call_tool(socket, "botster_workspaces.create", {
-    name: workspace_name,
-    purpose: "Acceptance smoke for package surfaces without session templates",
-    local_repo_ref: {
-      id: "repo_acceptance",
-      display_name: "Acceptance repo",
-      repo_capability_ref: "repo_capability_acceptance",
-      default_branch: "main",
-      relative_worktree_hint: "worktrees/acceptance"
-    },
-    spawn_target_ref: {
-      target_id: "target_acceptance",
-      label: "Acceptance target",
-      kind: "agent",
-      capability_ref: "spawn_target_acceptance"
-    }
-  })
-  assert(create["ok"] == true || create.dig("error", "code") == "duplicate_active_name", "workspace create failed: #{create}")
-  if create["ok"] == true
-    assert(create.fetch("workspace").fetch("settings").fetch("archive_policy") == "archive", "package config did not seed workspace archive policy")
-  end
-
-  %w[workspaces workspaces-settings].each do |surface_id|
-    surface = render_surface(socket, surface_id)
-    assert_no_inert_interactions(surface)
-    assert_primitives(surface, surface_id, %w[panel metric_grid section list list_item status_badge])
-    text = collect_text(surface).join("\n")
-    assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
-    assert(text.include?("Acceptance repo"), "#{surface_id} surface missing repo label")
-    assert(text.include?("Acceptance target"), "#{surface_id} surface missing spawn target label")
-  end
-
-  puts "script/hub_acceptance_smoke: ok package_surface_config_only no_session_templates=true"
-  exit 0
-end
-template_id = template.fetch("template_id")
-target_id = template.fetch("target_id")
-
-create = call_tool(socket, "botster_workspaces.create", {
-  name: workspace_name,
-  purpose: "Acceptance smoke for enabled plugin worker",
-  local_repo_ref: {
-    id: "repo_acceptance",
-    display_name: "Acceptance repo",
-    repo_capability_ref: "repo_capability_acceptance",
-    default_branch: "main",
-    relative_worktree_hint: "worktrees/acceptance"
-  },
-  spawn_target_ref: {
-    target_id: target_id,
-    label: "Acceptance template target",
-    kind: "agent",
-    capability_ref: "spawn_target_acceptance"
-  },
-  default_session_template_refs: [
-    {
-      template_id: template_id,
-      label: "Acceptance template",
-      role: "acceptance",
-      group: "primary",
-      selected: true
-    }
-  ]
-})
-existing = false
-if create["ok"] == true
-  workspace_id = create.fetch("workspace").fetch("id")
-  assert(create.fetch("workspace").fetch("settings").fetch("archive_policy") == "archive", "package config did not seed workspace archive policy")
+created_action = action(
+  socket,
+  id: "botster_workspaces.create",
+  node_id: "botster-workspaces-create-form",
+  kind: "submit",
+  values: { "botster-workspaces-create-name" => workspace_name }
+)
+if created_action["state"] == "accepted"
+  workspace_id = created_action.dig("payload", "workspace", "id")
 else
-  assert(create.dig("error", "code") == "duplicate_active_name", "workspace create failed: #{create}")
-  existing = true
-  existing_list = call_tool(socket, "botster_workspaces.list", {})
-  existing_row = existing_list.fetch("workspaces").find { |workspace| workspace["name"] == workspace_name }
-  assert(existing_row, "duplicate workspace name was reported but no existing row was listed")
-  workspace_id = existing_row.fetch("id")
+  assert(created_action["state"] == "error", "duplicate create returned unexpected state")
+  existing = call_tool(socket, "botster_workspaces.list", {})
+  row = existing.fetch("workspaces").find { |candidate| candidate["name"] == workspace_name }
+  assert(row, "workspace create failed and existing row was not found")
+  workspace_id = row.fetch("id")
 end
+assert(workspace_id, "workspace id missing")
 
-update = call_tool(socket, "botster_workspaces.update", {
-  id: workspace_id,
-  patch: {
-    session_group: {
-      session_refs: [
-        {
-          session_uuid: "example-session-acceptance-1",
-          role: "implement",
-          spawned_from_template_id: template_id,
-          status: "running"
-        },
-        {
-          session_uuid: "example-session-acceptance-2",
-          role: "verify",
-          spawned_from_template_id: template_id,
-          status: "queued"
-        }
-      ]
-    }
+populated_surface = render_surface(socket)
+row = find_node(populated_surface, "botster-workspaces-row-#{workspace_id}")
+assert(row, "post-create surface missing workspace row")
+row_action = row.dig("props", "action")
+selected = action(
+  socket,
+  id: row_action.fetch("id"),
+  node_id: row.fetch("id"),
+  kind: "submit",
+  payload: row_action["payload"]
+)
+assert(selected["state"] == "accepted", "workspace selection was not accepted")
+assert(
+  selected.fetch("presentation").any? do |operation|
+    operation["kind"] == "set" &&
+      operation["key"] == "selected-workspace" &&
+      operation["value"] == workspace_id
+  end,
+  "workspace selection did not author scoped detail state"
+)
+
+rename_form = find_node(populated_surface, "botster-workspaces-rename-form-#{workspace_id}")
+assert(rename_form, "selected workspace is missing the rendered Rename form")
+rejected_rename = action(
+  socket,
+  id: rename_form.dig("props", "action", "id"),
+  node_id: rename_form.fetch("id"),
+  kind: "submit",
+  payload: rename_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-rename-name" => "" }
+)
+assert_rejected(rejected_rename, "botster-workspaces-rename-name", "missing rename value")
+renamed_workspace_name = "#{workspace_name} Renamed"
+renamed_action = action(
+  socket,
+  id: rename_form.dig("props", "action", "id"),
+  node_id: rename_form.fetch("id"),
+  kind: "submit",
+  payload: rename_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-rename-name" => renamed_workspace_name }
+)
+assert(renamed_action["state"] == "accepted", "Rename action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "name") == renamed_workspace_name,
+  "Rename action did not persist the new name"
+)
+
+destination_name = "#{workspace_name} Destination"
+destination_action = action(
+  socket,
+  id: "botster_workspaces.create",
+  node_id: "botster-workspaces-create-form",
+  kind: "submit",
+  values: { "botster-workspaces-create-name" => destination_name }
+)
+if destination_action["state"] == "accepted"
+  destination_workspace_id = destination_action.dig("payload", "workspace", "id")
+else
+  assert(destination_action["state"] == "error", "destination create returned unexpected state")
+  destination_workspace_id = call_tool(socket, "botster_workspaces.list", {})
+    .fetch("workspaces")
+    .find { |candidate| candidate["name"] == destination_name }
+    &.fetch("id")
+end
+assert(destination_workspace_id, "destination workspace id missing")
+
+membership_session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+action_surface = render_surface(socket)
+add_form = find_node(action_surface, "botster-workspaces-add-form-#{workspace_id}")
+assert(add_form, "selected workspace is missing the rendered Add session form")
+rejected_add = action(
+  socket,
+  id: add_form.dig("props", "action", "id"),
+  node_id: add_form.fetch("id"),
+  kind: "submit",
+  payload: add_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-add-session-id" => "1-2-3-4-5" }
+)
+assert_rejected(rejected_add, "botster-workspaces-add-session-id", "non-canonical Add session UUID")
+added_action = action(
+  socket,
+  id: add_form.dig("props", "action", "id"),
+  node_id: add_form.fetch("id"),
+  kind: "submit",
+  payload: add_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-add-session-id" => membership_session_id }
+)
+assert(added_action["state"] == "accepted", "Add session action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == [membership_session_id],
+  "Add session action did not persist membership"
+)
+
+move_surface = render_surface(socket)
+move_form = find_node(move_surface, "botster-workspaces-move-form-#{workspace_id}")
+assert(move_form, "selected workspace is missing the rendered Move session form")
+rejected_move = action(
+  socket,
+  id: move_form.dig("props", "action", "id"),
+  node_id: move_form.fetch("id"),
+  kind: "submit",
+  payload: move_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-move-destination-id" => destination_workspace_id,
+    "botster-workspaces-move-session-id" => "",
   }
+)
+assert_rejected(rejected_move, "botster-workspaces-move-session-id", "missing Move session UUID")
+moved_action = action(
+  socket,
+  id: move_form.dig("props", "action", "id"),
+  node_id: move_form.fetch("id"),
+  kind: "submit",
+  payload: move_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-move-destination-id" => destination_workspace_id,
+    "botster-workspaces-move-session-id" => membership_session_id,
+  }
+)
+assert(moved_action["state"] == "accepted", "Move session action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").empty?,
+  "Move session action did not clear source membership"
+)
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs") == [membership_session_id],
+  "Move session action did not persist destination membership"
+)
+
+remove_surface = render_surface(socket)
+remove_button = find_node(remove_surface, "botster-workspaces-remove-#{membership_session_id}")
+assert(remove_button, "destination workspace is missing the rendered Remove session action")
+remove_metadata = remove_button.dig("props", "action")
+removed_action = action(
+  socket,
+  id: remove_metadata.fetch("id"),
+  node_id: remove_button.fetch("id"),
+  kind: "submit",
+  payload: remove_metadata["payload"]
+)
+assert(removed_action["state"] == "accepted", "Remove session action was not accepted")
+assert(!removed_action.key?("presentation"), "Remove session action emitted empty presentation operations")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs").empty?,
+  "Remove session action did not remove destination membership"
+)
+
+delete_destination_surface = render_surface(socket)
+delete_destination_form = find_node(
+  delete_destination_surface,
+  "botster-workspaces-delete-form-#{destination_workspace_id}"
+)
+assert(delete_destination_form, "destination workspace is missing the rendered Delete form")
+rejected_delete = action(
+  socket,
+  id: delete_destination_form.dig("props", "action", "id"),
+  node_id: delete_destination_form.fetch("id"),
+  kind: "submit",
+  payload: delete_destination_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-delete-workspace-id" => "" }
+)
+assert_rejected(rejected_delete, "botster-workspaces-delete-workspace-id", "missing Delete workspace id")
+deleted_destination = action(
+  socket,
+  id: delete_destination_form.dig("props", "action", "id"),
+  node_id: delete_destination_form.fetch("id"),
+  kind: "submit",
+  payload: delete_destination_form.dig("props", "action", "payload")
+)
+assert(deleted_destination["state"] == "accepted", "Delete destination action was not accepted")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("error", "code") == "workspace_not_found",
+  "Delete destination action left the grouping"
+)
+
+populated_surface = render_surface(socket)
+targets = request(socket, { type: "list_spawn_targets" }).fetch("spawn_targets")
+target = targets.find { |candidate| candidate["enabled"] && candidate["kind"] == "git" }
+assert(target, "acceptance Hub needs one enabled Git spawn target")
+
+spawn_button = find_node(populated_surface, "botster-workspaces-spawn-#{workspace_id}")
+assert(spawn_button, "selected workspace is missing the rendered Spawn action")
+spawn_action = spawn_button.dig("props", "action")
+opened_spawn = action(
+  socket,
+  id: spawn_action.fetch("id"),
+  node_id: spawn_button.fetch("id"),
+  kind: "submit",
+  payload: spawn_action["payload"]
+)
+assert(opened_spawn["state"] == "accepted", "Spawn action did not open target selection")
+target_form = find_node(render_surface(socket), "botster-workspaces-spawn-target-form-#{workspace_id}")
+assert(target_form, "Spawn action did not render target-first selection")
+selected_target = action(
+  socket,
+  id: target_form.dig("props", "action", "id"),
+  node_id: target_form.fetch("id"),
+  kind: "submit",
+  payload: target_form.dig("props", "action", "payload"),
+  values: { "botster-workspaces-spawn-target" => target.fetch("target_id") }
+)
+assert(selected_target["state"] == "accepted", "Git target selection was not accepted")
+template_select = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-template")
+assert(template_select, "selected Git target has no effective session-template selector")
+template_option = Array(template_select.dig("slots", "options")).first
+assert(template_option, "selected Git target has no effective session template")
+template_id = template_option.dig("props", "value")
+assert(template_id, "effective session template is missing its id")
+
+spawn_form = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-form-#{workspace_id}-#{target.fetch("target_id")}")
+assert(spawn_form, "target selection did not render the Spawn form")
+rejected_spawn_action = action(
+  socket,
+  id: spawn_form.dig("props", "action", "id"),
+  node_id: spawn_form.fetch("id"),
+  kind: "submit",
+  payload: spawn_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-spawn-branch" => "",
+    "botster-workspaces-spawn-template" => template_id,
+  }
+)
+assert_rejected(rejected_spawn_action, "botster-workspaces-spawn-branch", "missing Spawn branch")
+spawned_action = action(
+  socket,
+  id: spawn_form.dig("props", "action", "id"),
+  node_id: spawn_form.fetch("id"),
+  kind: "submit",
+  payload: spawn_form.dig("props", "action", "payload"),
+  values: {
+    "botster-workspaces-spawn-branch" => branch,
+    "botster-workspaces-spawn-template" => template_id,
+    "botster-workspaces-spawn-prompt" => "Workspaces acceptance smoke",
+  }
+)
+assert(spawned_action["state"] == "accepted", "real atomic Hub Spawn action failed: #{spawned_action}")
+spawned = spawned_action.fetch("payload")
+assert(spawned["ok"] == true, "real atomic Hub spawn payload failed: #{spawned}")
+session_id = spawned.fetch("session_id")
+assert(session_id == spawned.dig("hub_result", "session_id"), "workspace did not persist returned Hub UUID")
+assert(spawned.fetch("workspace").fetch("session_refs").count(session_id) == 1, "returned UUID not persisted exactly once")
+
+sessions = request(socket, { type: "list_sessions" }).fetch("sessions")
+assert(sessions.any? { |session| session["session_id"] == session_id }, "Hub session is not observable")
+worktree_id = spawned.dig("hub_result", "worktree_id")
+worktrees = request(socket, { type: "list_worktrees" }).fetch("worktrees")
+assert(worktrees.any? { |worktree| worktree["worktree_id"] == worktree_id }, "managed worktree is not observable")
+
+request(socket, { type: "reload_package", package_name: PACKAGE })
+after_restart = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
+assert(after_restart.fetch("workspace").fetch("session_refs").include?(session_id), "restart lost returned UUID membership")
+
+membership_before_failure = after_restart.fetch("workspace").fetch("session_refs")
+failed_spawn = call_tool(socket, "botster_workspaces.spawn", {
+  workspace_id: workspace_id,
+  target_id: "missing-workspaces-acceptance-target",
+  branch: "#{branch}-negative",
+  template_id: template_id,
 })
-assert(update.fetch("entity").fetch("session_count") == 2, "session grouping did not update")
+assert(failed_spawn["ok"] == false, "negative real Hub spawn unexpectedly succeeded")
+after_failure = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
+assert(
+  after_failure.fetch("workspace").fetch("session_refs") == membership_before_failure,
+  "failed Hub spawn changed membership"
+)
 
-refresh = call_tool(socket, "botster_workspaces.refresh_template_diagnostics", {
-  id: workspace_id
-})
-assert(refresh["ok"] == true, "template diagnostic refresh failed")
-assert(refresh.fetch("workspace").fetch("default_session_template_refs").first.fetch("template_id") == template_id, "template reference was not preserved")
+post_action_surface = render_surface(socket)
+assert(find_node(post_action_surface, "botster-workspaces-row-#{workspace_id}"), "post-action surface did not rerender workspace")
+assert(
+  find_node(post_action_surface, "botster-workspaces-remove-#{session_id}"),
+  "post-action surface did not render returned session identity"
+)
 
-template_session_id = "wst#{Process.pid % 10_000}#{Time.now.to_i % 100_000}"
-spawn_selection = call_tool(socket, "botster_workspaces.spawn_default_session", {
-  id: workspace_id,
-  session_id: template_session_id,
-  prompt: "Acceptance smoke workspace context"
-})
-assert(spawn_selection["ok"] == true, "workspace template spawn selection failed")
-assert(spawn_selection["hub_api"] == "spawn_session_template", "workspace did not select hub template spawn API")
-daemon_request = spawn_selection.fetch("daemon_request")
-assert(daemon_request.fetch("type") == "spawn_session_template", "workspace returned non-template spawn request")
-assert(!daemon_request.key?("target_id"), "workspace must not echo hub-owned target_id into template spawn")
-assert(!daemon_request.fetch("request").key?("cwd"), "workspace must not inject unproven cwd override")
-assert(!daemon_request.fetch("request").key?("env"), "workspace must not inject unproven env override")
-assert(!daemon_request.dig("request", "context").key?("metadata"), "workspace must not inject unproven metadata context")
-spawn_response = request(socket, daemon_request.transform_keys(&:to_sym))
-assert(spawn_response["kind"] == "spawned", "hub did not spawn from workspace-selected template")
+delete_form = find_node(post_action_surface, "botster-workspaces-delete-form-#{workspace_id}")
+assert(delete_form, "spawned workspace is missing the rendered Delete form")
+deleted_action = action(
+  socket,
+  id: delete_form.dig("props", "action", "id"),
+  node_id: delete_form.fetch("id"),
+  kind: "submit",
+  payload: delete_form.dig("props", "action", "payload")
+)
+assert(deleted_action["state"] == "accepted", "workspace Delete action failed")
+deleted = deleted_action.fetch("payload")
+assert(deleted["ok"] == true, "workspace Delete action payload failed")
+assert(call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("error", "code") == "workspace_not_found", "grouping still exists")
+sessions_after_delete = request(socket, { type: "list_sessions" }).fetch("sessions")
+assert(sessions_after_delete.any? { |session| session["session_id"] == session_id }, "workspace delete terminated Hub session")
+worktrees_after_delete = request(socket, { type: "list_worktrees" }).fetch("worktrees")
+assert(
+  worktrees_after_delete.any? { |worktree| worktree["worktree_id"] == worktree_id },
+  "workspace delete removed managed worktree"
+)
 
-attach_response = request(socket, {
-  type: "attach",
-  session_id: template_session_id,
-  subscription_id: "workspaces-acceptance-smoke"
-})
-assert(attach_response["kind"] == "events", "template session attach returned #{attach_response["kind"]}")
-
-observed = +""
-deadline = Time.now + 5
-while Time.now < deadline
-  drain = request(socket, {
-    type: "drain",
-    session_id: template_session_id
-  })
-  assert(drain["kind"] == "events", "template session drain returned #{drain["kind"]}")
-  observed << collect_terminal_output(drain)
-  break if observed.include?("workspace-template-ready")
-
-  sleep 0.03
-end
-assert(observed.include?("workspace-template-ready"), "template session output was not observed: #{observed.inspect}")
-
-shutdown_template = request(socket, {
-  type: "shutdown_session",
-  session_id: template_session_id
-})
-assert(shutdown_template["kind"] == "events", "template session shutdown returned #{shutdown_template["kind"]}")
-
-list = call_tool(socket, "botster_workspaces.list", {})
-row = list.fetch("workspaces").find { |workspace| workspace["id"] == workspace_id }
-assert(row, "created workspace missing from list")
-assert(row["session_count"] == 2, "list row did not expose session count")
-assert(row["default_session_template_count"] == 1, "list row did not expose template count")
-
-show = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
-assert(show.fetch("workspace").fetch("session_group").fetch("session_refs").length == 2, "show did not preserve session refs")
-
-snapshot = call_tool(socket, "botster_workspaces.entity_snapshot", {})
-assert(snapshot["entity_family"] == "botster-workspaces.workspace", "snapshot family mismatch")
-assert(snapshot.fetch("rows").any? { |snapshot_row| snapshot_row["id"] == workspace_id }, "snapshot missing workspace")
-
-%w[workspaces workspaces-settings].each do |surface_id|
-  surface = render_surface(socket, surface_id)
-  assert_no_inert_interactions(surface)
-  assert_primitives(surface, surface_id, %w[panel metric_grid section list list_item status_badge])
-  assert_primitives(surface, surface_id, %w[toolbar]) if surface_id == "workspaces"
-  text = collect_text(surface).join("\n")
-  assert(text.include?(workspace_name), "#{surface_id} surface missing workspace name")
-  assert(text.include?("2 sessions"), "#{surface_id} surface missing session count")
-  assert(text.include?("Templates:"), "#{surface_id} surface missing template summary")
-  assert(text.include?("Acceptance repo"), "#{surface_id} surface missing repo label")
-  assert(text.include?("Acceptance template target"), "#{surface_id} surface missing spawn target label")
-  assert(text.include?("Archive policy: Archive"), "#{surface_id} surface missing archive-policy content") if surface_id == "workspaces-settings"
-end
-
-puts "script/hub_acceptance_smoke: ok workspace_id=#{workspace_id} template_id=#{template_id} existing=#{existing}"
+puts(
+  "script/hub_acceptance_smoke: ok " \
+  "workspace_id=#{workspace_id} target_id=#{target["target_id"]} " \
+  "template_id=#{template_id} session_id=#{session_id}"
+)

@@ -1,0 +1,139 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "timeout"
+require "tmpdir"
+
+ROOT = File.expand_path("..", __dir__)
+TEMPLATE_PACKAGE = File.join(ROOT, "test", "fixtures", "session-template-package")
+
+def required_executable(name)
+  path = ENV.fetch(name) do
+    warn "#{name} must point at an executable"
+    exit 1
+  end
+  path = File.expand_path(path, ROOT)
+  unless File.executable?(path)
+    warn "#{name} is not executable: #{path}"
+    exit 1
+  end
+  path
+end
+
+def run!(*command)
+  return if system(*command)
+
+  raise "command failed: #{command.join(" ")}"
+end
+
+hub = required_executable("BOTSTER_HUB_BIN")
+session_worker = required_executable("BOTSTER_SESSION_WORKER_BIN")
+# macOS UNIX socket paths are short; Dir.tmpdir's /var/folders path can exceed
+# sun_path once the hub socket filename is appended.
+temporary_root = Dir.exist?("/private/tmp") ? "/private/tmp" : Dir.tmpdir
+
+Dir.mktmpdir("bws-", temporary_root) do |data_dir|
+  socket_path = File.join(data_dir, "botster-hub.sock")
+  log_path = File.join(data_dir, "botster-hub.log")
+  log = File.open(log_path, "w")
+  hub_pid = Process.spawn(
+    hub,
+    "start",
+    "--data-dir",
+    data_dir,
+    "--session-worker-bin",
+    session_worker,
+    out: log,
+    err: log
+  )
+  hub_status = nil
+  failure = nil
+
+  begin
+    Timeout.timeout(15) do
+      until File.socket?(socket_path)
+        exited = Process.waitpid(hub_pid, Process::WNOHANG)
+        if exited
+          hub_status = $?
+          log.flush
+          raise "isolated hub exited before creating its socket:\n#{File.read(log_path)}"
+        end
+
+        sleep 0.05
+      end
+    end
+
+    run!(hub, "packages", "install", "--data-dir", data_dir, "--path", TEMPLATE_PACKAGE)
+    run!(hub, "packages", "enable", "--data-dir", data_dir, "botster-workspaces-acceptance-template")
+    run!(hub, "packages", "install", "--data-dir", data_dir, "--path", ROOT)
+    run!(hub, "packages", "enable", "--data-dir", data_dir, "botster-workspaces")
+    run!(File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Automated Acceptance Workspace")
+  rescue StandardError => error # preserve the original failure while cleaning up the owned daemon
+    failure = error
+  ensure
+    shutdown_ok = hub_status ? true : system(hub, "shutdown", "--data-dir", data_dir, out: File::NULL, err: File::NULL)
+    unless hub_status
+      begin
+        Timeout.timeout(10) do
+          Process.waitpid(hub_pid)
+          hub_status = $?
+        end
+      rescue Timeout::Error
+        failure ||= RuntimeError.new("isolated hub did not stop within 10 seconds")
+        begin
+          Process.kill("TERM", hub_pid)
+        rescue Errno::ESRCH
+          nil
+        end
+        begin
+          Timeout.timeout(5) do
+            Process.waitpid(hub_pid)
+            hub_status = $?
+          end
+        rescue Timeout::Error
+          begin
+            Process.kill("KILL", hub_pid)
+          rescue Errno::ESRCH
+            nil
+          end
+          begin
+            Timeout.timeout(5) do
+              Process.waitpid(hub_pid)
+              hub_status = $?
+            end
+          rescue Timeout::Error
+            failure ||= RuntimeError.new("isolated hub could not be reaped after KILL")
+          rescue Errno::ECHILD
+            nil
+          end
+        rescue Errno::ECHILD
+          nil
+        end
+      rescue Errno::ECHILD, Errno::ESRCH
+        nil
+      end
+    end
+
+    unless shutdown_ok && hub_status&.success?
+      failure ||= RuntimeError.new(
+        "isolated hub cleanup failed (shutdown=#{shutdown_ok.inspect}, status=#{hub_status&.exitstatus.inspect})"
+      )
+    end
+
+    if failure
+      log.flush
+      warn "isolated hub log tail:"
+      warn File.readlines(log_path).last(80).join
+    end
+
+    begin
+      log.close
+    rescue IOError
+      nil
+    end
+  end
+
+  raise failure if failure
+end
+
+puts "script/test-hub-flow: ok"

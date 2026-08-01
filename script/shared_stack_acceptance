@@ -427,6 +427,11 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     packages = package_proof!(daemon)
     target = daemon.request(type: "list_spawn_targets").fetch("spawn_targets").find { |row| row["target_id"] == TARGET_ID }
     assert(target && target["base_ref"] == "main", "shared Git target omitted explicit base_ref=main")
+    run_process!(
+      [File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Shared stack owner boundary"], chdir: ROOT,
+      env: { "BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE" => OWNER_TEMPLATE_ID },
+      output_path: File.join(evidence_dir, "owner-boundary.log")
+    )
     run!(hub_binary, "packages", "start-entrypoint", "--data-dir", data_dir, "botster-web", "web-client")
 
     cold_assignment = web_assignment(
@@ -490,11 +495,6 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
 
     ownership = assert_single_owner!(daemon)
     collisions = collision_proof!(daemon, data_dir, repository, shared_workspace.fetch("workspace_id"))
-    run_process!(
-      [File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Shared stack owner boundary"], chdir: ROOT,
-      env: { "BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE" => OWNER_TEMPLATE_ID },
-      output_path: File.join(evidence_dir, "owner-boundary.log")
-    )
     deletion = deletion_proof!(daemon, repository, [
       shared_workspace.fetch("workspace_id"), web_reused.dig("workspace", "workspace_id"),
     ])

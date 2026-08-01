@@ -66,6 +66,9 @@ required_plugin_tokens = %w[
   selected-workspace
   workspace-dialog
   botster-workspaces.workspace
+  bind_list
+  lifecycle_class
+  /session
 ]
 required_plugin_tokens.each do |token|
   assert(plugin.include?(token), "plugin entrypoint must wire #{token}")
@@ -122,7 +125,14 @@ assert(
   surface_contract["detail_actions"].sort == %w[add_session delete move_session remove_session rename spawn],
   "fixture must define all non-lifecycle detail actions"
 )
-assert(surface_contract["lifecycle_grouping"] == "deferred", "fixture must not claim lifecycle grouping")
+lifecycle_contract = surface_contract.fetch("lifecycle_grouping")
+assert(lifecycle_contract["source"] == "/session", "fixture must use the canonical session entity family")
+assert(
+  lifecycle_contract["groups"] == %w[current ended indeterminate absent],
+  "fixture must define canonical lifecycle and absence groups"
+)
+assert(lifecycle_contract["persists_lifecycle"] == false, "fixture must not persist lifecycle truth")
+assert(lifecycle_contract["bindings_per_reference_max"] == 4, "fixture must bound binding growth")
 assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", "fixture must name entity family")
 
 {
@@ -140,7 +150,7 @@ assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", 
     "Rename and Delete",
     "Atomic Spawn",
     "Contextual Surface",
-    "Lifecycle Follow-on",
+    "Lifecycle Projection",
   ],
   "docs/capabilities.md" => [
     "Declared Capabilities",
@@ -180,6 +190,10 @@ end
 
 %w[fs. io.open os.execute File.read( File.write(].each do |token|
   assert(!plugin.include?(token), "plugin must not use direct filesystem API #{token}")
+end
+
+%w[list_sessions polling].each do |token|
+  assert(!plugin.include?(token), "plugin must not synchronize lifecycle through #{token}")
 end
 
 %w[.env mise.local.toml *.log tmp/ data/ dist/ build/].each do |pattern|

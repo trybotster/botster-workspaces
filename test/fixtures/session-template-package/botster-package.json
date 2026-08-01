@@ -11,6 +11,7 @@
   "session_templates": [
     {
       "id": "workspace-acceptance",
+      "target_id": "workspaces-acceptance",
       "command": "bin/session.sh",
       "context": ["workspace_id", "prompt", "ticket_id", "branch_name"]
     }

@@ -1253,46 +1253,130 @@ local function workspace_dialogs(workspace, rows, targets, templates_by_target)
   return dialogs
 end
 
-local function session_list(workspace)
-  local children = {}
-  if #workspace.session_refs == 0 then
-    children[#children + 1] = {
-      type = "empty_state",
-      id = "botster-workspaces-sessions-empty-" .. workspace.id,
-      props = {
-        title = "No sessions",
-        description = "Add an existing session or spawn a new one.",
-      },
+local function session_row(workspace, session_id, group, subtitle)
+  local slots = {
+    title = {
+      text_node(
+        "botster-workspaces-session-label-" .. group .. "-" .. workspace.id .. "-" .. session_id,
+        session_id
+      ),
+    },
+    actions = {
+      button_node(
+        "botster-workspaces-remove-" .. group .. "-" .. workspace.id .. "-" .. session_id,
+        "Remove",
+        "botster_workspaces.remove_session",
+        { workspace_id = workspace.id, session_id = session_id },
+        "danger"
+      ),
+    },
+  }
+  if subtitle then
+    slots.subtitle = {
+      text_node(
+        "botster-workspaces-session-subtitle-" .. group .. "-" .. workspace.id .. "-" .. session_id,
+        subtitle
+      ),
     }
-  else
-    for _, session_id in ipairs(workspace.session_refs) do
-      children[#children + 1] = {
-        type = "list_item",
-        id = "botster-workspaces-session-" .. session_id,
-        slots = {
-          title = {
-            text_node("botster-workspaces-session-label-" .. session_id, session_id),
-          },
-          actions = {
-            button_node(
-              "botster-workspaces-remove-" .. session_id,
-              "Remove",
-              "botster_workspaces.remove_session",
-              { workspace_id = workspace.id, session_id = session_id },
-              "danger"
-            ),
-          },
-        },
-      }
-    end
   end
   return {
-    type = "list",
-    id = "botster-workspaces-sessions-" .. workspace.id,
-    props = {
-      aria_label = "Workspace sessions",
+    type = "list_item",
+    id = "botster-workspaces-session-" .. group .. "-" .. workspace.id .. "-" .. session_id,
+    slots = slots,
+  }
+end
+
+local function lifecycle_binding(workspace, session_id, lifecycle_class, subtitle)
+  return {
+    ["$kind"] = "bind_list",
+    source = "/session",
+    where = {
+      session_uuid = session_id,
+      lifecycle_class = lifecycle_class,
     },
-    children = children,
+    item_template = session_row(workspace, session_id, lifecycle_class, subtitle),
+  }
+end
+
+local function absence_binding(workspace, session_id)
+  return {
+    ["$kind"] = "bind_list",
+    source = "/session",
+    where = {
+      session_uuid = session_id,
+    },
+    item_template = {
+      type = "stack",
+      id = "botster-workspaces-session-present-" .. workspace.id .. "-" .. session_id,
+      props = {
+        direction = "vertical",
+      },
+    },
+    empty_template = session_row(workspace, session_id, "absent", "Session unavailable"),
+  }
+end
+
+local function session_group(workspace, group, title, aria_label, children)
+  return {
+    type = "section",
+    id = "botster-workspaces-sessions-" .. group .. "-" .. workspace.id,
+    props = {
+      title = title,
+    },
+    slots = {
+      body = {
+        {
+          type = "list",
+          id = "botster-workspaces-session-list-" .. group .. "-" .. workspace.id,
+          props = {
+            aria_label = aria_label,
+          },
+          children = children,
+        },
+      },
+    },
+  }
+end
+
+local function session_groups(workspace)
+  if #workspace.session_refs == 0 then
+    return {
+      {
+        type = "empty_state",
+        id = "botster-workspaces-sessions-empty-" .. workspace.id,
+        props = {
+          title = "No sessions",
+          description = "Add an existing session or spawn a new one.",
+        },
+      },
+    }
+  end
+
+  local current = {}
+  local ended = {}
+  local unavailable = {}
+  for _, session_id in ipairs(workspace.session_refs) do
+    current[#current + 1] = lifecycle_binding(workspace, session_id, "current")
+    ended[#ended + 1] = lifecycle_binding(workspace, session_id, "ended")
+    unavailable[#unavailable + 1] = lifecycle_binding(
+      workspace,
+      session_id,
+      "indeterminate",
+      "Lifecycle status is uncertain"
+    )
+    unavailable[#unavailable + 1] = absence_binding(workspace, session_id)
+  end
+
+  return {
+    session_group(workspace, "current", "Current", "Current workspace sessions", current),
+    session_group(workspace, "ended", "Ended", "Ended workspace sessions", ended),
+    session_group(
+      workspace,
+      "unavailable",
+      "Unavailable / uncertain",
+      "Unavailable or uncertain workspace sessions",
+      unavailable
+    ),
   }
 end
 
@@ -1340,9 +1424,7 @@ local function workspace_detail(workspace, rows, targets, templates_by_target)
       },
       slots = {
         actions = actions,
-        body = {
-          session_list(workspace),
-        },
+        body = session_groups(workspace),
       },
     },
   }

@@ -44,3 +44,9 @@ The owner-authored surface is validated against the exact Hub
 `botster-ui-contract` crate. Accepted action results alone carry presentation
 and replacement effects. The client owns scoped presentation storage and
 generic rendering; this package owns the actions and trees.
+
+The tree binds referenced UUIDs to the Hub-owned `/session` family. The
+ordinary `surfaces` capability admits this read-model dependency; the package
+does not request a lifecycle capability or publish a duplicate session entity.
+Exact lifecycle filters author Current, Ended, and Unavailable / uncertain
+presentation while Hub entity frames remain the only reconciliation channel.

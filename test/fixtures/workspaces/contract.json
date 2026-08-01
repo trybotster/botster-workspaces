@@ -95,7 +95,16 @@
       "move_session",
       "remove_session"
     ],
-    "lifecycle_grouping": "deferred"
+    "lifecycle_grouping": {
+      "source": "/session",
+      "identity_field": "session_uuid",
+      "classification_field": "lifecycle_class",
+      "groups": ["current", "ended", "indeterminate", "absent"],
+      "reconciliation": ["entity_snapshot", "entity_upsert", "entity_patch", "entity_remove"],
+      "persists_lifecycle": false,
+      "retains_ended_and_unavailable_refs": true,
+      "bindings_per_reference_max": 4
+    }
   },
   "entity_family": {
     "name": "botster-workspaces.workspace",

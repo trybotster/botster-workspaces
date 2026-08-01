@@ -1368,9 +1368,9 @@ local function session_groups(workspace)
   end
 
   return {
-    session_group(workspace, "current", "Current", current),
-    session_group(workspace, "ended", "Ended", ended),
-    session_group(workspace, "unavailable", "Unavailable / uncertain", unavailable),
+    session_group(workspace, "current", "Sessions: Current.", current),
+    session_group(workspace, "ended", "Sessions: Ended.", ended),
+    session_group(workspace, "unavailable", "Sessions: Unavailable / uncertain.", unavailable),
   }
 end
 

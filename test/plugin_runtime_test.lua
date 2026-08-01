@@ -655,6 +655,23 @@ for _, group in ipairs({ "current", "ended", "indeterminate" }) do
   assert_true(remove, group .. " row retains a literal Remove action")
   assert_eq(remove.props.action.payload.workspace_id, renamed.workspace.id, group .. " Remove action keeps workspace identity")
   assert_eq(remove.props.action.payload.session_id, persisted_spawn_uuid, group .. " Remove action keeps session identity")
+  if group == "indeterminate" then
+    local subtitle = find_node(
+      binding.item_template,
+      "botster-workspaces-session-subtitle-" .. group .. "-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
+    )
+    assert_true(subtitle, "indeterminate row states its uncertain lifecycle classification")
+    assert_eq(subtitle.props.text, "Lifecycle status is uncertain", "indeterminate row remains legible downstream")
+  end
+end
+for group, title in pairs({
+  current = "Sessions: Current.",
+  ended = "Sessions: Ended.",
+  unavailable = "Sessions: Unavailable / uncertain.",
+}) do
+  local section = find_node(surface, "botster-workspaces-sessions-" .. group .. "-" .. renamed.workspace.id)
+  assert_true(section, group .. " lifecycle section is present")
+  assert_eq(section.props.title, title, group .. " lifecycle heading is independently legible")
 end
 local absence_binding
 for _, candidate in ipairs(lifecycle_bindings) do

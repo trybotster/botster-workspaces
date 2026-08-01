@@ -14,7 +14,7 @@ ROOT = File.expand_path("..", __dir__)
 PROTOCOL = "botster-hub-daemon-v1"
 TARGET_ID = "workspaces-shared-stack"
 TEMPLATE_ID = "shared-stack"
-OWNER_TEMPLATE_ID = "owner-acceptance"
+OWNER_TEMPLATE_ID = "botster-workspaces-shared-stack-owner-template/owner-acceptance"
 SCHEMA = "botster.tui.workspaces-spawn-driver/v1"
 
 class HubExited < RuntimeError

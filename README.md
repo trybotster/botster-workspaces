@@ -68,6 +68,11 @@ the returned `result.session_id`; a rejection or worker error records nothing.
 If the Hub spawn succeeds but the following grouping write fails, the action
 reports the returned ungrouped UUID and does not claim membership.
 
+The detail Spawn opener exposes `botster_workspaces.open_spawn` as its stable,
+renderer-neutral consumer identity. Clients locate it from realized action
+metadata and dispatch the exact action id, node id, and payload they received;
+they do not parse the visible `Spawn` copy or synthesize its dynamic node id.
+
 ## Clean-start data
 
 This is a cold replacement of the pre-release workspace product. The package

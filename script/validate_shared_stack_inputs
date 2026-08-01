@@ -1,0 +1,134 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "digest"
+require "json"
+require "open3"
+require "pathname"
+
+REQUIRED_EXECUTABLES = %w[hub_binary session_worker_binary].freeze
+REQUIRED_CHECKOUTS = %w[
+  core_source
+  web_package
+  tui_package
+  workspaces_package
+  ui_contract_source
+  web_driver_source
+  tui_driver_source
+].freeze
+REQUIRED_ARTIFACTS = (REQUIRED_EXECUTABLES + REQUIRED_CHECKOUTS).freeze
+REVISION_PATTERN = /\A[0-9a-f]{40}\z/
+SHA256_PATTERN = /\A[0-9a-f]{64}\z/
+
+def fail_validation(message)
+  warn "shared-stack input error: #{message}"
+  exit 1
+end
+
+def exact_keys!(value, expected, label)
+  fail_validation("#{label} must be an object") unless value.is_a?(Hash)
+
+  actual = value.keys.sort
+  expected = expected.sort
+  return if actual == expected
+
+  fail_validation("#{label} keys must be #{expected.join(', ')}; got #{actual.join(', ')}")
+end
+
+def absolute_path!(value, label)
+  fail_validation("#{label} must be a non-empty absolute path") unless value.is_a?(String) && !value.empty?
+
+  path = Pathname.new(value)
+  fail_validation("#{label} must be an explicit absolute path") unless path.absolute?
+  fail_validation("#{label} does not exist: #{value}") unless path.exist?
+
+  path.realpath.to_s
+end
+
+def revision!(value, label)
+  unless value.is_a?(String) && value.match?(REVISION_PATTERN)
+    fail_validation("#{label} must be a full lowercase 40-character Git revision")
+  end
+
+  value
+end
+
+def git_output!(*command, label:)
+  stdout, stderr, status = Open3.capture3(*command)
+  fail_validation("#{label}: #{stderr.strip}") unless status.success?
+
+  stdout.strip
+end
+
+def validate_checkout!(path, revision, label)
+  top_level = git_output!("git", "-C", path, "rev-parse", "--show-toplevel", label: "#{label} is not a Git checkout")
+  resolved_top_level = File.realpath(top_level)
+  fail_validation("#{label} must name the checkout root: #{resolved_top_level}") unless resolved_top_level == path
+
+  head = git_output!("git", "-C", path, "rev-parse", "HEAD", label: "#{label} HEAD could not be read")
+  fail_validation("#{label} revision mismatch: expected #{revision}, got #{head}") unless head == revision
+
+  dirty = git_output!("git", "-C", path, "status", "--porcelain", "--untracked-files=all", label: "#{label} status failed")
+  unless dirty.empty?
+    fail_validation("#{label} must be clean; dirty entries: #{dirty.lines.first(10).map(&:strip).join(', ')}")
+  end
+end
+
+manifest_path = ARGV.fetch(0) do
+  warn "usage: script/validate_shared_stack_inputs /absolute/path/to/inputs.json"
+  exit 1
+end
+fail_validation("expected exactly one manifest path") unless ARGV.length == 1
+manifest_path = absolute_path!(manifest_path, "manifest path")
+fail_validation("manifest path must be a file: #{manifest_path}") unless File.file?(manifest_path)
+
+begin
+  manifest = JSON.parse(File.read(manifest_path))
+rescue Errno::ENOENT, Errno::EACCES, JSON::ParserError => error
+  fail_validation("cannot read manifest: #{error.message}")
+end
+
+exact_keys!(manifest, %w[schema_version artifacts], "manifest")
+fail_validation("schema_version must be 1") unless manifest["schema_version"] == 1
+
+artifacts = manifest["artifacts"]
+exact_keys!(artifacts, REQUIRED_ARTIFACTS, "artifacts")
+ledger = {}
+
+REQUIRED_EXECUTABLES.each do |name|
+  artifact = artifacts.fetch(name)
+  exact_keys!(artifact, %w[kind path revision sha256 source_checkout], name)
+  fail_validation("#{name}.kind must be executable") unless artifact["kind"] == "executable"
+
+  path = absolute_path!(artifact["path"], "#{name}.path")
+  fail_validation("#{name}.path is not executable: #{path}") unless File.file?(path) && File.executable?(path)
+
+  sha256 = artifact["sha256"]
+  unless sha256.is_a?(String) && sha256.match?(SHA256_PATTERN)
+    fail_validation("#{name}.sha256 must be a lowercase SHA-256 digest")
+  end
+  actual_sha256 = Digest::SHA256.file(path).hexdigest
+  fail_validation("#{name}.sha256 mismatch: expected #{sha256}, got #{actual_sha256}") unless actual_sha256 == sha256
+
+  source_checkout = absolute_path!(artifact["source_checkout"], "#{name}.source_checkout")
+  revision = revision!(artifact["revision"], "#{name}.revision")
+  validate_checkout!(source_checkout, revision, "#{name}.source_checkout")
+  ledger[name] = artifact.merge("path" => path, "source_checkout" => source_checkout)
+end
+
+REQUIRED_CHECKOUTS.each do |name|
+  artifact = artifacts.fetch(name)
+  exact_keys!(artifact, %w[kind path revision], name)
+  fail_validation("#{name}.kind must be git_checkout") unless artifact["kind"] == "git_checkout"
+
+  path = absolute_path!(artifact["path"], "#{name}.path")
+  revision = revision!(artifact["revision"], "#{name}.revision")
+  validate_checkout!(path, revision, name)
+  ledger[name] = artifact.merge("path" => path)
+end
+
+puts JSON.pretty_generate({
+  "schema_version" => 1,
+  "status" => "validated",
+  "artifacts" => ledger,
+})

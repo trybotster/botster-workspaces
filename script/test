@@ -1,7 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "digest"
 require "json"
+require "tmpdir"
 
 ROOT = File.expand_path("..", __dir__)
 
@@ -20,12 +22,19 @@ readme = read("README.md")
 domain_doc = read("docs/workspace-domain.md")
 capabilities_doc = read("docs/capabilities.md")
 gitignore = read(".gitignore")
+hub_flow = read("script/test-hub-flow")
+shared_stack_validator = read("script/validate_shared_stack_inputs")
 
 assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
 assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
 assert(manifest["source"] == { "type" => "path", "path" => "." }, "manifest source must be the package path")
 assert(manifest["capabilities"] == contract.fetch("manifest_capabilities"), "manifest capabilities must match contract")
 assert(!manifest.key?("configuration"), "manifest must not retain workspace settings")
+
+assert(hub_flow.include?("shared-stack validate-inputs"), "Hub flow must expose the shared-stack input profile")
+%w[hub_binary session_worker_binary web_driver_source tui_driver_source].each do |token|
+  assert(shared_stack_validator.include?(token), "shared-stack validator must require #{token}")
+end
 
 surfaces = manifest.fetch("surfaces")
 assert(surfaces.length == 1, "manifest must declare one surface")
@@ -207,6 +216,7 @@ scanned_files = %w[
   docs/workspace-domain.md
   docs/capabilities.md
   script/hub_acceptance_smoke
+  script/validate_shared_stack_inputs
   script/validate_ui_node_contract
   test/fixtures/workspaces/contract.json
   test/plugin_runtime_test.lua
@@ -222,6 +232,73 @@ scanned_files.each do |path|
   leak_patterns.each do |label, pattern|
     assert(!contents.match?(pattern), "#{path} contains #{label}")
   end
+end
+
+Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
+  source_checkout = File.join(temporary_root, "source")
+  Dir.mkdir(source_checkout)
+  assert(system("git", "init", "--quiet", source_checkout), "shared-stack fixture Git init failed")
+  assert(system("git", "-C", source_checkout, "config", "user.name", "Botster Workspaces Test"), "shared-stack fixture user.name failed")
+  assert(system("git", "-C", source_checkout, "config", "user.email", "workspaces-test@example.invalid"), "shared-stack fixture user.email failed")
+
+  hub_binary = File.join(source_checkout, "botster-hub")
+  worker_binary = File.join(source_checkout, "botster-session-worker")
+  File.write(hub_binary, "#!/bin/sh\nexit 0\n")
+  File.write(worker_binary, "#!/bin/sh\nexit 0\n")
+  File.chmod(0o755, hub_binary, worker_binary)
+  assert(system("git", "-C", source_checkout, "add", "."), "shared-stack fixture Git add failed")
+  assert(system("git", "-C", source_checkout, "commit", "--quiet", "-m", "Fixture"), "shared-stack fixture Git commit failed")
+  revision = IO.popen(["git", "-C", source_checkout, "rev-parse", "HEAD"], &:read).strip
+
+  artifacts = {
+    "hub_binary" => {
+      "kind" => "executable",
+      "path" => hub_binary,
+      "revision" => revision,
+      "sha256" => Digest::SHA256.file(hub_binary).hexdigest,
+      "source_checkout" => source_checkout,
+    },
+    "session_worker_binary" => {
+      "kind" => "executable",
+      "path" => worker_binary,
+      "revision" => revision,
+      "sha256" => Digest::SHA256.file(worker_binary).hexdigest,
+      "source_checkout" => source_checkout,
+    },
+  }
+  %w[core_source web_package tui_package workspaces_package ui_contract_source web_driver_source tui_driver_source].each do |name|
+    artifacts[name] = { "kind" => "git_checkout", "path" => source_checkout, "revision" => revision }
+  end
+
+  valid_manifest = { "schema_version" => 1, "artifacts" => artifacts }
+  manifest_path = File.join(temporary_root, "inputs.json")
+  File.write(manifest_path, JSON.pretty_generate(valid_manifest))
+  validator = File.join(ROOT, "script", "validate_shared_stack_inputs")
+  hub_flow_command = File.join(ROOT, "script", "test-hub-flow")
+  assert(
+    system(hub_flow_command, "shared-stack", "validate-inputs", manifest_path, out: File::NULL),
+    "valid shared-stack provenance was rejected"
+  )
+
+  invalid_digest = JSON.parse(File.read(manifest_path))
+  invalid_digest["artifacts"]["hub_binary"]["sha256"] = "0" * 64
+  File.write(manifest_path, JSON.pretty_generate(invalid_digest))
+  assert(!system(validator, manifest_path, out: File::NULL, err: File::NULL), "shared-stack validator accepted a false binary digest")
+
+  relative_path = JSON.parse(File.read(manifest_path))
+  relative_path["artifacts"]["hub_binary"]["sha256"] = Digest::SHA256.file(hub_binary).hexdigest
+  relative_path["artifacts"]["web_package"]["path"] = "../botster-web"
+  File.write(manifest_path, JSON.pretty_generate(relative_path))
+  assert(!system(validator, manifest_path, out: File::NULL, err: File::NULL), "shared-stack validator inferred a relative sibling path")
+
+  revision_mismatch = JSON.parse(JSON.generate(valid_manifest))
+  revision_mismatch["artifacts"]["web_package"]["revision"] = "0" * 40
+  File.write(manifest_path, JSON.pretty_generate(revision_mismatch))
+  assert(!system(validator, manifest_path, out: File::NULL, err: File::NULL), "shared-stack validator accepted a mismatched revision")
+
+  File.write(manifest_path, JSON.pretty_generate(valid_manifest))
+  File.write(File.join(source_checkout, "untracked"), "dirty\n")
+  assert(!system(validator, manifest_path, out: File::NULL, err: File::NULL), "shared-stack validator accepted a dirty checkout")
 end
 
 lua = ENV.fetch("LUA", "lua")

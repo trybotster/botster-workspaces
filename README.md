@@ -133,6 +133,34 @@ with the same Hub, worker, and package provenance. These modes must exercise
 the real owner-authored tree through each generic renderer; repository-local
 source or fixture inspection is not a substitute.
 
+### Shared-stack acceptance inputs
+
+The final browser/TUI acceptance profile uses one parent-owned Hub and one
+fresh data directory. Before either consumer is launched, validate an explicit
+input manifest:
+
+```sh
+script/test-hub-flow shared-stack validate-inputs /absolute/path/to/inputs.json
+```
+
+The version 1 manifest contains exactly `schema_version` and `artifacts`.
+`hub_binary` and `session_worker_binary` name executable files with SHA-256
+digests, full source revisions, and clean absolute source-checkout paths; each
+entry contains exactly `kind`, `path`, `sha256`, `source_checkout`, and
+`revision`, with `kind` set to `executable`. The remaining artifacts contain
+exactly `kind`, `path`, and `revision`, set `kind` to `git_checkout`, and name
+clean absolute Git checkout roots at full revisions:
+`core_source`, `web_package`, `tui_package`, `workspaces_package`,
+`ui_contract_source`, `web_driver_source`, and `tui_driver_source`.
+
+This command is currently a provenance-only skeleton. It deliberately does not
+launch clients or count as browser/TUI acceptance until the separately routed
+Web and TUI drivers have merged and their repository-documented invocation and
+structured evidence contracts are integrated. It never infers sibling paths,
+accepts dirty checkouts, or treats a mutable branch name as a revision. A
+failure in a Hub, Web, TUI, Core, or UI-contract input must be repaired in that
+owning repository rather than patched by this package.
+
 See [docs/workspace-domain.md](docs/workspace-domain.md) and
 [docs/capabilities.md](docs/capabilities.md) for the exact domain and authority
 contracts.

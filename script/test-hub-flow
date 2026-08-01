@@ -7,6 +7,15 @@ require "tmpdir"
 ROOT = File.expand_path("..", __dir__)
 TEMPLATE_PACKAGE = File.join(ROOT, "test", "fixtures", "session-template-package")
 
+unless ARGV.empty?
+  if ARGV.length == 3 && ARGV[0] == "shared-stack" && ARGV[1] == "validate-inputs"
+    exec(File.join(ROOT, "script", "validate_shared_stack_inputs"), ARGV[2])
+  end
+
+  warn "usage: script/test-hub-flow [shared-stack validate-inputs /absolute/path/to/inputs.json]"
+  exit 1
+end
+
 def required_executable(name)
   path = ENV.fetch(name) do
     warn "#{name} must point at an executable"

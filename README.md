@@ -164,7 +164,9 @@ intentional: the manifest states both roles explicitly and the validator
 requires one exact revision for each.
 
 The run writes raw Hub, Web, and TUI logs, the assigned TUI scenario and JSONL
-ledger, owner-boundary output, and `summary.json`. It proves browser
+ledger, owner-boundary output, and `summary.json`. The summary records the
+exact clean shared-stack harness revision alongside every supplied artifact.
+It proves browser
 create/select/Spawn through the production renderer and transport, keyboard
 Spawn through the production TUI frame and hit map, the missing-branch,
 existing-branch, and exact-worktree states, pushed lifecycle reconciliation,

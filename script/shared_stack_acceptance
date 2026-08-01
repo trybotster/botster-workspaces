@@ -119,6 +119,13 @@ def git_revision(path)
   run!("git", "-C", path, "rev-parse", "HEAD").strip
 end
 
+def clean_git_provenance(path)
+  status = run!("git", "-C", path, "status", "--porcelain", "--untracked-files=all")
+  assert(status.empty?, "shared-stack harness checkout must be clean")
+
+  { "kind" => "git_checkout", "revision" => git_revision(path), "clean" => true }
+end
+
 def git_snapshot(repository)
   {
     "head" => run!("git", "-C", repository, "rev-parse", "HEAD").strip,
@@ -373,6 +380,7 @@ end
 manifest_path = File.realpath(manifest_path)
 evidence_dir = required_absolute_new_directory(evidence_argument)
 artifacts = validated_artifacts(manifest_path)
+harness_provenance = clean_git_provenance(ROOT)
 contract_provenance = verify_contract_provenance!(artifacts)
 web_path = artifacts.fetch("web_driver_source").fetch("path")
 tui_path = artifacts.fetch("tui_driver_source").fetch("path")
@@ -511,7 +519,8 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
       "status" => "passed",
       "shared_data_directory" => true,
       "one_hub_process" => true,
-      "artifacts" => artifacts.transform_values { |artifact| artifact.reject { |key, _| %w[path source_checkout].include?(key) } },
+      "artifacts" => artifacts.transform_values { |artifact| artifact.reject { |key, _| %w[path source_checkout].include?(key) } }
+        .merge("shared_stack_harness" => harness_provenance),
       "binary_sha256" => binary_digests_before,
       "web_dist_sha256" => web_digest_before,
       "contract_provenance" => contract_provenance,

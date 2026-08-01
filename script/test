@@ -45,6 +45,7 @@ end
   path_collision
   list_sessions
   base_ref
+  shared_stack_harness
 ].each do |token|
   assert(shared_stack_acceptance.include?(token), "shared-stack acceptance must prove #{token}")
 end

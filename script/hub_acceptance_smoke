@@ -66,6 +66,10 @@ def children(node)
   values = Array(node["children"])
   (node["slots"] || {}).each_value { |slot| values.concat(Array(slot)) }
   values << node["node"] if node["$kind"] == "presentation_if" && node["node"]
+  if node["$kind"] == "bind_list"
+    values << node["item_template"]
+    values << node["empty_template"] if node["empty_template"]
+  end
   values
 end
 
@@ -83,6 +87,46 @@ def collect_types(node, result = Hash.new(0))
   result[node["type"]] += 1 if node["type"]
   children(node).each { |child| collect_types(child, result) }
   result
+end
+
+def open_session_entity_subscription(socket_path, subscription_id)
+  socket = UNIXSocket.new(socket_path)
+  socket.puts(JSON.generate({
+    protocol: "botster-hub-daemon-v1",
+    compatibility: {
+      protocol: "botster-hub-daemon-v1",
+      minimum_protocol_version: 1,
+      required_features: ["session_entity_subscriptions"],
+      minimum_conformance_fixture_revision: 1,
+      client_name: "botster-workspaces-session-entity-smoke",
+    },
+  }))
+  hello = JSON.parse(socket.gets || raise("daemon closed before entity subscription hello"))
+  assert(hello["protocol"] == "botster-hub-daemon-v1", "entity subscription daemon hello failed")
+  socket.puts(JSON.generate({
+    type: "subscribe_entities",
+    entity_type: "session",
+    subscription_id: subscription_id,
+  }))
+  response = JSON.parse(socket.gets || raise("daemon closed before entity subscription response"))
+  assert(response["kind"] == "entity_subscribed", "session entity subscription was not accepted")
+  [socket, JSON.parse(socket.gets || raise("daemon closed before authoritative entity snapshot"))]
+end
+
+def wait_for_entity_frame(socket, label, timeout: 15)
+  deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+  observed = []
+  loop do
+    remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    raise("timed out waiting for #{label}; observed=#{observed.inspect}") if remaining <= 0
+
+    ready = IO.select([socket], nil, nil, remaining)
+    raise("timed out waiting for #{label}; observed=#{observed.inspect}") unless ready
+
+    frame = JSON.parse(socket.gets || raise("daemon closed while waiting for #{label}"))
+    return frame if yield(frame)
+    observed << frame
+  end
 end
 
 def action(socket, id:, node_id:, kind:, payload: nil, values: nil)
@@ -132,6 +176,13 @@ socket.puts(JSON.generate({
 }))
 hello = JSON.parse(socket.gets || raise("daemon closed before hello"))
 assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
+
+entity_socket, initial_entity_snapshot = open_session_entity_subscription(
+  socket_path,
+  "workspaces-lifecycle-initial-#{Process.pid}"
+)
+assert(initial_entity_snapshot["type"] == "entity_snapshot", "session subscription missing authoritative baseline")
+assert(initial_entity_snapshot["entity_type"] == "session", "session subscription returned wrong entity family")
 
 packages = request(socket, { type: "list_packages" })
 package = packages.fetch("packages").find { |candidate| candidate["package_name"] == PACKAGE }
@@ -359,7 +410,10 @@ assert(
 )
 
 remove_surface = render_surface(socket)
-remove_button = find_node(remove_surface, "botster-workspaces-remove-#{membership_session_id}")
+remove_button = find_node(
+  remove_surface,
+  "botster-workspaces-remove-absent-#{destination_workspace_id}-#{membership_session_id}"
+)
 assert(remove_button, "destination workspace is missing the rendered Remove session action")
 remove_metadata = remove_button.dig("props", "action")
 removed_action = action(
@@ -405,7 +459,10 @@ assert(
 )
 
 populated_surface = render_surface(socket)
-targets = request(socket, { type: "list_spawn_targets" }).fetch("spawn_targets")
+targets_response = request(socket, { type: "list_spawn_targets" })
+targets = targets_response.fetch("spawn_targets") do
+  raise "list_spawn_targets returned unexpected frame #{targets_response.inspect}"
+end
 target = targets.find { |candidate| candidate["enabled"] && candidate["kind"] == "git" }
 assert(target, "acceptance Hub needs one enabled Git spawn target")
 
@@ -471,8 +528,12 @@ session_id = spawned.fetch("session_id")
 assert(session_id == spawned.dig("hub_result", "session_id"), "workspace did not persist returned Hub UUID")
 assert(spawned.fetch("workspace").fetch("session_refs").count(session_id) == 1, "returned UUID not persisted exactly once")
 
-sessions = request(socket, { type: "list_sessions" }).fetch("sessions")
-assert(sessions.any? { |session| session["session_id"] == session_id }, "Hub session is not observable")
+current_frame = wait_for_entity_frame(entity_socket, "current session entity") do |frame|
+  frame["type"] == "entity_upsert" &&
+    frame["id"] == session_id &&
+    frame.dig("entity", "lifecycle_class") == "current"
+end
+assert(current_frame.dig("entity", "session_uuid") == session_id, "current entity lost canonical UUID")
 worktree_id = spawned.dig("hub_result", "worktree_id")
 worktrees = request(socket, { type: "list_worktrees" }).fetch("worktrees")
 assert(worktrees.any? { |worktree| worktree["worktree_id"] == worktree_id }, "managed worktree is not observable")
@@ -495,12 +556,73 @@ assert(
   "failed Hub spawn changed membership"
 )
 
+removed_spawned = call_tool(socket, "botster_workspaces.spawn", {
+  workspace_id: workspace_id,
+  target_id: target.fetch("target_id"),
+  branch: "#{branch}-removed",
+  template_id: template_id,
+})
+assert(removed_spawned["ok"] == true, "second package-owned Hub spawn failed")
+removed_session_id = removed_spawned.fetch("session_id")
+wait_for_entity_frame(entity_socket, "second current session entity") do |frame|
+  frame["type"] == "entity_upsert" && frame["id"] == removed_session_id
+end
+unknown_session_id = "99999999-9999-4999-8999-999999999999"
+call_tool(socket, "botster_workspaces.add_session", { workspace_id: workspace_id, session_id: unknown_session_id })
+
 post_action_surface = render_surface(socket)
 assert(find_node(post_action_surface, "botster-workspaces-row-#{workspace_id}"), "post-action surface did not rerender workspace")
 assert(
-  find_node(post_action_surface, "botster-workspaces-remove-#{session_id}"),
-  "post-action surface did not render returned session identity"
+  find_node(post_action_surface, "botster-workspaces-remove-current-#{workspace_id}-#{session_id}"),
+  "post-action surface did not author the canonical current-session binding"
 )
+assert(
+  find_node(post_action_surface, "botster-workspaces-remove-absent-#{workspace_id}-#{unknown_session_id}"),
+  "single surface render did not author legible absent-reference history"
+)
+
+request(socket, { type: "shutdown_session", session_id: session_id })
+ended_frame = wait_for_entity_frame(entity_socket, "ended session entity") do |frame|
+  frame["type"] == "entity_patch" &&
+    frame["id"] == session_id &&
+    frame.dig("patch", "lifecycle_class") == "ended"
+end
+assert(ended_frame.fetch("snapshot_seq") > current_frame.fetch("snapshot_seq"), "ended patch was not ordered after current")
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(session_id),
+  "ended session entity update removed workspace history"
+)
+
+request(socket, { type: "shutdown_session", session_id: removed_session_id })
+wait_for_entity_frame(entity_socket, "second ended session entity") do |frame|
+  frame["type"] == "entity_patch" &&
+    frame["id"] == removed_session_id &&
+    frame.dig("patch", "lifecycle_class") == "ended"
+end
+request(socket, { type: "remove_session", session_id: removed_session_id })
+removed_frame = wait_for_entity_frame(entity_socket, "removed session entity") do |frame|
+  frame["type"] == "entity_remove" && frame["id"] == removed_session_id
+end
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(removed_session_id),
+  "removed session entity silently discarded the workspace reference"
+)
+
+entity_socket.close
+reconnected_entity_socket, reconnect_snapshot = open_session_entity_subscription(
+  socket_path,
+  "workspaces-lifecycle-reconnect-#{Process.pid}"
+)
+reconnect_items = reconnect_snapshot.fetch("items")
+assert(
+  reconnect_items.any? { |item| item["session_uuid"] == session_id && item["lifecycle_class"] == "ended" },
+  "reconnect baseline did not rehydrate retained ended session"
+)
+assert(
+  reconnect_items.none? { |item| item["session_uuid"] == removed_session_id },
+  "reconnect baseline retained explicitly removed session entity"
+)
+assert(removed_frame.fetch("snapshot_seq") > ended_frame.fetch("snapshot_seq"), "remove frame was not ordered after lifecycle patch")
 
 delete_form = find_node(post_action_surface, "botster-workspaces-delete-form-#{workspace_id}")
 assert(delete_form, "spawned workspace is missing the rendered Delete form")
@@ -515,8 +637,16 @@ assert(deleted_action["state"] == "accepted", "workspace Delete action failed")
 deleted = deleted_action.fetch("payload")
 assert(deleted["ok"] == true, "workspace Delete action payload failed")
 assert(call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("error", "code") == "workspace_not_found", "grouping still exists")
-sessions_after_delete = request(socket, { type: "list_sessions" }).fetch("sessions")
-assert(sessions_after_delete.any? { |session| session["session_id"] == session_id }, "workspace delete terminated Hub session")
+reconnected_entity_socket.close
+after_delete_socket, after_delete_snapshot = open_session_entity_subscription(
+  socket_path,
+  "workspaces-lifecycle-after-delete-#{Process.pid}"
+)
+assert(
+  after_delete_snapshot.fetch("items").any? { |item| item["session_uuid"] == session_id },
+  "workspace delete terminated retained ended Hub session"
+)
+after_delete_socket.close
 worktrees_after_delete = request(socket, { type: "list_worktrees" }).fetch("worktrees")
 assert(
   worktrees_after_delete.any? { |worktree| worktree["worktree_id"] == worktree_id },

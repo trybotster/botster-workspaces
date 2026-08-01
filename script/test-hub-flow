@@ -63,6 +63,29 @@ Dir.mktmpdir("bws-", temporary_root) do |data_dir|
       end
     end
 
+    source_repo = File.join(data_dir, "source-repository")
+    Dir.mkdir(source_repo)
+    run!("git", "init", source_repo)
+    run!("git", "-C", source_repo, "config", "user.name", "Botster Workspaces Acceptance")
+    run!("git", "-C", source_repo, "config", "user.email", "workspaces-acceptance@example.invalid")
+    File.write(File.join(source_repo, "README.md"), "# Workspaces acceptance source\n")
+    run!("git", "-C", source_repo, "add", "README.md")
+    run!("git", "-C", source_repo, "commit", "-m", "Initialize acceptance source")
+    run!(
+      hub,
+      "spawn-targets",
+      "create",
+      "--data-dir",
+      data_dir,
+      "--root",
+      source_repo,
+      "--id",
+      "workspaces-acceptance",
+      "--label",
+      "Workspaces acceptance",
+      "--kind",
+      "git"
+    )
     run!(hub, "packages", "install", "--data-dir", data_dir, "--path", TEMPLATE_PACKAGE)
     run!(hub, "packages", "enable", "--data-dir", data_dir, "botster-workspaces-acceptance-template")
     run!(hub, "packages", "install", "--data-dir", data_dir, "--path", ROOT)

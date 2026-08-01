@@ -53,9 +53,13 @@ Detail preserves every referenced session UUID and exposes:
 - Add or move an existing session
 - remove membership
 
-Current-versus-ended lifecycle grouping is intentionally deferred until the Hub
-provides the canonical projection. This package does not persist, poll, or
-guess lifecycle truth.
+Detail groups each stored reference as **Current**, **Ended**, or
+**Unavailable / uncertain** by binding the stable surface tree directly to the
+Hub-owned `/session` entity family. Snapshot, upsert, patch, and remove frames
+therefore move rows without polling, an imperative session-list refresh, or a
+surface rerender. Ended, indeterminate, and absent UUIDs remain deliberate
+workspace history until the user explicitly moves or removes them. The package
+does not persist, compute, or guess lifecycle truth.
 
 Spawn is target-first. The package lists enabled Git spawn points, then asks
 the Hub for effective session types for the selected target. It calls only
@@ -111,19 +115,23 @@ script/hub_acceptance_smoke /path/to/current-hub.sock
 ```
 
 That smoke crosses the registered package, plugin worker, atomic managed-Git
-spawn, persistence/restart, surface render, and non-destructive delete paths.
+spawn, persistence/restart, canonical session-entity lifecycle reconciliation,
+surface render, and non-destructive delete paths.
 
-The package-specific Web render/route smoke is:
+After the repository-documented consumer modes are available, run the
+package-specific Web lifecycle smoke from `botster-web` with this checkout:
 
 ```sh
 BOTSTER_HUB_BIN=/path/to/botster-hub \
 BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
 BOTSTER_WORKSPACES_PACKAGE_PATH="$PWD" \
-  npm run smoke:live-packaged-protocol
+  npm run smoke:workspaces-lifecycle
 ```
 
-Run it from the current `botster-web` repository. Final Workspaces-specific
-browser and TUI click-through is tracked by the coordinated integration ticket.
+Run the corresponding documented Workspaces lifecycle mode from `botster-tui`
+with the same Hub, worker, and package provenance. These modes must exercise
+the real owner-authored tree through each generic renderer; repository-local
+source or fixture inspection is not a substitute.
 
 See [docs/workspace-domain.md](docs/workspace-domain.md) and
 [docs/capabilities.md](docs/capabilities.md) for the exact domain and authority

@@ -79,12 +79,23 @@ workspace-specific code.
 Detail preserves referenced UUIDs and exposes Spawn, rename, delete,
 Add/Move existing session, and remove membership.
 
-## Lifecycle Follow-on
+## Lifecycle Projection
 
-This base package stores and renders session references only. Canonical
-current-versus-ended projection and push reconciliation belong to follow-on
-ticket `ticket_1785296184_677408`, which consumes the Hub lifecycle producer.
-No lifecycle state, polling, or provisional grouping is implemented here.
+The detail tree projects each stored UUID against the canonical Hub `/session`
+entity family with exact `session_uuid` and `lifecycle_class` filters:
+
+- `current` renders under Current.
+- `ended` renders under Ended.
+- `indeterminate`, or an absent canonical row, renders under Unavailable /
+  uncertain.
+
+The structural tree is rendered once. Authoritative entity snapshots and
+ordered upsert, patch, and remove frames reconcile membership presentation in
+generic clients without polling, `list_sessions`, or a surface refresh. The
+workspace record remains the exact five-field reference record; lifecycle
+classes and availability are never copied into `plugin.db` or the plugin-owned
+workspace entity family. Every reference remains until an explicit move or
+remove, including ended and absent sessions.
 
 ## Persistence
 

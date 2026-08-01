@@ -174,7 +174,31 @@ local function children_of(node)
   if node["$kind"] == "presentation_if" and node.node then
     children[#children + 1] = node.node
   end
+  if node["$kind"] == "bind_list" then
+    children[#children + 1] = node.item_template
+    if node.empty_template then
+      children[#children + 1] = node.empty_template
+    end
+  end
   return children
+end
+
+local function collect_bind_lists(node, result)
+  if node["$kind"] == "bind_list" then
+    result[#result + 1] = node
+  end
+  for _, child in ipairs(children_of(node)) do
+    collect_bind_lists(child, result)
+  end
+end
+
+local function collect_node_ids(node, result)
+  if node.id then
+    result[#result + 1] = node.id
+  end
+  for _, child in ipairs(children_of(node)) do
+    collect_node_ids(child, result)
+  end
 end
 
 local function find_node(node, id)
@@ -600,7 +624,92 @@ assert_true(find_node(rerendered, "botster-workspaces-rename-" .. renamed.worksp
 assert_true(find_node(rerendered, "botster-workspaces-delete-" .. renamed.workspace.id), "detail exposes delete")
 assert_true(find_node(rerendered, "botster-workspaces-add-" .. renamed.workspace.id), "detail exposes Add existing session")
 assert_true(find_node(rerendered, "botster-workspaces-move-" .. renamed.workspace.id), "detail exposes Move existing session")
-assert_true(find_node(rerendered, "botster-workspaces-remove-" .. persisted_spawn_uuid), "detail exposes remove membership")
+assert_true(
+  find_node(
+    rerendered,
+    "botster-workspaces-remove-current-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
+  ),
+  "detail exposes lifecycle-bound remove membership"
+)
+
+local lifecycle_bindings = {}
+collect_bind_lists(surface, lifecycle_bindings)
+assert_eq(#lifecycle_bindings, 8, "each stored reference authors exactly four canonical session bindings")
+for _, binding in ipairs(lifecycle_bindings) do
+  assert_eq(binding.source, "/session", "lifecycle bindings use the canonical Hub session family")
+end
+for _, group in ipairs({ "current", "ended", "indeterminate" }) do
+  local expected_id = "botster-workspaces-session-" .. group .. "-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
+  local binding
+  for _, candidate in ipairs(lifecycle_bindings) do
+    if candidate.item_template and candidate.item_template.id == expected_id then
+      binding = candidate
+      break
+    end
+  end
+  assert_true(binding, group .. " lifecycle binding is present")
+  assert_eq(binding.where.session_uuid, persisted_spawn_uuid, group .. " binding filters exact session UUID")
+  assert_eq(binding.where.lifecycle_class, group, group .. " binding filters canonical lifecycle class")
+  assert_eq(binding.empty_template, nil, group .. " binding renders nothing when it does not match")
+  local remove = find_node(binding.item_template, "botster-workspaces-remove-" .. group .. "-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid)
+  assert_true(remove, group .. " row retains a literal Remove action")
+  assert_eq(remove.props.action.payload.workspace_id, renamed.workspace.id, group .. " Remove action keeps workspace identity")
+  assert_eq(remove.props.action.payload.session_id, persisted_spawn_uuid, group .. " Remove action keeps session identity")
+end
+local absence_binding
+for _, candidate in ipairs(lifecycle_bindings) do
+  if candidate.item_template
+    and candidate.item_template.id == "botster-workspaces-session-present-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
+  then
+    absence_binding = candidate
+    break
+  end
+end
+assert_true(absence_binding, "absence projection is present")
+assert_eq(absence_binding.where.session_uuid, persisted_spawn_uuid, "absence projection filters exact session UUID")
+assert_eq(absence_binding.where.lifecycle_class, nil, "absence projection does not guess lifecycle")
+assert_eq(absence_binding.item_template.type, "stack", "present absence template is structurally inert")
+assert_eq(#(absence_binding.item_template.children or {}), 0, "present absence template has no visible descendants")
+assert_true(
+  find_node(
+    absence_binding.empty_template,
+    "botster-workspaces-remove-absent-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
+  ),
+  "absent reference remains legible and removable"
+)
+
+local scale_workspace = create({ name = "Lifecycle binding scale" }).workspace
+for index = 1, 16 do
+  local session_id = string.format("90000000-0000-4000-8000-%012d", index)
+  assert_eq(
+    add_session({ workspace_id = scale_workspace.id, session_id = session_id }).ok,
+    true,
+    "scale reference adds"
+  )
+end
+local scale_surface = handler(spec, "workspaces_surface")({})
+local scale_detail = find_node(scale_surface, "botster-workspaces-detail-" .. scale_workspace.id)
+assert_true(scale_detail, "16-reference workspace detail is authored")
+local scale_bindings = {}
+collect_bind_lists(scale_detail, scale_bindings)
+assert_eq(#scale_bindings, 64, "16 references author no more than 64 bindings")
+local scale_ids = {}
+collect_node_ids(scale_detail, scale_ids)
+local seen_scale_ids = {}
+for _, id in ipairs(scale_ids) do
+  assert_eq(seen_scale_ids[id], nil, "16-reference tree keeps literal node ids unique")
+  seen_scale_ids[id] = true
+end
+for index = 1, 16 do
+  local session_id = string.format("90000000-0000-4000-8000-%012d", index)
+  local remove = find_node(
+    scale_detail,
+    "botster-workspaces-remove-ended-" .. scale_workspace.id .. "-" .. session_id
+  )
+  assert_true(remove, "scale row keeps an actionable literal descendant")
+  assert_eq(remove.props.action.payload.session_id, session_id, "scale action preserves its literal session UUID")
+end
+assert_eq(delete({ id = scale_workspace.id }).ok, true, "scale fixture cleans up through workspace semantics")
 
 presentation_state["workspace-dialog"] = "move:" .. renamed.workspace.id
 local move_dialog = materialize(surface, presentation_state)

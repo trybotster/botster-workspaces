@@ -664,14 +664,20 @@ for _, group in ipairs({ "current", "ended", "indeterminate" }) do
     assert_eq(subtitle.props.text, "Lifecycle status is uncertain", "indeterminate row remains legible downstream")
   end
 end
-for group, title in pairs({
-  current = "Sessions: Current.",
-  ended = "Sessions: Ended.",
-  unavailable = "Sessions: Unavailable / uncertain.",
+for group, presentation in pairs({
+  current = { title = "Current", aria_label = "Current workspace sessions" },
+  ended = { title = "Ended", aria_label = "Ended workspace sessions" },
+  unavailable = {
+    title = "Unavailable / uncertain",
+    aria_label = "Unavailable or uncertain workspace sessions",
+  },
 }) do
   local section = find_node(surface, "botster-workspaces-sessions-" .. group .. "-" .. renamed.workspace.id)
   assert_true(section, group .. " lifecycle section is present")
-  assert_eq(section.props.title, title, group .. " lifecycle heading is independently legible")
+  assert_eq(section.props.title, presentation.title, group .. " lifecycle heading uses owner product copy")
+  local list = find_node(surface, "botster-workspaces-session-list-" .. group .. "-" .. renamed.workspace.id)
+  assert_true(list, group .. " lifecycle list is present")
+  assert_eq(list.props.aria_label, presentation.aria_label, group .. " lifecycle list has an explicit accessible label")
 end
 local absence_binding
 for _, candidate in ipairs(lifecycle_bindings) do
@@ -687,6 +693,7 @@ assert_eq(absence_binding.where.session_uuid, persisted_spawn_uuid, "absence pro
 assert_eq(absence_binding.where.lifecycle_class, nil, "absence projection does not guess lifecycle")
 assert_eq(absence_binding.item_template.type, "stack", "present absence template is structurally inert")
 assert_eq(#(absence_binding.item_template.children or {}), 0, "present absence template has no visible descendants")
+assert_true(absence_binding.empty_template, "absence projection authors an absent-reference template")
 assert_true(
   find_node(
     absence_binding.empty_template,
@@ -860,6 +867,10 @@ assert_eq(legacy_surface.id, "botster-workspaces-schema-error", "legacy state re
 
 local output_path = os.getenv("BOTSTER_WORKSPACES_SURFACE_JSON")
 if output_path and output_path ~= "" then
+  local scale_session_refs = {}
+  for index = 1, 16 do
+    scale_session_refs[#scale_session_refs + 1] = string.format("90000000-0000-4000-8000-%012d", index)
+  end
   database = {
     workspace_state = {
       schema_version = 1,
@@ -885,10 +896,22 @@ if output_path and output_path ~= "" then
       },
     },
   }
+  local populated_surface = handler(spec, "workspaces_surface")({})
+  database.workspace_state.payload.workspaces = {
+    {
+      id = "ws_contract_scale",
+      name = "Contract scale",
+      session_refs = scale_session_refs,
+      created_at = "plugin-clock-000003",
+      updated_at = "plugin-clock-000003",
+    },
+  }
+  local scale_contract_surface = handler(spec, "workspaces_surface")({})
   local file = assert(io.open(output_path, "w"))
   file:write(json_encode({
     empty_surface,
-    handler(spec, "workspaces_surface")({}),
+    populated_surface,
+    scale_contract_surface,
   }))
   file:write("\n")
   file:close()

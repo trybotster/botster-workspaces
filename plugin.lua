@@ -1316,7 +1316,7 @@ local function absence_binding(workspace, session_id)
   }
 end
 
-local function session_group(workspace, group, title, children)
+local function session_group(workspace, group, title, aria_label, children)
   return {
     type = "section",
     id = "botster-workspaces-sessions-" .. group .. "-" .. workspace.id,
@@ -1329,7 +1329,7 @@ local function session_group(workspace, group, title, children)
           type = "list",
           id = "botster-workspaces-session-list-" .. group .. "-" .. workspace.id,
           props = {
-            aria_label = title .. " workspace sessions",
+            aria_label = aria_label,
           },
           children = children,
         },
@@ -1368,9 +1368,15 @@ local function session_groups(workspace)
   end
 
   return {
-    session_group(workspace, "current", "Sessions: Current.", current),
-    session_group(workspace, "ended", "Sessions: Ended.", ended),
-    session_group(workspace, "unavailable", "Sessions: Unavailable / uncertain.", unavailable),
+    session_group(workspace, "current", "Current", "Current workspace sessions", current),
+    session_group(workspace, "ended", "Ended", "Ended workspace sessions", ended),
+    session_group(
+      workspace,
+      "unavailable",
+      "Unavailable / uncertain",
+      "Unavailable or uncertain workspace sessions",
+      unavailable
+    ),
   }
 end
 

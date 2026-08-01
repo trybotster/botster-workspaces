@@ -13,6 +13,17 @@ def abort_with(message)
   exit 1
 end
 
+def bind_list_count(value)
+  case value
+  when Array
+    value.sum { |item| bind_list_count(item) }
+  when Hash
+    (value["$kind"] == "bind_list" ? 1 : 0) + value.values.sum { |item| bind_list_count(item) }
+  else
+    0
+  end
+end
+
 ui_contract_path = ENV["BOTSTER_UI_CONTRACT_PATH"]
 abort_with("BOTSTER_UI_CONTRACT_PATH must point at the Hub botster-ui-contract crate") if ui_contract_path.to_s.empty?
 abort_with("BOTSTER_UI_CONTRACT_PATH does not exist: #{ui_contract_path}") unless Dir.exist?(ui_contract_path)
@@ -28,7 +39,8 @@ Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
   abort_with("surface payload was not generated") unless File.exist?(surfaces_path)
 
   payload = JSON.parse(File.read(surfaces_path))
-  abort_with("expected empty and populated app surface payloads") unless payload.is_a?(Array) && payload.length == 2
+  abort_with("expected empty, populated, and 16-reference app surface payloads") unless payload.is_a?(Array) && payload.length == 3
+  abort_with("16-reference surface must expose exactly 64 canonical bindings") unless bind_list_count(payload.fetch(2)) == 64
 
   File.write(File.join(dir, "Cargo.toml"), <<~TOML)
     [package]

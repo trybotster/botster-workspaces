@@ -92,7 +92,10 @@ entity family with exact `session_uuid` and `lifecycle_class` filters:
 The structural tree is rendered once. Authoritative entity snapshots and
 ordered upsert, patch, and remove frames reconcile membership presentation in
 generic clients without polling, `list_sessions`, or a surface refresh. The
-workspace record remains the exact five-field reference record; lifecycle
+Current, Ended, and Unavailable / uncertain headings therefore remain present
+for every non-empty workspace even when a group currently realizes no rows;
+an empty group is expected structural presentation rather than a refresh fault.
+The workspace record remains the exact five-field reference record; lifecycle
 classes and availability are never copied into `plugin.db` or the plugin-owned
 workspace entity family. Every reference remains until an explicit move or
 remove, including ended and absent sessions.

@@ -614,6 +614,14 @@ reconnected_entity_socket, reconnect_snapshot = open_session_entity_subscription
   "workspaces-lifecycle-reconnect-#{Process.pid}"
 )
 reconnect_items = reconnect_snapshot.fetch("items")
+canonical_lifecycle_classes = %w[current ended indeterminate]
+reconnect_items.each do |item|
+  lifecycle_class = item.fetch("lifecycle_class")
+  assert(
+    canonical_lifecycle_classes.include?(lifecycle_class),
+    "reconnect baseline exposed unknown lifecycle_class #{lifecycle_class.inspect}"
+  )
+end
 assert(
   reconnect_items.any? { |item| item["session_uuid"] == session_id && item["lifecycle_class"] == "ended" },
   "reconnect baseline did not rehydrate retained ended session"

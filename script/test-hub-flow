@@ -11,8 +11,11 @@ unless ARGV.empty?
   if ARGV.length == 3 && ARGV[0] == "shared-stack" && ARGV[1] == "validate-inputs"
     exec(File.join(ROOT, "script", "validate_shared_stack_inputs"), ARGV[2])
   end
+  if ARGV.length == 4 && ARGV[0] == "shared-stack" && ARGV[1] == "run"
+    exec(File.join(ROOT, "script", "shared_stack_acceptance"), ARGV[2], ARGV[3])
+  end
 
-  warn "usage: script/test-hub-flow [shared-stack validate-inputs /absolute/path/to/inputs.json]"
+  warn "usage: script/test-hub-flow [shared-stack validate-inputs MANIFEST | shared-stack run MANIFEST EVIDENCE_DIR]"
   exit 1
 end
 

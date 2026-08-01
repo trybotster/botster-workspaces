@@ -6,11 +6,12 @@ require "json"
 require "open3"
 require "pathname"
 
-REQUIRED_EXECUTABLES = %w[hub_binary session_worker_binary].freeze
+REQUIRED_EXECUTABLES = %w[hub_binary session_worker_binary tui_binary].freeze
 REQUIRED_CHECKOUTS = %w[
   core_source
   web_package
   tui_package
+  tui_kit_source
   workspaces_package
   ui_contract_source
   web_driver_source

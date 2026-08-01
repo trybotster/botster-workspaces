@@ -1,0 +1,550 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "pathname"
+require "socket"
+require "timeout"
+require "tmpdir"
+
+ROOT = File.expand_path("..", __dir__)
+PROTOCOL = "botster-hub-daemon-v1"
+TARGET_ID = "workspaces-shared-stack"
+TEMPLATE_ID = "shared-stack"
+OWNER_TEMPLATE_ID = "owner-acceptance"
+SCHEMA = "botster.tui.workspaces-spawn-driver/v1"
+
+def assert(condition, message)
+  raise message unless condition
+end
+
+def run!(*command, chdir: ROOT, env: {})
+  stdout, stderr, status = Open3.capture3(env, *command, chdir: chdir)
+  raise "command failed: #{command.join(' ')}\n#{stdout}#{stderr}" unless status.success?
+
+  stdout
+end
+
+def run_process!(command, chdir:, env:, output_path:, timeout: 180)
+  status = nil
+  File.open(output_path, "w") do |output|
+    pid = Process.spawn(env, *command, chdir: chdir, in: File::NULL, out: output, err: output)
+    begin
+      Timeout.timeout(timeout) do
+        Process.waitpid(pid)
+        status = $?
+      end
+    rescue Timeout::Error
+      Process.kill("TERM", pid) rescue nil
+      Process.waitpid(pid) rescue nil
+      raise "timed out after #{timeout}s: #{command.join(' ')}"
+    end
+  end
+  body = File.read(output_path)
+  raise "command failed: #{command.join(' ')}\n#{body}" unless status&.success?
+
+  body
+end
+
+def wait_for_socket(path, pid)
+  Timeout.timeout(20) do
+    loop do
+      raise "shared Hub exited before socket readiness" if Process.waitpid(pid, Process::WNOHANG)
+      begin
+        socket = UNIXSocket.new(path)
+        socket.close
+        return
+      rescue Errno::ENOENT, Errno::ECONNREFUSED
+        sleep 0.05
+      end
+    end
+  end
+end
+
+class Daemon
+  def initialize(socket_path)
+    @socket_path = socket_path
+  end
+
+  def request(payload)
+    socket = UNIXSocket.new(@socket_path)
+    socket.puts(JSON.generate(protocol: PROTOCOL))
+    hello = JSON.parse(socket.gets || raise("daemon closed before hello"))
+    raise "daemon protocol mismatch" unless hello["protocol"] == PROTOCOL
+
+    socket.puts(JSON.generate(payload))
+    response = JSON.parse(socket.gets || raise("daemon closed before response"))
+    raise "daemon #{payload.fetch(:type)} failed: #{response['error']}" if response["error"]
+
+    response
+  ensure
+    socket&.close
+  end
+
+  def call_tool(name, arguments)
+    response = request(type: "plugin_mcp_call_tool", name: name, arguments: arguments)
+    raise "#{name} returned #{response['kind']}" unless response["kind"] == "plugin_mcp_tool_result"
+
+    response.fetch("plugin_tool_result")
+  end
+end
+
+def validated_artifacts(manifest_path)
+  output = run!(File.join(ROOT, "script", "validate_shared_stack_inputs"), manifest_path)
+  JSON.parse(output).fetch("artifacts")
+end
+
+def required_absolute_new_directory(path)
+  pathname = Pathname.new(path)
+  raise "evidence directory must be absolute" unless pathname.absolute?
+  raise "evidence directory already exists: #{path}" if pathname.exist?
+
+  FileUtils.mkdir_p(path)
+  File.realpath(path)
+end
+
+def git_revision(path)
+  run!("git", "-C", path, "rev-parse", "HEAD").strip
+end
+
+def git_snapshot(repository)
+  {
+    "head" => run!("git", "-C", repository, "rev-parse", "HEAD").strip,
+    "branches" => run!("git", "-C", repository, "for-each-ref", "--format=%(refname):%(objectname)", "refs/heads").lines.map(&:strip).sort,
+    "worktrees" => run!("git", "-C", repository, "worktree", "list", "--porcelain").lines.map(&:rstrip),
+  }
+end
+
+def managed_path(data_dir, branch)
+  component = branch.bytes.map { |byte| format("%02x", byte) }.join
+  File.join(data_dir, "managed-worktrees", TARGET_ID, component)
+end
+
+def package_lock_ui_contract(web_path)
+  lock = JSON.parse(File.read(File.join(web_path, "package-lock.json")))
+  lock.fetch("packages").fetch("node_modules/@trybotster/ui-contract")
+end
+
+def cargo_revision(path, dependency)
+  manifest = File.read(path)
+  match = manifest.match(/^#{Regexp.escape(dependency)}\s*=.*rev\s*=\s*"([0-9a-f]{40})"/)
+  raise "#{path} does not pin #{dependency} by full revision" unless match
+
+  match[1]
+end
+
+def directory_digest(path)
+  digest = Digest::SHA256.new
+  Dir.glob(File.join(path, "**", "*"), File::FNM_DOTMATCH).select { |entry| File.file?(entry) }.sort.each do |entry|
+    relative = entry.delete_prefix("#{path}/")
+    digest << relative << "\0" << Digest::SHA256.file(entry).hexdigest << "\0"
+  end
+  digest.hexdigest
+end
+
+def verify_contract_provenance!(artifacts)
+  hub = artifacts.fetch("ui_contract_source").fetch("path")
+  web = artifacts.fetch("web_package").fetch("path")
+  tui = artifacts.fetch("tui_package").fetch("path")
+  tui_kit = artifacts.fetch("tui_kit_source").fetch("path")
+  core = artifacts.fetch("core_source").fetch("path")
+  hub_revision = artifacts.fetch("ui_contract_source").fetch("revision")
+
+  ui_package = JSON.parse(File.read(File.join(hub, "packages", "ui-contract", "package.json")))
+  web_lock = package_lock_ui_contract(web)
+  assert(web_lock.fetch("version") == ui_package.fetch("version"), "Web UI-contract version does not match pinned Hub source")
+  assert(web_lock.fetch("resolved").start_with?("https://registry.npmjs.org/"), "Web UI contract is not registry-resolved")
+
+  published = File.join(web, "node_modules", "@trybotster", "ui-contract")
+  files = ["package.json", *ui_package.fetch("files")]
+  files.each do |relative|
+    source = File.join(hub, "packages", "ui-contract", relative)
+    installed = File.join(published, relative)
+    assert(File.file?(source) && File.file?(installed), "UI-contract artifact omitted #{relative}")
+    assert(Digest::SHA256.file(source).hexdigest == Digest::SHA256.file(installed).hexdigest, "published UI-contract bytes drifted for #{relative}")
+  end
+
+  tui_hub_revision = cargo_revision(File.join(tui, "crates", "botster-tui", "Cargo.toml"), "botster-ui-contract")
+  tui_kit_revision = cargo_revision(File.join(tui, "crates", "botster-tui", "Cargo.toml"), "botster-tui-kit")
+  locked_kit_revision = artifacts.fetch("tui_kit_source").fetch("revision")
+  kit_hub_revision = cargo_revision(File.join(tui_kit, "Cargo.toml"), "botster-ui-contract")
+  assert(tui_hub_revision == hub_revision, "TUI direct UI contract is not pinned to the supplied Hub")
+  assert(tui_kit_revision == locked_kit_revision, "TUI does not consume the supplied TUI-kit revision")
+  assert(kit_hub_revision == hub_revision, "TUI-kit UI contract differs from TUI direct contract")
+
+  core_surface = ["Cargo.toml", "Cargo.lock"].filter_map do |relative|
+    path = File.join(core, relative)
+    File.read(path) if File.file?(path)
+  end.join("\n")
+  assert(!core_surface.include?("botster-ui-contract"), "Core still exposes the Hub UI contract")
+  assert(!Dir.exist?(File.join(core, "crates", "botster-ui-contract")), "Core still contains a UI-contract crate")
+
+  client_manifest = File.read(File.join(hub, "crates", "botster-hub-client", "Cargo.toml"))
+  assert(client_manifest.include?('botster-ui-contract = { path = "../botster-ui-contract" }'), "Hub client does not consume the in-repository UI contract")
+
+  {
+    "hub_ui_contract_revision" => hub_revision,
+    "npm_package" => "@trybotster/ui-contract@#{ui_package.fetch('version')}",
+    "npm_registry_integrity" => web_lock.fetch("integrity"),
+    "tui_kit_revision" => locked_kit_revision,
+    "core_ui_contract_absent" => true,
+    "hub_client_uses_in_repository_contract" => true,
+  }
+end
+
+def web_assignment(generation:, entry_state:, workspace_name:, cases:, observe: nil)
+  {
+    generation: generation,
+    entry_state: entry_state,
+    workspace_name: workspace_name,
+    observe: observe,
+    cases: cases,
+  }.compact
+end
+
+def web_case(case_id, branch, created_branch:, created_worktree:, reused_worktree:)
+  {
+    case_id: case_id,
+    target_id: TARGET_ID,
+    branch: branch,
+    template_id: TEMPLATE_ID,
+    prompt: "shared stack #{case_id}",
+    expected_lifecycle: "ended",
+    expect_created_branch: created_branch,
+    expect_created_worktree: created_worktree,
+    expect_reused_worktree: reused_worktree,
+  }
+end
+
+def parse_web_summary(output)
+  line = output.lines.find { |candidate| candidate.start_with?("workspaces-shared-hub-browser-summary ") }
+  raise "Web driver omitted its structured summary" unless line
+
+  JSON.parse(line.delete_prefix("workspaces-shared-hub-browser-summary "))
+end
+
+def assert_web_summary!(summary)
+  assert(summary["completed"] == true, "Web driver did not complete")
+  assert(summary["lifecycle_reconciliation"] == true, "Web lifecycle did not reconcile")
+  assert(summary.dig("request_counts", "before", "plugin_surface_render") == summary.dig("request_counts", "after", "plugin_surface_render"), "Web synchronized with a surface rerender")
+  assert(summary.dig("request_counts", "before", "list_sessions") == summary.dig("request_counts", "after", "list_sessions"), "Web synchronized with list_sessions")
+  summary.fetch("cases").each do |entry|
+    opener = entry.fetch("spawn_opener")
+    action_ids = %w[dom request result].map { |stage| opener.dig(stage, "action_id") }
+    node_ids = %w[dom request result].map { |stage| opener.dig(stage, "node_id") }
+    assert(action_ids == ["botster_workspaces.open_spawn"] * 3, "Web did not preserve semantic Spawn identity")
+    assert(node_ids.all? { |id| id.is_a?(String) && !id.empty? } && node_ids.uniq.length == 1, "Web did not preserve opaque Spawn node identity")
+    assert(entry.dig("session", "lifecycle") == "ended", "Web case did not reach ended lifecycle")
+  end
+end
+
+def parse_tui_evidence(path)
+  records = File.readlines(path, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+  assert(records.all? { |record| record["schema"] == SCHEMA }, "TUI evidence schema drifted")
+  assert(records.count { |record| record["kind"] == "complete" } == 1, "TUI omitted one terminal completion")
+  assert(records.count { |record| record["kind"] == "case_complete" } == 3, "TUI did not complete three cases")
+  %w[existing-worktree existing-branch missing-branch].each do |case_id|
+    correlated = %w[focused_control dispatched_action action_result].to_h do |kind|
+      matches = records.select do |record|
+        record["case_id"] == case_id && record["kind"] == kind && record.dig("payload", "action_id") == "botster_workspaces.open_spawn"
+      end
+      assert(matches.length == 1, "TUI #{case_id} omitted one semantic #{kind} event")
+      assert(matches.first.dig("payload", "node_id").is_a?(String), "TUI #{case_id} omitted opaque node identity")
+      [kind, matches.first]
+    end
+    node_ids = correlated.values.map { |record| record.dig("payload", "node_id") }
+    assert(node_ids.uniq.length == 1, "TUI #{case_id} did not preserve opaque Spawn node identity")
+    assert(correlated.fetch("action_result").dig("payload", "state") == "accepted", "TUI #{case_id} Spawn opener was not accepted")
+  end
+  summary = records.find { |record| record["kind"] == "request_summary" }.fetch("payload")
+  assert(summary["surface_render_count"] == 2, "TUI did not preserve its two sanctioned surface renders")
+  assert(summary["list_sessions_count"] == 0, "TUI issued list_sessions")
+  records
+end
+
+def session_ids(daemon)
+  daemon.request(type: "list_sessions").fetch("sessions").map { |row| row["session_uuid"] || row["session_id"] }.compact.sort
+end
+
+def workspace_rows(daemon)
+  daemon.call_tool("botster_workspaces.list", {}).fetch("workspaces")
+end
+
+def assert_single_owner!(daemon)
+  counts = Hash.new(0)
+  workspace_rows(daemon).each do |workspace|
+    Array(workspace["session_refs"]).each { |session_id| counts[session_id] += 1 }
+  end
+  assert(counts.values.all? { |count| count == 1 }, "a session belongs to more than one workspace")
+  counts
+end
+
+def package_proof!(daemon)
+  required = %w[
+    botster-web
+    botster-tui
+    botster-workspaces
+    botster-workspaces-shared-stack-owner-template
+  ]
+  rows = daemon.request(type: "list_packages").fetch("packages")
+  required.to_h do |package_name|
+    matches = rows.select { |row| row["package_name"] == package_name }
+    assert(matches.length == 1, "expected exactly one installed #{package_name} package")
+    row = matches.first
+    assert(row["state"] == "enabled", "#{package_name} is not enabled")
+    [package_name, row.slice("package_name", "version", "state", "source", "runnable_entrypoints")]
+  end
+end
+
+def collision_proof!(daemon, data_dir, repository, workspace_id)
+  branch_in_use = "collision-branch-in-use"
+  path_collision = "collision-path"
+  run!("git", "-C", repository, "branch", branch_in_use)
+  foreign_worktree = File.join(File.dirname(repository), "foreign-worktree")
+  run!("git", "-C", repository, "worktree", "add", foreign_worktree, branch_in_use)
+  collision_path = managed_path(data_dir, path_collision)
+  FileUtils.mkdir_p(collision_path)
+  sentinel = File.join(collision_path, "foreign-resource")
+  File.write(sentinel, "preserve\n")
+
+  before_refs = daemon.call_tool("botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs")
+  before_sessions = session_ids(daemon)
+  before_git = git_snapshot(repository)
+  results = {
+    "branch_in_use" => daemon.call_tool("botster_workspaces.spawn", {
+      workspace_id: workspace_id, target_id: TARGET_ID, branch: branch_in_use, template_id: TEMPLATE_ID,
+    }),
+    "path_collision" => daemon.call_tool("botster_workspaces.spawn", {
+      workspace_id: workspace_id, target_id: TARGET_ID, branch: path_collision, template_id: TEMPLATE_ID,
+    }),
+  }
+  results.each do |expected, result|
+    assert(result["ok"] == false, "#{expected} collision unexpectedly spawned")
+    assert(result.dig("error", "code") == expected, "#{expected} collision returned #{result.dig('error', 'code')}")
+  end
+  assert(daemon.call_tool("botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == before_refs, "collision changed workspace membership")
+  assert(session_ids(daemon) == before_sessions, "collision changed Hub sessions")
+  assert(git_snapshot(repository) == before_git, "collision changed branches or worktrees")
+  assert(Dir.exist?(foreign_worktree) && File.read(sentinel) == "preserve\n", "collision deleted a foreign resource")
+  results.transform_values { |result| result.fetch("error") }
+end
+
+def deletion_proof!(daemon, repository, workspace_ids)
+  before = {
+    "sessions" => session_ids(daemon),
+    "worktrees" => daemon.request(type: "list_worktrees").fetch("worktrees"),
+    "git" => git_snapshot(repository),
+    "target" => daemon.request(type: "list_spawn_targets").fetch("spawn_targets").find { |row| row["target_id"] == TARGET_ID },
+  }
+  workspace_ids.each do |workspace_id|
+    deleted = daemon.call_tool("botster_workspaces.delete", { id: workspace_id })
+    assert(deleted["ok"] == true, "workspace delete failed for #{workspace_id}")
+    missing = daemon.call_tool("botster_workspaces.show", { id: workspace_id })
+    assert(missing.dig("error", "code") == "workspace_not_found", "workspace grouping survived deletion")
+  end
+  after = {
+    "sessions" => session_ids(daemon),
+    "worktrees" => daemon.request(type: "list_worktrees").fetch("worktrees"),
+    "git" => git_snapshot(repository),
+    "target" => daemon.request(type: "list_spawn_targets").fetch("spawn_targets").find { |row| row["target_id"] == TARGET_ID },
+  }
+  assert(before == after, "workspace deletion mutated Hub sessions, worktrees, branches, source, or base_ref")
+  assert(workspace_rows(daemon).empty?, "workspace grouping records remain after deletion")
+  { "before" => before, "after" => after }
+end
+
+manifest_path, evidence_argument = ARGV
+unless ARGV.length == 2
+  warn "usage: script/shared_stack_acceptance MANIFEST EVIDENCE_DIR"
+  exit 1
+end
+manifest_path = File.realpath(manifest_path)
+evidence_dir = required_absolute_new_directory(evidence_argument)
+artifacts = validated_artifacts(manifest_path)
+contract_provenance = verify_contract_provenance!(artifacts)
+web_path = artifacts.fetch("web_driver_source").fetch("path")
+tui_path = artifacts.fetch("tui_driver_source").fetch("path")
+workspaces_path = artifacts.fetch("workspaces_package").fetch("path")
+hub_binary = artifacts.fetch("hub_binary").fetch("path")
+worker_binary = artifacts.fetch("session_worker_binary").fetch("path")
+web_digest_before = directory_digest(File.join(web_path, "dist"))
+binary_digests_before = %w[hub_binary session_worker_binary tui_binary].to_h do |name|
+  [name, Digest::SHA256.file(artifacts.fetch(name).fetch("path")).hexdigest]
+end
+
+summary = nil
+failure = nil
+temporary_root = Dir.exist?("/private/tmp") ? "/private/tmp" : Dir.tmpdir
+Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
+  data_dir = File.join(fixture_root, "hub")
+  repository = File.join(fixture_root, "repository")
+  socket_path = File.join(data_dir, "botster-hub.sock")
+  FileUtils.mkdir_p(File.join(repository, ".botster"))
+  FileUtils.mkdir_p(File.join(repository, "bin"))
+  File.write(File.join(repository, "bin", "shared-stack-session.sh"), "#!/bin/sh\nprintf 'shared-stack:%s\\n' \"$BOTSTER_SESSION_ID\"\nsleep 2\n")
+  File.chmod(0o755, File.join(repository, "bin", "shared-stack-session.sh"))
+  File.write(File.join(repository, ".botster", "session-templates.json"), JSON.pretty_generate({
+    session_templates: [{ id: TEMPLATE_ID, label: "Shared stack", command: "bin/shared-stack-session.sh" }],
+  }))
+  File.write(File.join(repository, "README.md"), "shared stack fixture\n")
+  run!("git", "init", "--initial-branch", "main", repository)
+  run!("git", "-C", repository, "config", "user.name", "Shared Stack Acceptance")
+  run!("git", "-C", repository, "config", "user.email", "shared-stack.invalid")
+  run!("git", "-C", repository, "add", ".")
+  run!("git", "-C", repository, "commit", "-m", "Seed shared stack fixture")
+  %w[tui-existing-branch web-reused-existing].each { |branch| run!("git", "-C", repository, "branch", branch) }
+  FileUtils.mkdir_p(data_dir)
+
+  hub_log = File.open(File.join(evidence_dir, "hub.log"), "w")
+  hub_pid = Process.spawn(
+    hub_binary, "start", "--data-dir", data_dir, "--session-worker-bin", worker_binary,
+    out: hub_log, err: hub_log
+  )
+  hub_status = nil
+  begin
+    wait_for_socket(socket_path, hub_pid)
+    daemon = Daemon.new(socket_path)
+    run!(hub_binary, "spawn-targets", "create", "--data-dir", data_dir, "--root", repository,
+      "--id", TARGET_ID, "--label", "Workspaces shared stack", "--kind", "git", "--base-ref", "main")
+    [web_path, tui_path, workspaces_path, File.join(ROOT, "test", "fixtures", "shared-stack-owner-template")].each do |package_path|
+      run!(hub_binary, "packages", "install", "--data-dir", data_dir, "--path", package_path)
+    end
+    %w[botster-web botster-tui botster-workspaces botster-workspaces-shared-stack-owner-template].each do |package_name|
+      run!(hub_binary, "packages", "enable", "--data-dir", data_dir, package_name)
+    end
+    packages = package_proof!(daemon)
+    target = daemon.request(type: "list_spawn_targets").fetch("spawn_targets").find { |row| row["target_id"] == TARGET_ID }
+    assert(target && target["base_ref"] == "main", "shared Git target omitted explicit base_ref=main")
+    run!(hub_binary, "packages", "start-entrypoint", "--data-dir", data_dir, "botster-web", "web-client")
+
+    cold_assignment = web_assignment(
+      generation: "web-cold", entry_state: "cold", workspace_name: "Shared client workspace",
+      cases: [web_case("web-cold-missing", "shared-web-cold", created_branch: true, created_worktree: true, reused_worktree: false)]
+    )
+    web_cold_output = run_process!(
+      ["npm", "run", "drive:workspaces-shared-hub-browser"], chdir: web_path,
+      env: { "BOTSTER_LIVE_DATA_DIR" => data_dir, "BOTSTER_WORKSPACES_SPAWN_CASES" => JSON.generate(cold_assignment) },
+      output_path: File.join(evidence_dir, "web-cold.log")
+    )
+    web_cold = parse_web_summary(web_cold_output)
+    assert_web_summary!(web_cold)
+    shared_workspace = web_cold.fetch("workspace")
+    existing_path = web_cold.dig("cases", 0, "hub_result", "worktree_path")
+
+    tui_scenario = {
+      schema: SCHEMA,
+      workspace_id: shared_workspace.fetch("workspace_id"),
+      cases: [
+        ["existing-worktree", "shared-web-cold", "existing_worktree", existing_path],
+        ["existing-branch", "tui-existing-branch", "existing_branch", managed_path(data_dir, "tui-existing-branch")],
+        ["missing-branch", "tui-missing", "missing_branch", managed_path(data_dir, "tui-missing")],
+      ].map do |case_id, branch, resolution, path|
+        { case_id: case_id, target_id: TARGET_ID, branch: branch, resolution: resolution,
+          expected: { target_id: TARGET_ID, branch: branch, worktree_path: path } }
+      end,
+    }
+    tui_scenario_path = File.join(evidence_dir, "tui-scenario.json")
+    tui_evidence_path = File.join(evidence_dir, "tui-evidence.jsonl")
+    File.write(tui_scenario_path, JSON.pretty_generate(tui_scenario))
+    run_process!(
+      [hub_binary, "apps", "open", "--data-dir", data_dir, "botster-tui"], chdir: tui_path,
+      env: { "BOTSTER_TUI_ACCEPTANCE_SCENARIO" => tui_scenario_path, "BOTSTER_TUI_ACCEPTANCE_EVIDENCE" => tui_evidence_path },
+      output_path: File.join(evidence_dir, "tui.log")
+    )
+    tui_records = parse_tui_evidence(tui_evidence_path)
+    tui_session = tui_records.find { |record| record["kind"] == "case_complete" }.dig("payload", "session_id")
+
+    reused_assignment = web_assignment(
+      generation: "web-reused", entry_state: "reused", workspace_name: "Shared client follow-up",
+      observe: {
+        workspace_id: shared_workspace.fetch("workspace_id"), workspace_name: shared_workspace.fetch("workspace_name"),
+        session_id: tui_session, lifecycle: "ended",
+      },
+      cases: [
+        web_case("web-existing-worktree", "shared-web-cold", created_branch: false, created_worktree: false, reused_worktree: true),
+        web_case("web-existing-branch", "web-reused-existing", created_branch: false, created_worktree: true, reused_worktree: false),
+        web_case("web-missing-branch", "web-reused-missing", created_branch: true, created_worktree: true, reused_worktree: false),
+      ]
+    )
+    web_reused_output = run_process!(
+      ["npm", "run", "drive:workspaces-shared-hub-browser"], chdir: web_path,
+      env: { "BOTSTER_LIVE_DATA_DIR" => data_dir, "BOTSTER_WORKSPACES_SPAWN_CASES" => JSON.generate(reused_assignment) },
+      output_path: File.join(evidence_dir, "web-reused.log")
+    )
+    web_reused = parse_web_summary(web_reused_output)
+    assert_web_summary!(web_reused)
+    assert(web_reused.dig("observed_prior", "workspace_id") == shared_workspace.fetch("workspace_id"), "Web did not reopen the TUI workspace")
+    assert(web_reused.dig("observed_prior", "session_id") == tui_session, "Web did not observe the TUI-created session")
+
+    ownership = assert_single_owner!(daemon)
+    collisions = collision_proof!(daemon, data_dir, repository, shared_workspace.fetch("workspace_id"))
+    run_process!(
+      [File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Shared stack owner boundary"], chdir: ROOT,
+      env: { "BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE" => OWNER_TEMPLATE_ID },
+      output_path: File.join(evidence_dir, "owner-boundary.log")
+    )
+    deletion = deletion_proof!(daemon, repository, [
+      shared_workspace.fetch("workspace_id"), web_reused.dig("workspace", "workspace_id"),
+    ])
+
+    binary_digests_after = binary_digests_before.keys.to_h do |name|
+      [name, Digest::SHA256.file(artifacts.fetch(name).fetch("path")).hexdigest]
+    end
+    assert(binary_digests_after == binary_digests_before, "a supplied runtime binary changed during acceptance")
+    assert(directory_digest(File.join(web_path, "dist")) == web_digest_before, "Web dist changed during acceptance")
+    summary = {
+      "schema_version" => 1,
+      "status" => "passed",
+      "shared_data_directory" => true,
+      "one_hub_process" => true,
+      "artifacts" => artifacts.transform_values { |artifact| artifact.reject { |key, _| %w[path source_checkout].include?(key) } },
+      "binary_sha256" => binary_digests_before,
+      "web_dist_sha256" => web_digest_before,
+      "contract_provenance" => contract_provenance,
+      "packages" => packages,
+      "spawn_target" => target,
+      "web" => { "cold" => web_cold, "reused" => web_reused },
+      "tui" => { "record_count" => tui_records.length, "session_ids" => tui_records.select { |record| record["kind"] == "case_complete" }.map { |record| record.dig("payload", "session_id") } },
+      "single_workspace_owner_counts" => ownership,
+      "collision_errors" => collisions,
+      "deletion_preserved_resources" => deletion["before"] == deletion["after"],
+      "completed" => true,
+    }
+    File.write(File.join(evidence_dir, "summary.json"), JSON.pretty_generate(summary))
+  rescue StandardError => error
+    failure = error
+    File.write(File.join(evidence_dir, "failure.json"), JSON.pretty_generate({
+      "status" => "failed", "error_class" => error.class.name, "message" => error.message,
+    }))
+  ensure
+    shutdown_ok = system(hub_binary, "shutdown", "--data-dir", data_dir, out: File::NULL, err: File::NULL)
+    reaped = Process.waitpid(hub_pid, Process::WNOHANG)
+    process_status = $?.dup if reaped
+    unless reaped
+      begin
+        Timeout.timeout(10) do
+          Process.waitpid(hub_pid)
+          process_status = $?.dup
+        end
+      rescue Timeout::Error
+        Process.kill("TERM", hub_pid) rescue nil
+        begin
+          Process.waitpid(hub_pid)
+          process_status = $?.dup
+        rescue Errno::ECHILD
+          nil
+        end
+      end
+    end
+    hub_status = process_status
+    hub_log.close
+    failure ||= RuntimeError.new("shared Hub cleanup failed") unless shutdown_ok && hub_status&.success?
+  end
+end
+
+raise failure if failure
+
+puts "script/shared_stack_acceptance: ok evidence=#{evidence_dir}"

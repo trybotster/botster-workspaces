@@ -220,6 +220,15 @@ authoritative consumer targets:
   `list_sessions`, polling, list refresh, or synchronization surface rerender,
   and must not own the daemon or package installation.
 
+Both driver dependencies and the semantic-action adoption follow-ups are now
+merged. The parent consumes Web merge
+`99fff571b022e5e06535759c6ffe61926600d07a`, TUI merge
+`4faa221da665e001a8802c4ecad50ea1f1077812`, and Workspaces producer merge
+`737ec8133c5f985f4c2bd5a369365049558afa56` through the documented
+`drive:workspaces-shared-hub-browser`,
+`botster.tui.workspaces-spawn-driver/v1`, and
+`botster_workspaces.open_spawn` contracts.
+
 If the shared run exposes a Hub managed-Git, package-supervision, client
 protocol, Core boundary, or published-artifact defect, create a focused ticket
 against that repository target and add it as a dependency. Do not patch it in
@@ -272,7 +281,7 @@ this run; implementation must not edit Project Pipelines package paths here.
    provenance/input skeleton from `question_1785604382_430643`, with positive
    validation and deterministic rejection of false hashes, dirty/mismatched
    revisions, and inferred relative paths. Do not define driver invocation.
-1. Wait for both registered consumer dependencies to merge. Refresh Web, TUI,
+1. Both registered consumer dependencies have merged. Refresh Web, TUI,
    Hub, Core, and Workspaces main references and record exact immutable commits,
    lockfiles, published package coordinates, and package hashes. Reject dirty
    checkouts and inferred sibling paths.
@@ -301,14 +310,14 @@ this run; implementation must not edit Project Pipelines package paths here.
    deterministic keyboard driver against the same state. Require the
    workspace/session created by Web to materialize first. Use keyboard focus and
    action dispatch to spawn branch A again (existing exact worktree) and branch
-   B (existing branch/new managed worktree). Require distinct returned sessions,
+   B (existing branch/new managed worktree), and missing branch C. Require distinct returned sessions,
    exact action identity from the realized hit map, single-owner membership,
    and a surface-request baseline.
-7. Use the assigned real client controls to request branches C and the managed
-   path collision. Assert typed rejection, retained form/error state where the
-   client contract requires it, unchanged membership, no session upsert for the
-   rejected requests, and byte-for-byte-equivalent Git refs/worktree ownership
-   snapshots for the foreign resources.
+7. Use Workspaces' public plugin tool as an independent negative oracle for a
+   branch checked out in a foreign worktree and a foreign deterministic managed
+   path. Assert typed rejection, unchanged membership and Hub sessions, and
+   byte-for-byte-equivalent Git refs/worktree ownership snapshots. This does not
+   substitute for the positive browser/TUI user paths.
 8. With clients running sequentially/reconnected only at the client boundary,
    assert all three successful sessions appear in the same workspace. Stop them
    through the sanctioned Hub lifecycle path and consume ordered
@@ -317,8 +326,10 @@ this run; implementation must not edit Project Pipelines package paths here.
    history materialization from entity frames. Reopen/reconnect only when the
    consumer contract requires a new baseline and use authored node identity,
    not copy.
-9. Delete the workspace through a real client action. Assert the grouping is
-   absent while session history/entities, all successful worktrees, created and
+9. Exercise removed/absent lifecycle history and grouping-only delete through
+   the existing real-Hub owner smoke on the same daemon, then delete both
+   client-created groupings through the public Workspaces capability. Assert the
+   groupings are absent while session history/entities, all successful worktrees, created and
    pre-existing branches, the foreign collision resources, repository commits,
    and source repository remain intact. The parent stops the one Hub only after
    all state, cross-client, provenance, and cleanup assertions are collected;
@@ -331,7 +342,7 @@ this run; implementation must not edit Project Pipelines package paths here.
     Hub paths so skips cannot count as evidence.
 11. Run the repository gates, deliberate negative oracle checks, `git diff
     --check`, PII/secret scans, and the complete shared-stack profile from a
-    second fresh directory for repeatability. Attach the implementation report
+    fresh directory. Attach the implementation report
     and route any cross-owner failure as a dependency instead of weakening an
     assertion.
 
@@ -405,14 +416,17 @@ therefore cannot satisfy the final gate after `question_1785602772_466681`.
 - Assumption: a local pre-created branch without a worktree exercises the
   existing-branch path, while a branch checked out elsewhere and a foreign
   deterministic path exercise the two collision classes already owned by Hub.
-- Unknown until dependency implementation: the exact CLI/profile names and
-  structured result format exposed by Web and TUI. Implement must update this
-  plan and report to the merged repository-documented commands; it must not
-  invent aliases or private entrypoints.
-- Unknown until immutable artifact assembly: the exact current Hub/Core commit,
-  Web npm support/UI-contract coordinates, and TUI/TUI-kit Hub Git revision.
-  Record and verify them at execution time; a closed source ticket alone is not
-  consumable-artifact proof.
+- Resolved: Web exposes `npm run drive:workspaces-shared-hub-browser` and one
+  `workspaces-shared-hub-browser-summary` record; TUI exposes the v1 assigned
+  scenario and JSONL evidence paths through its installed `apps open` runtime.
+- Resolved artifact graph: Core is
+  `5846fc776d31e2b6c98a8d932f50a31078743901`; Web is
+  `99fff571b022e5e06535759c6ffe61926600d07a`; TUI is
+  `4faa221da665e001a8802c4ecad50ea1f1077812`; TUI-kit is
+  `3bf8ae81d3e716b196fae8e4a7560dd5fc5c2e69`; and both Rust client graphs
+  pin Hub UI contract revision `fab44c5de7b28a8756268608662d2b870efb001a`.
+  Web resolves the Hub-produced registry package
+  `@trybotster/ui-contract@0.2.0` with exact installed bytes.
 - Fixed ownership decision: the Workspaces parent owns the only Hub process,
   starts it once, launches client entrypoints sequentially through Hub package
   commands, and stops it after final evidence. Any client process lifecycle

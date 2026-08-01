@@ -24,6 +24,7 @@ capabilities_doc = read("docs/capabilities.md")
 gitignore = read(".gitignore")
 hub_flow = read("script/test-hub-flow")
 shared_stack_validator = read("script/validate_shared_stack_inputs")
+shared_stack_acceptance = read("script/shared_stack_acceptance")
 
 assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
 assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
@@ -32,8 +33,20 @@ assert(manifest["capabilities"] == contract.fetch("manifest_capabilities"), "man
 assert(!manifest.key?("configuration"), "manifest must not retain workspace settings")
 
 assert(hub_flow.include?("shared-stack validate-inputs"), "Hub flow must expose the shared-stack input profile")
-%w[hub_binary session_worker_binary web_driver_source tui_driver_source].each do |token|
+assert(hub_flow.include?("shared-stack run"), "Hub flow must expose the final shared-stack acceptance profile")
+%w[hub_binary session_worker_binary tui_binary web_driver_source tui_driver_source tui_kit_source].each do |token|
   assert(shared_stack_validator.include?(token), "shared-stack validator must require #{token}")
+end
+%w[
+  drive:workspaces-shared-hub-browser
+  BOTSTER_TUI_ACCEPTANCE_SCENARIO
+  botster_workspaces.open_spawn
+  branch_in_use
+  path_collision
+  list_sessions
+  base_ref
+].each do |token|
+  assert(shared_stack_acceptance.include?(token), "shared-stack acceptance must prove #{token}")
 end
 
 surfaces = manifest.fetch("surfaces")
@@ -225,8 +238,12 @@ scanned_files = %w[
   docs/workspace-domain.md
   docs/capabilities.md
   script/hub_acceptance_smoke
+  script/shared_stack_acceptance
   script/validate_shared_stack_inputs
   script/validate_ui_node_contract
+  test/fixtures/shared-stack-owner-template/botster-package.json
+  test/fixtures/shared-stack-owner-template/plugin.lua
+  test/fixtures/shared-stack-owner-template/bin/session.sh
   test/fixtures/workspaces/contract.json
   test/plugin_runtime_test.lua
 ]
@@ -252,9 +269,11 @@ Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
 
   hub_binary = File.join(source_checkout, "botster-hub")
   worker_binary = File.join(source_checkout, "botster-session-worker")
+  tui_binary = File.join(source_checkout, "botster-tui")
   File.write(hub_binary, "#!/bin/sh\nexit 0\n")
   File.write(worker_binary, "#!/bin/sh\nexit 0\n")
-  File.chmod(0o755, hub_binary, worker_binary)
+  File.write(tui_binary, "#!/bin/sh\nexit 0\n")
+  File.chmod(0o755, hub_binary, worker_binary, tui_binary)
   assert(system("git", "-C", source_checkout, "add", "."), "shared-stack fixture Git add failed")
   assert(system("git", "-C", source_checkout, "commit", "--quiet", "-m", "Fixture"), "shared-stack fixture Git commit failed")
   revision = IO.popen(["git", "-C", source_checkout, "rev-parse", "HEAD"], &:read).strip
@@ -274,8 +293,15 @@ Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
       "sha256" => Digest::SHA256.file(worker_binary).hexdigest,
       "source_checkout" => source_checkout,
     },
+    "tui_binary" => {
+      "kind" => "executable",
+      "path" => tui_binary,
+      "revision" => revision,
+      "sha256" => Digest::SHA256.file(tui_binary).hexdigest,
+      "source_checkout" => source_checkout,
+    },
   }
-  %w[core_source web_package tui_package workspaces_package ui_contract_source web_driver_source tui_driver_source].each do |name|
+  %w[core_source web_package tui_package tui_kit_source workspaces_package ui_contract_source web_driver_source tui_driver_source].each do |name|
     artifacts[name] = { "kind" => "git_checkout", "path" => source_checkout, "revision" => revision }
   end
 

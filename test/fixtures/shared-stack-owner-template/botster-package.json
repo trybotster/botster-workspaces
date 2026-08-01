@@ -1,0 +1,19 @@
+{
+  "name": "botster-workspaces-shared-stack-owner-template",
+  "version": "0.0.0",
+  "kind": "plugin",
+  "botster": ">=0.1.0",
+  "source": { "type": "path", "path": "." },
+  "capabilities": [],
+  "entrypoints": [
+    { "runtime": "lua", "path": "plugin.lua", "bootstrap": false }
+  ],
+  "session_templates": [
+    {
+      "id": "owner-acceptance",
+      "target_id": "workspaces-shared-stack",
+      "command": "bin/session.sh",
+      "context": ["workspace_id", "prompt", "ticket_id", "branch_name"]
+    }
+  ]
+}

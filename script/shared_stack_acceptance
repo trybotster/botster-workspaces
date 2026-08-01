@@ -17,6 +17,15 @@ TEMPLATE_ID = "shared-stack"
 OWNER_TEMPLATE_ID = "owner-acceptance"
 SCHEMA = "botster.tui.workspaces-spawn-driver/v1"
 
+class HubExited < RuntimeError
+  attr_reader :status
+
+  def initialize(status)
+    @status = status
+    super("shared Hub exited before socket readiness: #{status}")
+  end
+end
+
 def assert(condition, message)
   raise message unless condition
 end
@@ -52,7 +61,7 @@ end
 def wait_for_socket(path, pid)
   Timeout.timeout(20) do
     loop do
-      raise "shared Hub exited before socket readiness" if Process.waitpid(pid, Process::WNOHANG)
+      raise HubExited, $? if Process.waitpid(pid, Process::WNOHANG)
       begin
         socket = UNIXSocket.new(path)
         socket.close
@@ -516,24 +525,33 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     File.write(File.join(evidence_dir, "summary.json"), JSON.pretty_generate(summary))
   rescue StandardError => error
     failure = error
+    hub_status = error.status if error.is_a?(HubExited)
     File.write(File.join(evidence_dir, "failure.json"), JSON.pretty_generate({
       "status" => "failed", "error_class" => error.class.name, "message" => error.message,
     }))
   ensure
     shutdown_ok = system(hub_binary, "shutdown", "--data-dir", data_dir, out: File::NULL, err: File::NULL)
-    reaped = Process.waitpid(hub_pid, Process::WNOHANG)
-    process_status = $?.dup if reaped
+    process_status = hub_status
+    reaped = !process_status.nil?
+    unless reaped
+      begin
+        reaped = Process.waitpid(hub_pid, Process::WNOHANG)
+        process_status = $? if reaped
+      rescue Errno::ECHILD
+        reaped = true
+      end
+    end
     unless reaped
       begin
         Timeout.timeout(10) do
           Process.waitpid(hub_pid)
-          process_status = $?.dup
+          process_status = $?
         end
       rescue Timeout::Error
         Process.kill("TERM", hub_pid) rescue nil
         begin
           Process.waitpid(hub_pid)
-          process_status = $?.dup
+          process_status = $?
         rescue Errno::ECHILD
           nil
         end

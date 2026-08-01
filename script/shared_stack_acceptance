@@ -432,6 +432,8 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
       env: { "BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE" => OWNER_TEMPLATE_ID },
       output_path: File.join(evidence_dir, "owner-boundary.log")
     )
+    run!(hub_binary, "packages", "disable", "--data-dir", data_dir, "botster-workspaces-shared-stack-owner-template")
+    run!(hub_binary, "packages", "reload", "--data-dir", data_dir, "botster-workspaces")
     run!(hub_binary, "packages", "start-entrypoint", "--data-dir", data_dir, "botster-web", "web-client")
 
     cold_assignment = web_assignment(

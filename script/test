@@ -56,7 +56,9 @@ required_plugin_tokens = %w[
   botster_workspaces.spawn
   botster_workspaces.entity_snapshot
   botster_workspaces.open
+  botster_workspaces.open_spawn
   botster_workspaces.select_spawn_target
+  open_spawn_presentation_action
   ensure_worktree_and_spawn
   session_templates
   spawn_targets
@@ -124,6 +126,13 @@ assert(surface_contract["initial_form_count"] == 0, "initial surface must contai
 assert(
   surface_contract["detail_actions"].sort == %w[add_session delete move_session remove_session rename spawn],
   "fixture must define all non-lifecycle detail actions"
+)
+assert(
+  surface_contract.fetch("spawn_opener") == {
+    "action_id" => "botster_workspaces.open_spawn",
+    "handler_id" => "open_spawn_presentation_action",
+  },
+  "fixture must define the semantic Spawn opener and registered handler"
 )
 lifecycle_contract = surface_contract.fetch("lifecycle_grouping")
 assert(lifecycle_contract["source"] == "/session", "fixture must use the canonical session entity family")
@@ -231,5 +240,15 @@ assert(
   !system({ "BOTSTER_WORKSPACES_INJECT_FAILURE" => "1" }, lua, test_path, chdir: ROOT, out: File::NULL, err: File::NULL),
   "Lua shell gate did not observe the deliberate failing assertion"
 )
+{
+  "BOTSTER_WORKSPACES_TEST_REVERT_SPAWN_ACTION" => "reverted generic Spawn action",
+  "BOTSTER_WORKSPACES_TEST_HARDCODE_SPAWN_ACTION" => "hardcoded Spawn dispatch",
+  "BOTSTER_WORKSPACES_TEST_OMIT_SPAWN_HANDLER" => "missing Spawn handler",
+}.each do |environment, label|
+  assert(
+    !system({ environment => "1" }, lua, test_path, chdir: ROOT, out: File::NULL, err: File::NULL),
+    "Lua shell gate did not reject #{label}"
+  )
+end
 
 puts "script/test: ok"

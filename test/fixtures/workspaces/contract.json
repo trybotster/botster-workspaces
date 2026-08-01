@@ -95,6 +95,10 @@
       "move_session",
       "remove_session"
     ],
+    "spawn_opener": {
+      "action_id": "botster_workspaces.open_spawn",
+      "handler_id": "open_spawn_presentation_action"
+    },
     "lifecycle_grouping": {
       "source": "/session",
       "identity_field": "session_uuid",

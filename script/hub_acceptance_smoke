@@ -83,6 +83,12 @@ def find_node(node, id)
   nil
 end
 
+def find_nodes_by_action_id(node, action_id, result = [])
+  result << node if node.dig("props", "action", "id") == action_id
+  children(node).each { |child| find_nodes_by_action_id(child, action_id, result) }
+  result
+end
+
 def collect_types(node, result = Hash.new(0))
   result[node["type"]] += 1 if node["type"]
   children(node).each { |child| collect_types(child, result) }
@@ -466,9 +472,13 @@ end
 target = targets.find { |candidate| candidate["enabled"] && candidate["kind"] == "git" }
 assert(target, "acceptance Hub needs one enabled Git spawn target")
 
-spawn_button = find_node(populated_surface, "botster-workspaces-spawn-#{workspace_id}")
-assert(spawn_button, "selected workspace is missing the rendered Spawn action")
+spawn_buttons = find_nodes_by_action_id(populated_surface, "botster_workspaces.open_spawn")
+assert(spawn_buttons.length == 1, "selected workspace must expose exactly one semantic Spawn opener")
+spawn_button = spawn_buttons.fetch(0)
 spawn_action = spawn_button.dig("props", "action")
+assert(spawn_button.dig("props", "label") == "Spawn", "semantic Spawn opener changed visible copy")
+assert(spawn_button.fetch("id") == "botster-workspaces-spawn-#{workspace_id}", "semantic Spawn opener changed authored node id")
+assert(spawn_action.fetch("id") != "botster_workspaces.open", "semantic Spawn opener retained generic action identity")
 opened_spawn = action(
   socket,
   id: spawn_action.fetch("id"),
@@ -477,6 +487,8 @@ opened_spawn = action(
   payload: spawn_action["payload"]
 )
 assert(opened_spawn["state"] == "accepted", "Spawn action did not open target selection")
+assert(opened_spawn["action_id"] == spawn_action.fetch("id"), "Spawn result did not echo read-back action identity")
+assert(opened_spawn["node_id"] == spawn_button.fetch("id"), "Spawn result did not echo read-back node identity")
 target_form = find_node(render_surface(socket), "botster-workspaces-spawn-target-form-#{workspace_id}")
 assert(target_form, "Spawn action did not render target-first selection")
 selected_target = action(
@@ -664,5 +676,7 @@ assert(
 puts(
   "script/hub_acceptance_smoke: ok " \
   "workspace_id=#{workspace_id} target_id=#{target["target_id"]} " \
-  "template_id=#{template_id} session_id=#{session_id}"
+  "template_id=#{template_id} session_id=#{session_id} " \
+  "spawn_node_id=#{spawn_button.fetch("id")} spawn_action_id=#{spawn_action.fetch("id")} " \
+  "spawn_payload=#{JSON.generate(spawn_action["payload"])}"
 )

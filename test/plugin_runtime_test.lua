@@ -223,6 +223,15 @@ local function collect_type(node, kind, result)
   end
 end
 
+local function collect_action_nodes(node, action_id, result)
+  if node.props and node.props.action and node.props.action.id == action_id then
+    result[#result + 1] = node
+  end
+  for _, child in ipairs(children_of(node)) do
+    collect_action_nodes(child, action_id, result)
+  end
+end
+
 local function presentation_matches(predicate, state)
   if predicate.kind == "equals" then
     return state[predicate.key] == predicate.value
@@ -743,8 +752,40 @@ assert_eq(move_destination.props.value, second.workspace.id, "move option uses d
 assert_eq(move_destination.props.label, "Review queue", "move option has required destination label")
 presentation_state["workspace-dialog"] = nil
 
-local spawn_button = find_node(surface, "botster-workspaces-spawn-" .. renamed.workspace.id)
-local open_spawn = open(action_arguments(spawn_button.props.action, "request-open-spawn"))
+local spawn_buttons = {}
+collect_action_nodes(rerendered, "botster_workspaces.open_spawn", spawn_buttons)
+assert_eq(#spawn_buttons, 1, "selected detail exposes exactly one semantic Spawn opener")
+local spawn_button = spawn_buttons[1]
+if os.getenv("BOTSTER_WORKSPACES_TEST_REVERT_SPAWN_ACTION") == "1" then
+  spawn_button.props.action.id = "botster_workspaces.open"
+end
+assert_eq(spawn_button.id, "botster-workspaces-spawn-" .. renamed.workspace.id, "Spawn keeps its authored node id")
+assert_eq(spawn_button.props.label, "Spawn", "Spawn keeps visible product copy")
+assert_eq(spawn_button.props.action.id, "botster_workspaces.open_spawn", "Spawn exposes semantic action identity")
+assert_true(spawn_button.props.action.id ~= "botster_workspaces.open", "Spawn no longer advertises the generic opener")
+assert_eq(spawn_button.props.action.payload.selected_workspace, renamed.workspace.id, "Spawn payload keeps workspace identity")
+assert_eq(
+  spawn_button.props.action.payload.dialog,
+  "spawn-target:" .. renamed.workspace.id,
+  "Spawn payload keeps target-first presentation"
+)
+if os.getenv("BOTSTER_WORKSPACES_TEST_OMIT_SPAWN_HANDLER") == "1" then
+  for index, candidate in ipairs(spec.handlers) do
+    if candidate.id == "open_spawn_presentation_action" then
+      table.remove(spec.handlers, index)
+      break
+    end
+  end
+end
+local open_spawn_handler = handler(spec, "open_spawn_presentation_action")
+local open_spawn_arguments = action_arguments(spawn_button.props.action, "request-open-spawn")
+open_spawn_arguments.node_id = spawn_button.id
+if os.getenv("BOTSTER_WORKSPACES_TEST_HARDCODE_SPAWN_ACTION") == "1" then
+  open_spawn_arguments.action_id = "botster_workspaces.open"
+end
+local open_spawn = open_spawn_handler(open_spawn_arguments)
+assert_eq(open_spawn.action_id, spawn_button.props.action.id, "Spawn result echoes the read-back action id")
+assert_eq(open_spawn.node_id, spawn_button.id, "Spawn result echoes the read-back node id")
 apply_presentation(presentation_state, open_spawn)
 local target_dialog = materialize(surface, presentation_state)
 local target_form = find_node(target_dialog, "botster-workspaces-spawn-target-form-" .. renamed.workspace.id)
@@ -918,6 +959,11 @@ if output_path and output_path ~= "" then
 end
 
 assert_eq(registered_handler(spec, "workspaces_surface").kind, "surface_route", "production surface handler is registered")
+assert_eq(
+  registered_handler(spec, "open_spawn_presentation_action").descriptor_id,
+  "botster_workspaces.open_spawn",
+  "semantic Spawn opener is registered"
+)
 assert_eq(registered_handler(spec, "spawn_session_action").kind, "ui_action", "production spawn action is registered")
 
 if os.getenv("BOTSTER_WORKSPACES_INJECT_FAILURE") == "1" then

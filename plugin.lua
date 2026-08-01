@@ -1385,7 +1385,7 @@ local function workspace_detail(workspace, rows, targets, templates_by_target)
     button_node(
       "botster-workspaces-spawn-" .. workspace.id,
       "Spawn",
-      "botster_workspaces.open",
+      "botster_workspaces.open_spawn",
       { selected_workspace = workspace.id, dialog = "spawn-target:" .. workspace.id }
     ),
     button_node(
@@ -1585,6 +1585,13 @@ return botster.register({
       kind = "ui_action",
       descriptor_id = "botster_workspaces.open",
       descriptor = { action_id = "botster_workspaces.open", surface_id = SURFACE_ID },
+      call = open_presentation,
+    },
+    {
+      id = "open_spawn_presentation_action",
+      kind = "ui_action",
+      descriptor_id = "botster_workspaces.open_spawn",
+      descriptor = { action_id = "botster_workspaces.open_spawn", surface_id = SURFACE_ID },
       call = open_presentation,
     },
     {

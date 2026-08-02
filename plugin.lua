@@ -663,7 +663,7 @@ local function spawn_session(arguments)
   if type(result) ~= "table" or result.ok ~= true or type(result.result) ~= "table" then
     local hub_error = type(result) == "table" and result.error or nil
     return error_result(
-      hub_error and hub_error.code or "hub_spawn_rejected",
+      hub_error and hub_error.kind or "hub_spawn_rejected",
       hub_error and hub_error.message or "Hub rejected the atomic managed-Git spawn"
     )
   end

@@ -7,6 +7,8 @@ local spawn_calls = {}
 local template_list_calls = {}
 local fail_template_list_for = nil
 local spawn_mode = "success"
+local spawn_rejection_kind = "branch_in_use"
+local spawn_rejection_message = "branch is already checked out"
 local next_spawn_uuid = "11111111-1111-4111-8111-111111111111"
 
 local function copy(value)
@@ -80,8 +82,8 @@ botster = {
           return {
             ok = false,
             error = {
-              code = "branch_conflict",
-              message = "branch is already owned",
+              kind = spawn_rejection_kind,
+              message = spawn_rejection_message,
             },
           }
         end
@@ -560,15 +562,45 @@ local caller_id_rejected = spawn({
 assert_eq(caller_id_rejected.error.code, "unknown_field", "spawn rejects caller session id")
 
 spawn_mode = "reject"
-local membership_before_reject = #show({ id = renamed.workspace.id }).workspace.session_refs
-local rejected_spawn = spawn({
+local membership_before_reject = show({ id = renamed.workspace.id }).workspace.session_refs
+for _, collision in ipairs({
+  { kind = "branch_in_use", message = "branch is already checked out", branch = "branch-conflict" },
+  { kind = "path_collision", message = "managed path already exists", branch = "path-conflict" },
+}) do
+  spawn_rejection_kind = collision.kind
+  spawn_rejection_message = collision.message
+  local rejected_spawn = spawn({
+    workspace_id = renamed.workspace.id,
+    target_id = "tgt_git",
+    branch = collision.branch,
+    template_id = "implement",
+  })
+  assert_eq(rejected_spawn.error.code, collision.kind, "typed Hub rejection kind is preserved")
+  assert_eq(rejected_spawn.error.message, collision.message, "typed Hub rejection message is preserved")
+  local membership_after_reject = show({ id = renamed.workspace.id }).workspace.session_refs
+  assert_eq(#membership_after_reject, #membership_before_reject, "Hub rejection preserves membership count")
+  assert_eq(
+    table.concat(membership_after_reject, ","),
+    table.concat(membership_before_reject, ","),
+    "Hub rejection preserves membership content"
+  )
+end
+
+spawn_rejection_kind = nil
+spawn_rejection_message = "untyped rejection"
+local untyped_rejection = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
-  branch = "conflict",
+  branch = "untyped-rejection",
   template_id = "implement",
 })
-assert_eq(rejected_spawn.error.code, "branch_conflict", "typed Hub rejection is preserved")
-assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, membership_before_reject, "Hub rejection records nothing")
+assert_eq(untyped_rejection.error.code, "hub_spawn_rejected", "untyped Hub rejection retains fallback")
+assert_eq(untyped_rejection.error.message, spawn_rejection_message, "untyped Hub rejection retains message")
+assert_eq(
+  table.concat(show({ id = renamed.workspace.id }).workspace.session_refs, ","),
+  table.concat(membership_before_reject, ","),
+  "untyped Hub rejection records nothing"
+)
 
 spawn_mode = "throw"
 local thrown_spawn = spawn({
@@ -578,7 +610,7 @@ local thrown_spawn = spawn({
   template_id = "implement",
 })
 assert_eq(thrown_spawn.error.code, "hub_spawn_failed", "worker error is typed")
-assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, membership_before_reject, "worker error records nothing")
+assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, #membership_before_reject, "worker error records nothing")
 
 spawn_mode = "success"
 next_spawn_uuid = "55555555-5555-4555-8555-555555555555"
@@ -592,7 +624,7 @@ local persist_failed_spawn = spawn({
 assert_eq(persist_failed_spawn.error.code, "persist_failed", "post-spawn persistence failure is explicit")
 assert_eq(persist_failed_spawn.spawned_session_id, next_spawn_uuid, "exception exposes ungrouped spawned session")
 assert_eq(persist_failed_spawn.membership_recorded, false, "exception never claims membership")
-assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, membership_before_reject, "failed persistence does not mutate durable membership")
+assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, #membership_before_reject, "failed persistence does not mutate durable membership")
 
 local entity_rows = snapshot({})
 assert_eq(entity_rows.entity_family, "botster-workspaces.workspace", "entity family is plugin-namespaced")

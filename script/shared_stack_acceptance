@@ -17,6 +17,7 @@ TEMPLATE_ID = "shared-stack"
 OWNER_TEMPLATE_ID = "botster-workspaces-shared-stack-owner-template/owner-acceptance"
 SCHEMA = "botster.tui.workspaces-spawn-driver/v1"
 MAX_UNIX_SOCKET_PATH_BYTES = 103
+TERMINAL_SESSION_LIFECYCLES = %w[exited stale].freeze
 
 class HubExited < RuntimeError
   attr_reader :status
@@ -628,7 +629,7 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     if failure.nil? && daemon
       begin
         pre_shutdown_sessions = daemon.request(type: "list_sessions").fetch("sessions")
-        nonterminal = pre_shutdown_sessions.reject { |row| row["lifecycle"] == "ended" }
+        nonterminal = pre_shutdown_sessions.reject { |row| TERMINAL_SESSION_LIFECYCLES.include?(row["lifecycle"]) }
         assert(nonterminal.empty?, "shared Hub still has nonterminal sessions before shutdown: #{nonterminal.map { |row| row['session_id'] }.join(', ')}")
       rescue StandardError => error
         failure ||= error
@@ -639,7 +640,8 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     shutdown_ok = shutdown_status.success? && post_stop_session_count == 0
     teardown = {
       "pre_shutdown_session_count" => pre_shutdown_sessions&.length,
-      "pre_shutdown_all_terminal" => pre_shutdown_sessions&.all? { |row| row["lifecycle"] == "ended" },
+      "pre_shutdown_lifecycles" => pre_shutdown_sessions&.map { |row| row["lifecycle"] }&.tally,
+      "pre_shutdown_all_terminal" => pre_shutdown_sessions&.all? { |row| TERMINAL_SESSION_LIFECYCLES.include?(row["lifecycle"]) },
       "post_stop_session_count" => post_stop_session_count,
     }
     process_status = hub_status

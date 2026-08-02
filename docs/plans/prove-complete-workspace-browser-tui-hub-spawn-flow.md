@@ -224,10 +224,18 @@ Both driver dependencies and the semantic-action adoption follow-ups are now
 merged. The parent consumes Web merge
 `99fff571b022e5e06535759c6ffe61926600d07a`, TUI merge
 `4faa221da665e001a8802c4ecad50ea1f1077812`, and Workspaces producer merge
-`737ec8133c5f985f4c2bd5a369365049558afa56` through the documented
+`5668dd78052f821600db28fbc459f3df9114f234` through the documented
 `drive:workspaces-shared-hub-browser`,
 `botster.tui.workspaces-spawn-driver/v1`, and
 `botster_workspaces.open_spawn` contracts.
+
+The first complete run exposed a Workspaces-owned adapter defect: Hub
+`ManagedGitError` serializes typed identity as `kind`, while Workspaces read
+`code`. The repair was separately routed as `ticket_1785625579_666761` /
+`run_1785625592_402690`, proved without weakening this plan's collision oracle,
+and merged through PR #13 at the Workspaces producer revision above. The parent
+must use that canonical merge, not the open child worktree or its pre-merge
+commit, for final acceptance.
 
 If the shared run exposes a Hub managed-Git, package-supervision, client
 protocol, Core boundary, or published-artifact defect, create a focused ticket
@@ -482,6 +490,11 @@ therefore cannot satisfy the final gate after `question_1785602772_466681`.
 - If installed first-party runnable packages conflict over ownership or cleanup
   in one Hub, capture the precise package-supervision invariant after the owner
   fix is proven.
+- No loaded note states the cross-client selection invariant established here:
+  selecting a realized node by semantic action alone is valid only when the
+  producer guarantees exactly one realized match and every consumer fails
+  closed on zero or multiple matches. This should be captured through the
+  separately owned vault workflow after final acceptance.
 - No convention conflict is present in this Plan. No vault note is created yet;
   these are evidence-dependent candidates rather than established durable
   knowledge.

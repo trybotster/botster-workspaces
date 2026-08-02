@@ -465,6 +465,7 @@ end
 
 summary = nil
 failure = nil
+teardown = nil
 temporary_root = Dir.exist?("/private/tmp") ? "/private/tmp" : Dir.tmpdir
 Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
   data_dir = File.join(fixture_root, "hub")
@@ -495,7 +496,6 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
   )
   hub_status = nil
   daemon = nil
-  teardown = nil
   begin
     wait_for_socket(socket_path, hub_pid)
     daemon = Daemon.new(socket_path)

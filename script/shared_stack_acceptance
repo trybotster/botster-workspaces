@@ -636,13 +636,11 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
       end
     end
     shutdown_stdout, shutdown_stderr, shutdown_status = Open3.capture3(hub_binary, "shutdown", "--data-dir", data_dir)
-    post_stop_session_count = shutdown_stdout[/^session_count=(\d+)$/, 1]&.to_i
-    shutdown_ok = shutdown_status.success? && post_stop_session_count == 0
+    shutdown_ok = shutdown_status.success?
     teardown = {
       "pre_shutdown_session_count" => pre_shutdown_sessions&.length,
       "pre_shutdown_lifecycles" => pre_shutdown_sessions&.map { |row| row["lifecycle"] }&.tally,
       "pre_shutdown_all_terminal" => pre_shutdown_sessions&.all? { |row| TERMINAL_SESSION_LIFECYCLES.include?(row["lifecycle"]) },
-      "post_stop_session_count" => post_stop_session_count,
     }
     process_status = hub_status
     reaped = !process_status.nil?
@@ -672,6 +670,9 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     end
     hub_status = process_status
     hub_log.close
+    post_stop_session_count = File.read(File.join(evidence_dir, "hub.log")).scan(/^session_count=(\d+)$/).last&.first&.to_i
+    teardown["post_stop_session_count"] = post_stop_session_count
+    shutdown_ok &&= post_stop_session_count == 0
     unless shutdown_ok && hub_status&.success?
       detail = [shutdown_stdout, shutdown_stderr].reject(&:empty?).join
       failure ||= RuntimeError.new("shared Hub cleanup failed: #{detail}")

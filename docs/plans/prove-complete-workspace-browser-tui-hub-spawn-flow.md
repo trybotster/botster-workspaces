@@ -348,9 +348,10 @@ this run; implementation must not edit Project Pipelines package paths here.
     `botster-ui-contract` source; verify Hub crates use their path workspace
     contract. Run explicit generated-protocol drift checks with authoritative
     Hub paths so skips cannot count as evidence.
-11. Run the repository gates, deliberate negative oracle checks, `git diff
-    --check`, PII/secret scans, and the complete shared-stack profile from a
-    fresh directory. Attach the implementation report
+11. Run the repository gates, fail-closed provenance mutations, the real
+    collision regression path, `git diff --check`, PII/secret scans, and the
+    complete shared-stack profile from a fresh directory. Attach the
+    implementation report
     and route any cross-owner failure as a dependency instead of weakening an
     assertion.
 
@@ -364,10 +365,12 @@ Repository and owner-runtime checks:
 - the new explicit shared-stack profile with exact immutable Hub, worker, Core,
   Web, TUI, Workspaces, published npm, and consumer-runner inputs
 - `git diff --check`
-- deliberate red/green checks showing that omission of explicit `base_ref`, a
-  direct client action payload, a list/surface refresh fallback, a duplicate
-  workspace membership, a collision mutation, or a destructive delete causes
-  the relevant oracle to fail
+- negative provenance checks for a false digest, inferred/relative path,
+  revision mismatch, and dirty checkout
+- red/green evidence from the real typed-collision adapter regression, plus
+  parent assertions that independently consume client resolution results and
+  live Git/worktree/workspace state. Synthetic client payloads and test-only
+  mutation switches are deliberately excluded by the production-path policy.
 
 The final shared-stack ledger must prove:
 

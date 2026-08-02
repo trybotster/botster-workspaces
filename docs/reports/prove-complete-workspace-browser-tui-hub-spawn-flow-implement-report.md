@@ -48,13 +48,16 @@
   inputs, exact clean Git revisions, contract coordinates, and artifact hashes.
 - `script/shared_stack_acceptance` owns the isolated Hub, admitted Git fixture,
   package lifecycle, real Web/TUI sequencing, collision/deletion oracles,
-  provenance checks, raw evidence, cleanup, and final summary.
+  independent managed-Git/workspace ownership assertions, provenance checks,
+  raw evidence, terminal teardown, cleanup, and final summary.
 - `script/test-hub-flow` exposes explicit `shared-stack validate-inputs` and
   `shared-stack run` profiles without changing the default owner smoke.
 - `script/test` adds fast contract and negative provenance coverage for the new
   opt-in profile.
-- `script/hub_acceptance_smoke` preserves the first Hub exit status and isolates
-  its supporting owner smoke from the shared product scenario.
+- `script/hub_acceptance_smoke` selects its effective template by explicit ID so
+  the supporting owner fixture can run without ambiguity. The parent
+  `script/shared_stack_acceptance` preserves the first Hub exit status while
+  isolating that supporting smoke from the shared product scenario.
 - `test/fixtures/shared-stack-owner-template/botster-package.json`,
   `plugin.lua`, and `bin/session.sh` provide a qualified, lifecycle-bound owner
   fixture used only for the supporting smoke.
@@ -112,6 +115,16 @@ this surface uses valid literal per-reference control identity.
 - Verification found that an evidence summary also needed the parent harness's
   own clean revision. The harness now fails closed on a dirty checkout and
   serializes `artifacts.shared_stack_harness`.
+- Review found that the first version transmitted managed-Git expectations to
+  the clients but did not independently consume them. The parent now checks
+  every Web result flag, every TUI resolution, the real Git refs/worktree
+  registry and managed paths, every returned session's exact single owner, and
+  terminal/zero-survivor teardown.
+- The plan's proposed six synthetic product-oracle ablations were narrowed to
+  production-path assertions plus the red/green evidence actually available:
+  fail-closed provenance mutations and the real collision-adapter regression.
+  Introducing test-only client payloads or weakening live oracles to simulate
+  mutation would violate the production-path and no-test-adapter constraints.
 
 There is no scope or architecture waiver.
 
@@ -123,23 +136,24 @@ Repository checks run during implementation:
   self-provenance addition.
 - Ruby syntax checks for the new/changed Ruby scripts passed.
 - `git diff --check` passed.
-- `BOTSTER_UI_CONTRACT_PATH=/private/tmp/botster-shared-stack-source.f5YiJB/botster-hub/crates/botster-ui-contract script/validate_ui_node_contract`
+- `BOTSTER_UI_CONTRACT_PATH=<immutable Hub botster-ui-contract crate> script/validate_ui_node_contract`
   is the final explicit generated-contract drift gate.
 
 Downstream-shaped runtime history:
 
-- `/private/tmp/botster-workspaces-shared-stack-evidence-13924bb` proved one-Hub
+- The initial runtime checkpoint (`artifact_1785625620_341019`) proved one-Hub
   package setup, the real Web cold flow, and all three real TUI keyboard cases,
   then intentionally stopped on the typed-collision producer defect.
-- `/private/tmp/botster-workspaces-shared-stack-evidence-c085959-parent-44e6f76/summary.json`
-  passed the complete scenario against the committed owner repair.
-- `/private/tmp/botster-workspaces-shared-stack-evidence-verify-c085959-parent-0ca3844-1785628371-escalated/summary.json`
-  independently passed the complete scenario and records a clean parent
-  harness revision. It proves one Hub/data directory, four browser cases,
-  three TUI sessions, exactly one owner for every successful session,
+- The separately routed repair's implementation proof passed the complete
+  scenario against the committed owner repair.
+- The repair's independent verification artifact
+  (`artifact_1785629977_421217`) passed the complete scenario with a clean
+  parent harness revision. It proves one Hub/data directory, four browser
+  cases, three TUI sessions, exactly one owner for every successful session,
   `branch_in_use` and `path_collision` with unchanged membership/Hub sessions/
   Git/foreign resources, grouping-only deletion, Core UI absence, and exact Hub
-  contract provenance.
+  contract provenance. Exact machine-local evidence coordinates remain in the
+  pipeline artifacts, not in this reproduction document.
 
 The authoritative final gate runs only after this report-bearing commit is
 clean, with Workspaces set to that commit (which contains canonical repair merge
@@ -168,8 +182,10 @@ Immutable final inputs are Core/worker
   clean report-bearing parent commit containing canonical Workspaces main. A
   failed replay blocks the gate and must be routed without weakening an oracle.
 - The acceptance harness is opt-in because it requires several immutable
-  repository/build artifacts and a real browser/PTY. The fast suite proves its
-  interface and fail-closed validation, not the expensive runtime behavior.
+  repository/build artifacts, a real browser, and a Hub-launched TUI process
+  driven through its assigned-scenario keyboard path. The fast suite proves
+  syntax, interface, and fail-closed validation, not the expensive runtime
+  behavior.
 - Evidence lives under a private temporary directory and is not a release
   artifact. Project Pipelines stores its durable coordinates and assertions.
 

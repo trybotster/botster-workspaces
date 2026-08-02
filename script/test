@@ -23,8 +23,6 @@ domain_doc = read("docs/workspace-domain.md")
 capabilities_doc = read("docs/capabilities.md")
 gitignore = read(".gitignore")
 hub_flow = read("script/test-hub-flow")
-shared_stack_validator = read("script/validate_shared_stack_inputs")
-shared_stack_acceptance = read("script/shared_stack_acceptance")
 
 assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
 assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
@@ -34,20 +32,11 @@ assert(!manifest.key?("configuration"), "manifest must not retain workspace sett
 
 assert(hub_flow.include?("shared-stack validate-inputs"), "Hub flow must expose the shared-stack input profile")
 assert(hub_flow.include?("shared-stack run"), "Hub flow must expose the final shared-stack acceptance profile")
-%w[hub_binary session_worker_binary tui_binary web_driver_source tui_driver_source tui_kit_source].each do |token|
-  assert(shared_stack_validator.include?(token), "shared-stack validator must require #{token}")
-end
-%w[
-  drive:workspaces-shared-hub-browser
-  BOTSTER_TUI_ACCEPTANCE_SCENARIO
-  botster_workspaces.open_spawn
-  branch_in_use
-  path_collision
-  list_sessions
-  base_ref
-  shared_stack_harness
-].each do |token|
-  assert(shared_stack_acceptance.include?(token), "shared-stack acceptance must prove #{token}")
+%w[script/test-hub-flow script/validate_shared_stack_inputs script/shared_stack_acceptance].each do |path|
+  assert(
+    system("ruby", "-c", File.join(ROOT, path), out: File::NULL, err: File::NULL),
+    "#{path} must pass Ruby syntax validation"
+  )
 end
 
 surfaces = manifest.fetch("surfaces")

@@ -151,6 +151,12 @@ script/test-hub-flow shared-stack validate-inputs /absolute/path/to/inputs.json
 script/test-hub-flow shared-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
 ```
 
+`script/test-hub-flow` fails closed with usage for any unrecognized argument
+shape. The runtime profile prefers the short `/private/tmp` root when present
+because the Hub uses a Unix-domain socket; it validates the resolved socket
+path against a conservative platform limit before starting Hub and reports a
+clear error if the fallback temporary root is too long.
+
 The version 1 manifest contains exactly `schema_version` and `artifacts`.
 `hub_binary`, `session_worker_binary`, and `tui_binary` name executable files
 with SHA-256 digests, full source revisions, and clean absolute
@@ -171,7 +177,8 @@ create/select/Spawn through the production renderer and transport, keyboard
 Spawn through the production TUI frame and hit map, the missing-branch,
 existing-branch, and exact-worktree states, pushed lifecycle reconciliation,
 typed non-destructive collisions, one-workspace ownership, grouping-only
-deletion, and Hub-owned UI-contract provenance. The expensive cross-repository
+deletion, terminal teardown with zero surviving sessions, and Hub-owned
+UI-contract provenance. The expensive cross-repository
 profile is deliberately opt-in and is not part of `script/test`.
 
 The validator never infers sibling paths, accepts dirty checkouts, or treats a

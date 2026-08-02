@@ -138,6 +138,55 @@ with the same Hub, worker, and package provenance. These modes must exercise
 the real owner-authored tree through each generic renderer; repository-local
 source or fixture inspection is not a substitute.
 
+### Shared-stack acceptance
+
+The final browser/TUI profile uses one parent-owned Hub process and one fresh
+data directory. It installs and enables Web, TUI, Workspaces, and the
+repository-owned session-template fixture once, then drives both installed
+clients against the same durable Hub state. Supply an explicit immutable input
+manifest and a new absolute evidence directory:
+
+```sh
+script/test-hub-flow shared-stack validate-inputs /absolute/path/to/inputs.json
+script/test-hub-flow shared-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
+```
+
+`script/test-hub-flow` fails closed with usage for any unrecognized argument
+shape. The runtime profile prefers the short `/private/tmp` root when present
+because the Hub uses a Unix-domain socket; it validates the resolved socket
+path against a conservative platform limit before starting Hub and reports a
+clear error if the fallback temporary root is too long.
+
+The version 1 manifest contains exactly `schema_version` and `artifacts`.
+`hub_binary`, `session_worker_binary`, and `tui_binary` name executable files
+with SHA-256 digests, full source revisions, and clean absolute
+source-checkout paths. Each executable entry contains exactly `kind`, `path`,
+`sha256`, `source_checkout`, and `revision`. The checkout entries contain
+exactly `kind`, `path`, and `revision` and name clean absolute Git roots:
+`core_source`, `web_package`, `tui_package`, `tui_kit_source`,
+`workspaces_package`, `ui_contract_source`, `web_driver_source`, and
+`tui_driver_source`. Repeating a checkout for its package and driver is
+intentional: the manifest states both roles explicitly and the validator
+requires one exact revision for each.
+
+The run writes raw Hub, Web, and TUI logs, the assigned TUI scenario and JSONL
+ledger, owner-boundary output, and `summary.json`. The summary records the
+exact clean shared-stack harness revision alongside every supplied artifact.
+It proves browser
+create/select/Spawn through the production renderer and transport, keyboard
+Spawn through the production TUI frame and hit map, the missing-branch,
+existing-branch, and exact-worktree states, pushed lifecycle reconciliation,
+typed non-destructive collisions, one-workspace ownership, grouping-only
+deletion, terminal teardown with zero surviving sessions, and Hub-owned
+UI-contract provenance. The expensive cross-repository
+profile is deliberately opt-in and is not part of `script/test`.
+
+The validator never infers sibling paths, accepts dirty checkouts, or treats a
+mutable branch name as a revision. The supplied Hub revision must be the exact
+contract source pinned by both client graphs; it need not be the newest Hub
+commit. A failure in a Hub, Web, TUI, Core, TUI-kit, or UI-contract input must
+be repaired in that owning repository rather than patched by this package.
+
 See [docs/workspace-domain.md](docs/workspace-domain.md) and
 [docs/capabilities.md](docs/capabilities.md) for the exact domain and authority
 contracts.

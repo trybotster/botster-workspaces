@@ -503,6 +503,11 @@ assert(selected_target["state"] == "accepted", "Git target selection was not acc
 template_select = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-template")
 assert(template_select, "selected Git target has no effective session-template selector")
 template_option = Array(template_select.dig("slots", "options")).first
+if ENV["BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE"]
+  template_option = Array(template_select.dig("slots", "options")).find do |option|
+    option.dig("props", "value") == ENV.fetch("BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE")
+  end
+end
 assert(template_option, "selected Git target has no effective session template")
 template_id = template_option.dig("props", "value")
 assert(template_id, "effective session template is missing its id")

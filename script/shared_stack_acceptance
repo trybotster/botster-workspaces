@@ -13,8 +13,10 @@ require "tmpdir"
 ROOT = File.expand_path("..", __dir__)
 PROTOCOL = "botster-hub-daemon-v1"
 TARGET_ID = "workspaces-shared-stack"
-TEMPLATE_ID = "shared-stack"
-OWNER_TEMPLATE_ID = "botster-workspaces-shared-stack-owner-template/owner-acceptance"
+# Effective session-type ids are fully qualified as "<source name>/<id>"; the
+# repo source is named for its admitted target.
+SESSION_TYPE_ID = "#{TARGET_ID}/shared-stack"
+OWNER_SESSION_TYPE_ID = "botster-workspaces-shared-stack-owner-session-type/owner-acceptance"
 SCHEMA = "botster.tui.workspaces-spawn-driver/v1"
 MAX_UNIX_SOCKET_PATH_BYTES = 103
 TERMINAL_SESSION_LIFECYCLES = %w[exited stale].freeze
@@ -254,7 +256,7 @@ def web_case(case_id, branch, created_branch:, created_worktree:, reused_worktre
     case_id: case_id,
     target_id: TARGET_ID,
     branch: branch,
-    template_id: TEMPLATE_ID,
+    session_type_id: SESSION_TYPE_ID,
     prompt: "shared stack #{case_id}",
     expected_lifecycle: "ended",
     expect_created_branch: created_branch,
@@ -375,7 +377,7 @@ def package_proof!(daemon)
     botster-web
     botster-tui
     botster-workspaces
-    botster-workspaces-shared-stack-owner-template
+    botster-workspaces-shared-stack-owner-session-type
   ]
   rows = daemon.request(type: "list_packages").fetch("packages")
   required.to_h do |package_name|
@@ -403,10 +405,10 @@ def collision_proof!(daemon, data_dir, repository, workspace_id)
   before_git = git_snapshot(repository)
   results = {
     "branch_in_use" => daemon.call_tool("botster_workspaces.spawn", {
-      workspace_id: workspace_id, target_id: TARGET_ID, branch: branch_in_use, template_id: TEMPLATE_ID,
+      workspace_id: workspace_id, target_id: TARGET_ID, branch: branch_in_use, session_type_id: SESSION_TYPE_ID,
     }),
     "path_collision" => daemon.call_tool("botster_workspaces.spawn", {
-      workspace_id: workspace_id, target_id: TARGET_ID, branch: path_collision, template_id: TEMPLATE_ID,
+      workspace_id: workspace_id, target_id: TARGET_ID, branch: path_collision, session_type_id: SESSION_TYPE_ID,
     }),
   }
   results.each do |expected, result|
@@ -478,8 +480,16 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
   FileUtils.mkdir_p(File.join(repository, "bin"))
   File.write(File.join(repository, "bin", "shared-stack-session.sh"), "#!/bin/sh\nprintf 'shared-stack:%s\\n' \"$BOTSTER_SESSION_ID\"\nsleep 2\n")
   File.chmod(0o755, File.join(repository, "bin", "shared-stack-session.sh"))
-  File.write(File.join(repository, ".botster", "session-templates.json"), JSON.pretty_generate({
-    session_templates: [{ id: TEMPLATE_ID, label: "Shared stack", command: "bin/shared-stack-session.sh" }],
+  File.write(File.join(repository, ".botster", "session-types.json"), JSON.pretty_generate({
+    session_types: [{
+      id: SESSION_TYPE_ID.split("/").last,
+      label: "Shared stack",
+      role: "botster.agent",
+      interaction: "interactive",
+      traits: ["acceptance"],
+      lifecycle: "task",
+      command: "bin/shared-stack-session.sh",
+    }],
   }))
   File.write(File.join(repository, "README.md"), "shared stack fixture\n")
   run!("git", "init", "--initial-branch", "main", repository)
@@ -502,10 +512,10 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     daemon = Daemon.new(socket_path)
     run!(hub_binary, "spawn-targets", "create", "--data-dir", data_dir, "--root", repository,
       "--id", TARGET_ID, "--label", "Workspaces shared stack", "--kind", "git", "--base-ref", "main")
-    [web_path, tui_path, workspaces_path, File.join(ROOT, "test", "fixtures", "shared-stack-owner-template")].each do |package_path|
+    [web_path, tui_path, workspaces_path, File.join(ROOT, "test", "fixtures", "shared-stack-owner-session-type")].each do |package_path|
       run!(hub_binary, "packages", "install", "--data-dir", data_dir, "--path", package_path)
     end
-    %w[botster-web botster-tui botster-workspaces botster-workspaces-shared-stack-owner-template].each do |package_name|
+    %w[botster-web botster-tui botster-workspaces botster-workspaces-shared-stack-owner-session-type].each do |package_name|
       run!(hub_binary, "packages", "enable", "--data-dir", data_dir, package_name)
     end
     packages = package_proof!(daemon)
@@ -513,10 +523,10 @@ Dir.mktmpdir("bwss-", temporary_root) do |fixture_root|
     assert(target && target["base_ref"] == "main", "shared Git target omitted explicit base_ref=main")
     run_process!(
       [File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Shared stack owner boundary"], chdir: ROOT,
-      env: { "BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE" => OWNER_TEMPLATE_ID },
+      env: { "BOTSTER_WORKSPACES_ACCEPTANCE_SESSION_TYPE" => OWNER_SESSION_TYPE_ID },
       output_path: File.join(evidence_dir, "owner-boundary.log")
     )
-    run!(hub_binary, "packages", "disable", "--data-dir", data_dir, "botster-workspaces-shared-stack-owner-template")
+    run!(hub_binary, "packages", "disable", "--data-dir", data_dir, "botster-workspaces-shared-stack-owner-session-type")
     run!(hub_binary, "packages", "reload", "--data-dir", data_dir, "botster-workspaces")
     run!(hub_binary, "packages", "start-entrypoint", "--data-dir", data_dir, "botster-web", "web-client")
 

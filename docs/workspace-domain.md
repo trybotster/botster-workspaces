@@ -42,17 +42,19 @@ repositories.
 
 The workflow projects enabled Git spawn points from the Hub. Once the user
 selects a target, effective session types come only from
-`session_templates.list({ target_id = ... })`.
+`session_types.list({ target_id = ... })`. Each row is consumed through its
+fully qualified `session_type_id`; the package neither reconstructs that
+identity from source and id nor accepts a row without it.
 
 The package calls only:
 
 ```text
-session_templates.ensure_worktree_and_spawn
+session_types.ensure_worktree_and_spawn
 ```
 
-The request carries semantic target, branch, session type, and safe workspace
-context. It never supplies a session id, cwd, repository path, worktree path,
-base fact, or Git command. Only an `ok=true` response may append the canonical
+The request carries semantic target, branch, `session_type_id`, and safe
+workspace context. It never supplies a session id, cwd, repository path,
+worktree path, base fact, or Git command. Only an `ok=true` response may append the canonical
 `result.session_id`, and it is appended exactly once. Rejection or worker error
 leaves membership unchanged.
 

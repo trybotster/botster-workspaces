@@ -5,7 +5,7 @@ require "timeout"
 require "tmpdir"
 
 ROOT = File.expand_path("..", __dir__)
-TEMPLATE_PACKAGE = File.join(ROOT, "test", "fixtures", "session-template-package")
+SESSION_TYPE_PACKAGE = File.join(ROOT, "test", "fixtures", "session-type-package")
 
 unless ARGV.empty?
   if ARGV.length == 3 && ARGV[0] == "shared-stack" && ARGV[1] == "validate-inputs"
@@ -98,8 +98,8 @@ Dir.mktmpdir("bws-", temporary_root) do |data_dir|
       "--kind",
       "git"
     )
-    run!(hub, "packages", "install", "--data-dir", data_dir, "--path", TEMPLATE_PACKAGE)
-    run!(hub, "packages", "enable", "--data-dir", data_dir, "botster-workspaces-acceptance-template")
+    run!(hub, "packages", "install", "--data-dir", data_dir, "--path", SESSION_TYPE_PACKAGE)
+    run!(hub, "packages", "enable", "--data-dir", data_dir, "botster-workspaces-acceptance-session-type")
     run!(hub, "packages", "install", "--data-dir", data_dir, "--path", ROOT)
     run!(hub, "packages", "enable", "--data-dir", data_dir, "botster-workspaces")
     run!(File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Automated Acceptance Workspace")

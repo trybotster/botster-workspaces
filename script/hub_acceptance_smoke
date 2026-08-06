@@ -7,6 +7,10 @@ require "socket"
 ROOT = File.expand_path("..", __dir__)
 PACKAGE = "botster-workspaces"
 SURFACE = "workspaces"
+PROTOCOL = "botster-hub-daemon-v1"
+PROTOCOL_VERSION = 6
+CONFORMANCE_FIXTURE_REVISION = 31
+SESSION_TYPE_FEATURE = "session_type_entity_subscriptions"
 
 socket_path = ARGV.fetch(0) do
   warn "usage: script/hub_acceptance_smoke <isolated-current-hub.sock> [workspace-name]"
@@ -17,6 +21,38 @@ branch = ENV.fetch("BOTSTER_WORKSPACES_ACCEPTANCE_BRANCH", "botster-workspaces-a
 
 def assert(condition, message)
   raise message unless condition
+end
+
+# The Hub deserializes DaemonHello.compatibility with field-level defaults but no
+# per-field defaults inside DaemonCompatibilityRequirement, so a present block is
+# only accepted when it carries the exact protocol-6 shape.
+def compatibility_requirement(client_name, required_features)
+  {
+    protocol: PROTOCOL,
+    protocol_version: PROTOCOL_VERSION,
+    required_features: required_features,
+    minimum_conformance_fixture_revision: CONFORMANCE_FIXTURE_REVISION,
+    client_name: client_name,
+  }
+end
+
+def assert_hello_ack!(hello, label)
+  assert(hello["protocol"] == PROTOCOL, "#{label} daemon hello failed")
+  compatibility = hello.fetch("compatibility") { raise "#{label} daemon hello omitted compatibility" }
+  assert(compatibility["protocol"] == PROTOCOL, "#{label} daemon advertised #{compatibility["protocol"].inspect}")
+  assert(
+    compatibility["protocol_version"] == PROTOCOL_VERSION,
+    "#{label} daemon advertised protocol_version #{compatibility["protocol_version"].inspect}"
+  )
+  assert(
+    compatibility["conformance_fixture_revision"] == CONFORMANCE_FIXTURE_REVISION,
+    "#{label} daemon advertised conformance_fixture_revision #{compatibility["conformance_fixture_revision"].inspect}"
+  )
+  assert(
+    Array(compatibility["features"]).include?(SESSION_TYPE_FEATURE),
+    "#{label} daemon does not advertise #{SESSION_TYPE_FEATURE}"
+  )
+  compatibility
 end
 
 def request_raw(socket, payload)
@@ -98,17 +134,14 @@ end
 def open_session_entity_subscription(socket_path, subscription_id)
   socket = UNIXSocket.new(socket_path)
   socket.puts(JSON.generate({
-    protocol: "botster-hub-daemon-v1",
-    compatibility: {
-      protocol: "botster-hub-daemon-v1",
-      minimum_protocol_version: 1,
-      required_features: ["session_entity_subscriptions"],
-      minimum_conformance_fixture_revision: 1,
-      client_name: "botster-workspaces-session-entity-smoke",
-    },
+    protocol: PROTOCOL,
+    compatibility: compatibility_requirement(
+      "botster-workspaces-session-entity-smoke",
+      ["session_entity_subscriptions"]
+    ),
   }))
   hello = JSON.parse(socket.gets || raise("daemon closed before entity subscription hello"))
-  assert(hello["protocol"] == "botster-hub-daemon-v1", "entity subscription daemon hello failed")
+  assert_hello_ack!(hello, "entity subscription")
   socket.puts(JSON.generate({
     type: "subscribe_entities",
     entity_type: "session",
@@ -163,25 +196,19 @@ end
 
 socket = UNIXSocket.new(socket_path)
 socket.puts(JSON.generate({
-  protocol: "botster-hub-daemon-v1",
-  compatibility: {
-    protocol: "botster-hub-daemon-v1",
-    minimum_protocol_version: 1,
-    required_features: %w[
-      sessions
-      package_routes
-      package_navigation
-      plugin_surface_render
-      plugin_surface_action
-      spawn_targets
-      worktrees
-    ],
-    minimum_conformance_fixture_revision: 1,
-    client_name: "botster-workspaces-acceptance-smoke",
-  },
+  protocol: PROTOCOL,
+  compatibility: compatibility_requirement("botster-workspaces-acceptance-smoke", %w[
+    sessions
+    package_routes
+    package_navigation
+    plugin_surface_render
+    plugin_surface_action
+    spawn_targets
+    worktrees
+  ]),
 }))
 hello = JSON.parse(socket.gets || raise("daemon closed before hello"))
-assert(hello["protocol"] == "botster-hub-daemon-v1", "daemon hello failed")
+hub_compatibility = assert_hello_ack!(hello, "acceptance")
 
 entity_socket, initial_entity_snapshot = open_session_entity_subscription(
   socket_path,
@@ -500,17 +527,21 @@ selected_target = action(
   values: { "botster-workspaces-spawn-target" => target.fetch("target_id") }
 )
 assert(selected_target["state"] == "accepted", "Git target selection was not accepted")
-template_select = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-template")
-assert(template_select, "selected Git target has no effective session-template selector")
-template_option = Array(template_select.dig("slots", "options")).first
-if ENV["BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE"]
-  template_option = Array(template_select.dig("slots", "options")).find do |option|
-    option.dig("props", "value") == ENV.fetch("BOTSTER_WORKSPACES_ACCEPTANCE_TEMPLATE")
+session_type_select = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-template")
+assert(session_type_select, "selected Git target has no effective session-type selector")
+session_type_option = Array(session_type_select.dig("slots", "options")).first
+if ENV["BOTSTER_WORKSPACES_ACCEPTANCE_SESSION_TYPE"]
+  session_type_option = Array(session_type_select.dig("slots", "options")).find do |option|
+    option.dig("props", "value") == ENV.fetch("BOTSTER_WORKSPACES_ACCEPTANCE_SESSION_TYPE")
   end
 end
-assert(template_option, "selected Git target has no effective session template")
-template_id = template_option.dig("props", "value")
-assert(template_id, "effective session template is missing its id")
+assert(session_type_option, "selected Git target has no effective session type")
+session_type_id = session_type_option.dig("props", "value")
+assert(session_type_id, "effective session type is missing its id")
+assert(
+  session_type_id.include?("/"),
+  "effective session type id is not fully qualified: #{session_type_id.inspect}"
+)
 
 spawn_form = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-form-#{workspace_id}-#{target.fetch("target_id")}")
 assert(spawn_form, "target selection did not render the Spawn form")
@@ -522,7 +553,7 @@ rejected_spawn_action = action(
   payload: spawn_form.dig("props", "action", "payload"),
   values: {
     "botster-workspaces-spawn-branch" => "",
-    "botster-workspaces-spawn-template" => template_id,
+    "botster-workspaces-spawn-template" => session_type_id,
   }
 )
 assert_rejected(rejected_spawn_action, "botster-workspaces-spawn-branch", "missing Spawn branch")
@@ -534,7 +565,7 @@ spawned_action = action(
   payload: spawn_form.dig("props", "action", "payload"),
   values: {
     "botster-workspaces-spawn-branch" => branch,
-    "botster-workspaces-spawn-template" => template_id,
+    "botster-workspaces-spawn-template" => session_type_id,
     "botster-workspaces-spawn-prompt" => "Workspaces acceptance smoke",
   }
 )
@@ -551,6 +582,10 @@ current_frame = wait_for_entity_frame(entity_socket, "current session entity") d
     frame.dig("entity", "lifecycle_class") == "current"
 end
 assert(current_frame.dig("entity", "session_uuid") == session_id, "current entity lost canonical UUID")
+assert(
+  current_frame.dig("entity", "session_type_id") == session_type_id,
+  "canonical session entity lost the selected session type: #{current_frame.dig("entity", "session_type_id").inspect}"
+)
 worktree_id = spawned.dig("hub_result", "worktree_id")
 worktrees = request(socket, { type: "list_worktrees" }).fetch("worktrees")
 assert(worktrees.any? { |worktree| worktree["worktree_id"] == worktree_id }, "managed worktree is not observable")
@@ -564,7 +599,7 @@ failed_spawn = call_tool(socket, "botster_workspaces.spawn", {
   workspace_id: workspace_id,
   target_id: "missing-workspaces-acceptance-target",
   branch: "#{branch}-negative",
-  template_id: template_id,
+  session_type_id: session_type_id,
 })
 assert(failed_spawn["ok"] == false, "negative real Hub spawn unexpectedly succeeded")
 after_failure = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
@@ -573,11 +608,29 @@ assert(
   "failed Hub spawn changed membership"
 )
 
+# The superseded request field is rejected by the real installed package before
+# any Hub capability call; it is never translated into session_type_id.
+obsolete_field_spawn = call_tool(socket, "botster_workspaces.spawn", {
+  workspace_id: workspace_id,
+  target_id: target.fetch("target_id"),
+  branch: "#{branch}-obsolete-field",
+  template_id: session_type_id, # cold-cut negative control
+})
+assert(obsolete_field_spawn["ok"] == false, "real Hub accepted the superseded spawn request field")
+assert(
+  obsolete_field_spawn.dig("error", "code") == "unknown_field",
+  "superseded spawn request field returned #{obsolete_field_spawn.dig("error", "code").inspect}"
+)
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == membership_before_failure,
+  "superseded spawn request field changed membership"
+)
+
 removed_spawned = call_tool(socket, "botster_workspaces.spawn", {
   workspace_id: workspace_id,
   target_id: target.fetch("target_id"),
   branch: "#{branch}-removed",
-  template_id: template_id,
+  session_type_id: session_type_id,
 })
 assert(removed_spawned["ok"] == true, "second package-owned Hub spawn failed")
 removed_session_id = removed_spawned.fetch("session_id")
@@ -680,8 +733,10 @@ assert(
 
 puts(
   "script/hub_acceptance_smoke: ok " \
+  "protocol_version=#{hub_compatibility.fetch("protocol_version")} " \
+  "conformance_fixture_revision=#{hub_compatibility.fetch("conformance_fixture_revision")} " \
   "workspace_id=#{workspace_id} target_id=#{target["target_id"]} " \
-  "template_id=#{template_id} session_id=#{session_id} " \
+  "session_type_id=#{session_type_id} session_id=#{session_id} " \
   "spawn_node_id=#{spawn_button.fetch("id")} spawn_action_id=#{spawn_action.fetch("id")} " \
   "spawn_payload=#{JSON.generate(spawn_action["payload"])}"
 )

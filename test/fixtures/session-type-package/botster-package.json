@@ -1,5 +1,5 @@
 {
-  "name": "botster-workspaces-acceptance-template",
+  "name": "botster-workspaces-acceptance-session-type",
   "version": "0.0.0",
   "kind": "plugin",
   "botster": ">=0.1.0",
@@ -8,9 +8,14 @@
   "entrypoints": [
     { "runtime": "lua", "path": "plugin.lua", "bootstrap": false }
   ],
-  "session_templates": [
+  "session_types": [
     {
       "id": "workspace-acceptance",
+      "label": "Workspace acceptance",
+      "role": "botster.agent",
+      "interaction": "interactive",
+      "traits": ["acceptance"],
+      "lifecycle": "task",
       "target_id": "workspaces-acceptance",
       "command": "bin/session.sh",
       "context": ["workspace_id", "prompt", "ticket_id", "branch_name"]

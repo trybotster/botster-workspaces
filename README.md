@@ -62,11 +62,17 @@ workspace history until the user explicitly moves or removes them. The package
 does not persist, compute, or guess lifecycle truth.
 
 Spawn is target-first. The package lists enabled Git spawn points, then asks
-the Hub for effective session types for the selected target. It calls only
-`session_templates.ensure_worktree_and_spawn`. After success it records exactly
+the Hub for effective session types for the selected target through
+`session_types.list`. It submits the fully qualified `session_type_id` the Hub
+returned, unchanged, and calls only
+`session_types.ensure_worktree_and_spawn`. After success it records exactly
 the returned `result.session_id`; a rejection or worker error records nothing.
 If the Hub spawn succeeds but the following grouping write fails, the action
 reports the returned ungrouped UUID and does not claim membership.
+
+Session-type presentation is Hub-owned. The package renders the label and id it
+receives; it does not own the role, interaction, trait, or lifecycle taxonomy,
+session-type source precedence, or source editability.
 
 The detail Spawn opener exposes `botster_workspaces.open_spawn` as its stable,
 renderer-neutral consumer identity. Clients locate it from realized action
@@ -142,7 +148,7 @@ source or fixture inspection is not a substitute.
 
 The final browser/TUI profile uses one parent-owned Hub process and one fresh
 data directory. It installs and enables Web, TUI, Workspaces, and the
-repository-owned session-template fixture once, then drives both installed
+repository-owned session-type fixture once, then drives both installed
 clients against the same durable Hub state. Supply an explicit immutable input
 manifest and a new absolute evidence directory:
 

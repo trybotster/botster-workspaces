@@ -56,6 +56,25 @@ assert(navigation.first.dig("target", "surface_id") == "workspaces", "navigation
 entrypoints = manifest.fetch("entrypoints")
 assert(entrypoints == [{ "runtime" => "lua", "path" => "plugin.lua", "bootstrap" => false }], "one Lua entrypoint is required")
 
+{
+  "test/fixtures/session-type-package" => "botster-workspaces-acceptance-session-type",
+  "test/fixtures/shared-stack-owner-session-type" => "botster-workspaces-shared-stack-owner-session-type",
+}.each do |directory, package_name|
+  fixture = JSON.parse(read(File.join(directory, "botster-package.json")))
+  assert(fixture["name"] == package_name, "#{directory} must declare #{package_name}")
+  assert(!fixture.key?("session_templates"), "#{directory} must not declare a superseded session_templates manifest key")
+  session_types = fixture.fetch("session_types") { raise "#{directory} must declare session_types" }
+  assert(session_types.length == 1, "#{directory} must declare exactly one acceptance session type")
+  # Hub 8a60bd58 PackageSessionType requires these; a manifest omitting them
+  # fails package validation rather than degrading to a default.
+  %w[id label role interaction lifecycle command].each do |field|
+    assert(!session_types.first[field].to_s.empty?, "#{directory} session type must declare #{field}")
+  end
+  assert(session_types.first["role"].include?("."), "#{directory} session type role must be a namespaced token")
+end
+assert(hub_flow.include?("botster-workspaces-acceptance-session-type"), "Hub flow must enable the renamed session-type fixture")
+assert(hub_flow.include?("test\", \"fixtures\", \"session-type-package"), "Hub flow must install the renamed session-type fixture")
+
 required_plugin_tokens = %w[
   botster_workspaces.create
   botster_workspaces.list
@@ -72,7 +91,8 @@ required_plugin_tokens = %w[
   botster_workspaces.select_spawn_target
   open_spawn_presentation_action
   ensure_worktree_and_spawn
-  session_templates
+  session_types
+  session_type_id
   spawn_targets
   plugin_db
   surface_route
@@ -126,8 +146,16 @@ end
 assert(operations.dig("delete", "mode") == "remove_grouping_record", "delete must physically remove grouping")
 assert(operations.dig("move_session", "one_state_write") == true, "move must be one state write")
 assert(
-  operations.dig("spawn", "hub_api") == "session_templates.ensure_worktree_and_spawn",
+  operations.dig("spawn", "hub_api") == "session_types.ensure_worktree_and_spawn",
   "spawn must call atomic Hub capability"
+)
+assert(
+  operations.dig("spawn", "session_type_api") == "session_types.list",
+  "spawn must project effective session types through the Hub session-type capability"
+)
+assert(
+  operations.dig("spawn", "session_type_request_field") == "session_type_id",
+  "spawn must name the authoritative session-type request field"
 )
 assert(operations.dig("spawn", "records") == "result.session_id", "spawn must record returned UUID")
 assert(operations.dig("spawn", "caller_supplied_session_id") == false, "spawn must reject caller session id")
@@ -161,7 +189,9 @@ assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", 
     "Contextual session grouping",
     "New workspace",
     "Add or move an existing session",
-    "session_templates.ensure_worktree_and_spawn",
+    "session_types.list",
+    "session_types.ensure_worktree_and_spawn",
+    "session_type_id",
     "fresh Hub data directory",
     "script/hub_acceptance_smoke",
   ],
@@ -231,9 +261,12 @@ scanned_files = %w[
   script/shared_stack_acceptance
   script/validate_shared_stack_inputs
   script/validate_ui_node_contract
-  test/fixtures/shared-stack-owner-template/botster-package.json
-  test/fixtures/shared-stack-owner-template/plugin.lua
-  test/fixtures/shared-stack-owner-template/bin/session.sh
+  test/fixtures/session-type-package/botster-package.json
+  test/fixtures/session-type-package/plugin.lua
+  test/fixtures/session-type-package/bin/session.sh
+  test/fixtures/shared-stack-owner-session-type/botster-package.json
+  test/fixtures/shared-stack-owner-session-type/plugin.lua
+  test/fixtures/shared-stack-owner-session-type/bin/session.sh
   test/fixtures/workspaces/contract.json
   test/plugin_runtime_test.lua
 ]
@@ -248,6 +281,38 @@ scanned_files.each do |path|
   leak_patterns.each do |label, pattern|
     assert(!contents.match?(pattern), "#{path} contains #{label}")
   end
+end
+
+# Cold-cut audit. Active source, manifests, fixtures, harnesses, and current
+# documentation must carry no superseded session-template contract vocabulary.
+# Historical docs/plans and docs/reports are immutable evidence and are excluded
+# on purpose. script/test is excluded because it defines these literals.
+cold_cut_files = scanned_files + %w[script/test-hub-flow]
+forbidden_contract_tokens = %w[
+  session_templates
+  session_template_
+  template_id
+  .botster/session-templates.json
+]
+# Frozen pre-production create-argument keys. They contain session_template as a
+# substring but are rejection vocabulary, not an active Hub contract, so they are
+# stripped by exact key -- longest first -- rather than by prefix exemption.
+frozen_obsolete_keys = %w[
+  default_session_template_refs
+  default_session_template_id
+  default_session_template
+]
+# Lines that deliberately name a superseded token to prove it is rejected.
+negative_control_marker = "cold-cut negative control"
+cold_cut_files.each do |path|
+  auditable = read(path).lines.reject { |line| line.include?(negative_control_marker) }.join
+  frozen_obsolete_keys.each { |key| auditable = auditable.gsub(key, "") }
+  forbidden_contract_tokens.each do |token|
+    assert(!auditable.include?(token), "#{path} retains superseded session-template vocabulary #{token}")
+  end
+end
+frozen_obsolete_keys.each do |key|
+  assert(plugin.include?("#{key} = true"), "plugin entrypoint must keep rejecting frozen create argument #{key}")
 end
 
 Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|

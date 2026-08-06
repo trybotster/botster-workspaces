@@ -33,7 +33,7 @@
     { "surface": "mcp" },
     { "surface": "plugin_db", "scope": "botster-workspaces" },
     { "surface": "surfaces" },
-    { "surface": "session_actions", "scope": "session_template_managed_git_spawn" }
+    { "surface": "session_actions", "scope": "session_type_managed_git_spawn" }
   ],
   "navigation": [
     {
@@ -74,9 +74,10 @@
       "grouping_only": true
     },
     "spawn": {
-      "hub_api": "session_templates.ensure_worktree_and_spawn",
+      "hub_api": "session_types.ensure_worktree_and_spawn",
       "target_first": true,
-      "template_api": "session_templates.list",
+      "session_type_api": "session_types.list",
+      "session_type_request_field": "session_type_id",
       "records": "result.session_id",
       "records_only_after_success": true,
       "caller_supplied_session_id": false

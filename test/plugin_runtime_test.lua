@@ -4,8 +4,8 @@ local set_calls = 0
 local fail_next_set = false
 local fail_next_get = false
 local spawn_calls = {}
-local template_list_calls = {}
-local fail_template_list_for = nil
+local session_type_list_calls = {}
+local fail_session_type_list_for = nil
 local spawn_mode = "success"
 local spawn_rejection_kind = "branch_in_use"
 local spawn_rejection_message = "branch is already checked out"
@@ -53,22 +53,24 @@ botster = {
       list = function()
         return {
           { target_id = "tgt_git", label = "Local Git", kind = "git", enabled = true },
-          { target_id = "tgt_empty", label = "Git without templates", kind = "git", enabled = true },
+          { target_id = "tgt_empty", label = "Git without session types", kind = "git", enabled = true },
           { target_id = "tgt_disabled", label = "Disabled Git", kind = "git", enabled = false },
           { target_id = "tgt_directory", label = "Directory", kind = "directory", enabled = true },
         }
       end,
     },
-    session_templates = {
+    session_types = {
+      -- The real Hub returns a bare array of effective rows whose
+      -- session_type_id is fully qualified as "<source name>/<id>".
       list = function(request)
-        template_list_calls[#template_list_calls + 1] = copy(request)
-        if request.target_id == fail_template_list_for then
-          error("injected template projection failure")
+        session_type_list_calls[#session_type_list_calls + 1] = copy(request)
+        if request.target_id == fail_session_type_list_for then
+          error("injected session-type projection failure")
         end
         if request.target_id == "tgt_git" then
           return {
-            { template_id = "implement", label = "Implement" },
-            { template_id = "review", label = "Review" },
+            { session_type_id = "acceptance-package/implement", id = "implement", label = "Implement" },
+            { session_type_id = "acceptance-package/review", id = "review", label = "Review" },
           }
         end
         return {}
@@ -461,18 +463,24 @@ assert_eq(
   "single-workspace Move dialog does not emit an empty select"
 )
 
+-- The three frozen pre-production create arguments are not active Hub
+-- vocabulary; they must keep producing obsolete_field rather than being deleted
+-- with the rest of the superseded names.
 for _, field in ipairs({
   "purpose",
   "local_repo_ref",
   "spawn_target_ref",
+  "default_session_template",
   "default_session_template_id",
+  "default_session_template_refs",
   "archive_policy",
   "settings",
   "status",
 }) do
   local invalid = create({ name = "Invalid " .. field, [field] = true })
   assert_eq(invalid.ok, false, "create rejects obsolete " .. field)
-  assert_eq(invalid.error.code, "obsolete_field", "obsolete create field is typed")
+  assert_eq(invalid.error.code, "obsolete_field", "obsolete create field " .. field .. " is typed")
+  assert_true(invalid.error.code ~= "unknown_field", "frozen create field " .. field .. " must not degrade to unknown_field")
 end
 local unknown = create({ name = "Unknown", future_field = true })
 assert_eq(unknown.error.code, "unknown_field", "create rejects unknown fields")
@@ -532,7 +540,7 @@ local spawn_result = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
   branch = "feature/contextual-workspaces",
-  template_id = "implement",
+  session_type_id = "acceptance-package/implement",
   prompt = "Implement this ticket",
   ticket_id = "ticket-example",
 })
@@ -542,9 +550,19 @@ assert_eq(spawn_result.session_id, next_spawn_uuid, "only returned Hub UUID is r
 assert_eq(#spawn_result.workspace.session_refs, #spawn_before.workspace.session_refs + 1, "spawn appends one membership")
 assert_eq(spawn_result.workspace.session_refs[#spawn_result.workspace.session_refs], next_spawn_uuid, "spawn persists returned UUID")
 local spawn_request = spawn_calls[#spawn_calls]
+assert_keys(
+  spawn_request,
+  { "target_id", "branch", "session_type_id", "context" },
+  "managed spawn request carries the exact protocol-6 field set"
+)
 assert_eq(spawn_request.target_id, "tgt_git", "spawn sends semantic target")
 assert_eq(spawn_request.branch, "feature/contextual-workspaces", "spawn sends branch")
-assert_eq(spawn_request.template_id, "implement", "spawn sends effective session type")
+assert_eq(
+  spawn_request.session_type_id,
+  "acceptance-package/implement",
+  "spawn sends the fully qualified effective session type unchanged"
+)
+assert_eq(spawn_request.template_id, nil, "spawn never sends the superseded request field") -- cold-cut negative control
 assert_eq(spawn_request.context.workspace_id, renamed.workspace.id, "spawn sends safe workspace context")
 assert_eq(spawn_request.session_id, nil, "spawn never supplies session id")
 assert_eq(spawn_request.cwd, nil, "spawn never supplies cwd")
@@ -556,10 +574,38 @@ local caller_id_rejected = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
   branch = "caller-id",
-  template_id = "implement",
+  session_type_id = "acceptance-package/implement",
   session_id = "44444444-4444-4444-8444-444444444444",
 })
 assert_eq(caller_id_rejected.error.code, "unknown_field", "spawn rejects caller session id")
+
+-- The superseded request field is rejected before any Hub capability call and
+-- before any membership write; it is never translated.
+local spawn_calls_before_superseded = #spawn_calls
+local membership_before_superseded = show({ id = renamed.workspace.id }).workspace.session_refs
+local superseded_field_rejected = spawn({
+  workspace_id = renamed.workspace.id,
+  target_id = "tgt_git",
+  branch = "superseded-field",
+  template_id = "acceptance-package/implement", -- cold-cut negative control
+})
+assert_eq(superseded_field_rejected.ok, false, "spawn rejects the superseded request field")
+assert_eq(superseded_field_rejected.error.code, "unknown_field", "superseded spawn field is typed unknown_field")
+assert_eq(superseded_field_rejected.fields[1], "template_id", "rejection names the field") -- cold-cut negative control
+assert_eq(#spawn_calls, spawn_calls_before_superseded, "superseded spawn field never reaches the Hub capability")
+assert_eq(
+  table.concat(show({ id = renamed.workspace.id }).workspace.session_refs, ","),
+  table.concat(membership_before_superseded, ","),
+  "superseded spawn field never mutates membership"
+)
+
+local missing_session_type = spawn({
+  workspace_id = renamed.workspace.id,
+  target_id = "tgt_git",
+  branch = "missing-session-type",
+})
+assert_eq(missing_session_type.error.code, "validation_failed", "spawn requires a session type")
+assert_eq(missing_session_type.fields[1], "session_type_id", "missing session type names the current field")
 
 spawn_mode = "reject"
 local membership_before_reject = show({ id = renamed.workspace.id }).workspace.session_refs
@@ -573,7 +619,7 @@ for _, collision in ipairs({
     workspace_id = renamed.workspace.id,
     target_id = "tgt_git",
     branch = collision.branch,
-    template_id = "implement",
+    session_type_id = "acceptance-package/implement",
   })
   assert_eq(rejected_spawn.error.code, collision.kind, "typed Hub rejection kind is preserved")
   assert_eq(rejected_spawn.error.message, collision.message, "typed Hub rejection message is preserved")
@@ -592,7 +638,7 @@ local untyped_rejection = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
   branch = "untyped-rejection",
-  template_id = "implement",
+  session_type_id = "acceptance-package/implement",
 })
 assert_eq(untyped_rejection.error.code, "hub_spawn_rejected", "untyped Hub rejection retains fallback")
 assert_eq(untyped_rejection.error.message, spawn_rejection_message, "untyped Hub rejection retains message")
@@ -607,7 +653,7 @@ local thrown_spawn = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
   branch = "worker-error",
-  template_id = "implement",
+  session_type_id = "acceptance-package/implement",
 })
 assert_eq(thrown_spawn.error.code, "hub_spawn_failed", "worker error is typed")
 assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, #membership_before_reject, "worker error records nothing")
@@ -619,7 +665,7 @@ local persist_failed_spawn = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
   branch = "persistence-failure",
-  template_id = "review",
+  session_type_id = "acceptance-package/review",
 })
 assert_eq(persist_failed_spawn.error.code, "persist_failed", "post-spawn persistence failure is explicit")
 assert_eq(persist_failed_spawn.spawned_session_id, next_spawn_uuid, "exception exposes ungrouped spawned session")
@@ -635,12 +681,12 @@ assert_keys(
   "entity row contains grouping read model only"
 )
 
-local template_calls_before_surface = #template_list_calls
+local session_type_calls_before_surface = #session_type_list_calls
 local surface = handler(spec, "workspaces_surface")({})
 assert_eq(
-  #template_list_calls,
-  template_calls_before_surface + 2,
-  "one surface render lists templates once per enabled Git target"
+  #session_type_list_calls,
+  session_type_calls_before_surface + 2,
+  "one surface render lists session types once per enabled Git target"
 )
 local raw_forms = {}
 collect_type(surface, "form", raw_forms)
@@ -827,19 +873,19 @@ assert_eq(#target_select.slots.options, 2, "spawn point projection includes enab
 assert_eq(target_select.slots.options[1].props.value, "tgt_git", "spawn point uses Hub target id")
 
 presentation_state["workspace-dialog"] = "spawn:" .. renamed.workspace.id .. ":tgt_empty"
-local empty_template_dialog = materialize(surface, presentation_state)
+local empty_session_types_dialog = materialize(surface, presentation_state)
 assert_true(
-  find_node(empty_template_dialog, "botster-workspaces-spawn-empty-" .. renamed.workspace.id .. "-tgt_empty"),
+  find_node(empty_session_types_dialog, "botster-workspaces-spawn-empty-" .. renamed.workspace.id .. "-tgt_empty"),
   "target with no effective session types renders an explicit empty state"
 )
-fail_template_list_for = "tgt_empty"
+fail_session_type_list_for = "tgt_empty"
 local failed_projection_surface = handler(spec, "workspaces_surface")({})
 local failed_projection_dialog = materialize(failed_projection_surface, presentation_state)
 assert_true(
   find_node(failed_projection_dialog, "botster-workspaces-spawn-error-" .. renamed.workspace.id .. "-tgt_empty"),
-  "template projection failure renders an explicit unavailable state"
+  "session-type projection failure renders an explicit unavailable state"
 )
-fail_template_list_for = nil
+fail_session_type_list_for = nil
 presentation_state["workspace-dialog"] = "spawn-target:" .. renamed.workspace.id
 
 local select_target = handler(spec, "select_spawn_target_action")
@@ -864,13 +910,42 @@ assert_true(spawn_form, "target selection installs target-filtered spawn form")
 assert_eq(spawn_form.children[1].props.label, "Spawn point", "spawn form begins with selected spawn point")
 assert_eq(spawn_form.children[3].props.label, "Branch / worktree", "branch/worktree follows spawn point")
 assert_eq(spawn_form.children[4].props.label, "Session type", "effective session type follows branch/worktree")
+assert_eq(spawn_form.children[4].id, "botster-workspaces-spawn-template", "session type select keeps its authored node id")
+assert_eq(spawn_form.children[4].props.name, "session_type_id", "session type select carries the current field name")
 assert_eq(#spawn_form.children[4].slots.options, 2, "session type options are target-filtered")
-for _, request in ipairs(template_list_calls) do
+assert_eq(
+  spawn_form.children[4].slots.options[1].props.value,
+  "acceptance-package/implement",
+  "session type option carries the fully qualified Hub id, not the bare id"
+)
+for _, request in ipairs(session_type_list_calls) do
   assert_true(
     request.target_id == "tgt_git" or request.target_id == "tgt_empty",
-    "every template projection is scoped to an enabled Git target"
+    "every session-type projection is scoped to an enabled Git target"
   )
 end
+
+local spawn_action_calls_before = #spawn_calls
+local spawned_action = handler(spec, "spawn_session_action")({
+  request_id = "request-spawn-session",
+  surface_id = "workspaces",
+  action_id = spawn_form.props.action.id,
+  node_id = spawn_form.id,
+  payload = spawn_form.props.action.payload,
+  values = {
+    ["botster-workspaces-spawn-target-id"] = "tgt_git",
+    ["botster-workspaces-spawn-workspace-id"] = renamed.workspace.id,
+    ["botster-workspaces-spawn-branch"] = "action-adapter",
+    ["botster-workspaces-spawn-template"] = "acceptance-package/review",
+  },
+})
+assert_eq(spawned_action.state, "accepted", "spawn action submits through the authored form nodes")
+assert_eq(#spawn_calls, spawn_action_calls_before + 1, "spawn action issues exactly one Hub capability call")
+assert_eq(
+  spawn_calls[#spawn_calls].session_type_id,
+  "acceptance-package/review",
+  "spawn action forwards the selected session type unchanged"
+)
 
 local accepted_create = create_action({
   request_id = "request-create-valid",

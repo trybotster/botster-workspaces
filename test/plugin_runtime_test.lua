@@ -400,6 +400,20 @@ assert_keys(
   "move schema has one destination identifier"
 )
 
+-- The spawn descriptor is the downstream agent contract, so its published shape
+-- is asserted here and again against real Hub discovery in hub_acceptance_smoke.
+local spawn_schema = registered_tool(spec, "botster_workspaces.spawn").input_schema
+assert_keys(
+  spawn_schema.properties,
+  { "workspace_id", "target_id", "branch", "session_type_id", "prompt", "ticket_id" },
+  "spawn schema publishes the exact migrated property set"
+)
+assert_eq(spawn_schema.type, "object", "spawn schema is an object schema")
+assert_eq(spawn_schema.additionalProperties, false, "spawn schema forbids additional properties")
+assert_eq(table.concat(spawn_schema.required, ","), "workspace_id,target_id,branch,session_type_id", "spawn schema requires the migrated field set in order")
+assert_eq(spawn_schema.properties.session_type_id.type, "string", "spawn schema types session_type_id")
+assert_eq(spawn_schema.properties.template_id, nil, "spawn schema publishes no superseded field") -- cold-cut negative control
+
 local empty_surface = handler(spec, "workspaces_surface")({})
 assert_eq(empty_surface.id, "botster-workspaces-app", "stable app surface renders")
 local initial_materialized = materialize(empty_surface, {})

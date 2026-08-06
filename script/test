@@ -23,6 +23,7 @@ domain_doc = read("docs/workspace-domain.md")
 capabilities_doc = read("docs/capabilities.md")
 gitignore = read(".gitignore")
 hub_flow = read("script/test-hub-flow")
+hub_acceptance_smoke = read("script/hub_acceptance_smoke")
 
 assert(manifest["name"] == "botster-workspaces", "manifest name must be botster-workspaces")
 assert(manifest["kind"] == "plugin", "manifest kind must be plugin")
@@ -74,6 +75,25 @@ assert(entrypoints == [{ "runtime" => "lua", "path" => "plugin.lua", "bootstrap"
 end
 assert(hub_flow.include?("botster-workspaces-acceptance-session-type"), "Hub flow must enable the renamed session-type fixture")
 assert(hub_flow.include?("test\", \"fixtures\", \"session-type-package"), "Hub flow must install the renamed session-type fixture")
+
+# This fixture is the cold-cut negative control: it must keep the superseded
+# manifest key so the real-Hub smoke can prove that key contributes no effective
+# session type. It is pinned to that role rather than merely exempted from the
+# token audit below.
+legacy_negative_control = "test/fixtures/legacy-session-template-manifest/botster-package.json"
+legacy_fixture = JSON.parse(read(legacy_negative_control))
+assert(legacy_fixture["name"] == "botster-workspaces-legacy-manifest-negative", "legacy negative control changed package identity")
+assert(legacy_fixture.key?("session_templates"), "legacy negative control must retain the superseded manifest key")
+assert(!legacy_fixture.key?("session_types"), "legacy negative control must not declare the current manifest key")
+assert(
+  legacy_fixture.fetch("description").include?("cold-cut negative control"),
+  "legacy negative control must declare its purpose in the manifest"
+)
+assert(hub_flow.include?("botster-workspaces-legacy-manifest-negative"), "Hub flow must enable the legacy-manifest negative control")
+assert(
+  hub_acceptance_smoke.include?("unknown_session_type"),
+  "real-Hub smoke must assert the superseded manifest key yields no spawnable session type"
+)
 
 required_plugin_tokens = %w[
   botster_workspaces.create
@@ -261,6 +281,9 @@ scanned_files = %w[
   script/shared_stack_acceptance
   script/validate_shared_stack_inputs
   script/validate_ui_node_contract
+  test/fixtures/legacy-session-template-manifest/botster-package.json
+  test/fixtures/legacy-session-template-manifest/plugin.lua
+  test/fixtures/legacy-session-template-manifest/bin/session.sh
   test/fixtures/session-type-package/botster-package.json
   test/fixtures/session-type-package/plugin.lua
   test/fixtures/session-type-package/bin/session.sh
@@ -305,6 +328,10 @@ frozen_obsolete_keys = %w[
 # Lines that deliberately name a superseded token to prove it is rejected.
 negative_control_marker = "cold-cut negative control"
 cold_cut_files.each do |path|
+  # The legacy-manifest fixture is the negative control itself; its role is pinned
+  # by the explicit assertions above rather than by this scan.
+  next if path == legacy_negative_control
+
   auditable = read(path).lines.reject { |line| line.include?(negative_control_marker) }.join
   frozen_obsolete_keys.each { |key| auditable = auditable.gsub(key, "") }
   forbidden_contract_tokens.each do |token|

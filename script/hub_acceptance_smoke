@@ -11,6 +11,8 @@ PROTOCOL = "botster-hub-daemon-v1"
 PROTOCOL_VERSION = 6
 CONFORMANCE_FIXTURE_REVISION = 31
 SESSION_TYPE_FEATURE = "session_type_entity_subscriptions"
+LEGACY_MANIFEST_PACKAGE = "botster-workspaces-legacy-manifest-negative"
+LEGACY_MANIFEST_SESSION_TYPE_ID = "#{LEGACY_MANIFEST_PACKAGE}/legacy-acceptance"
 
 socket_path = ARGV.fetch(0) do
   warn "usage: script/hub_acceptance_smoke <isolated-current-hub.sock> [workspace-name]"
@@ -246,6 +248,17 @@ assert(
   "stable Workspaces route missing"
 )
 
+# Present only when the isolated flow installed it; the smoke also runs standalone.
+legacy_manifest_package = packages.fetch("packages").find do |candidate|
+  candidate["package_name"] == LEGACY_MANIFEST_PACKAGE
+end
+if legacy_manifest_package
+  assert(
+    legacy_manifest_package["state"] == "enabled",
+    "legacy-manifest negative control must be enabled to prove the key is ignored, not rejected"
+  )
+end
+
 tools = request(socket, { type: "plugin_mcp_list_tools" })
 tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
 %w[
@@ -262,6 +275,37 @@ tool_names = tools.fetch("plugin_tools").map { |tool| tool.fetch("name") }
 ].each do |name|
   assert(tool_names.include?(name), "missing plugin MCP tool #{name}")
 end
+
+# The published spawn descriptor is the downstream agent contract. Name discovery
+# and handler success do not prove a schema-driven agent can construct the
+# migrated call, so assert the exact descriptor the Hub publishes.
+spawn_descriptor = tools.fetch("plugin_tools").find { |tool| tool.fetch("name") == "botster_workspaces.spawn" }
+assert(spawn_descriptor, "Hub published no botster_workspaces.spawn descriptor")
+assert(
+  spawn_descriptor.fetch("description") ==
+    "Atomically ensure a Hub-managed worktree, spawn a session, and record its returned UUID.",
+  "published spawn description drifted: #{spawn_descriptor.fetch("description").inspect}"
+)
+# The Hub serializes McpToolDescriptor with rename_all = "camelCase", so the
+# published key is inputSchema even though the Lua spec authors input_schema.
+spawn_schema = spawn_descriptor.fetch("inputSchema")
+assert(spawn_schema["type"] == "object", "published spawn schema is not an object schema")
+assert(spawn_schema["additionalProperties"] == false, "published spawn schema does not forbid additional properties")
+assert(
+  spawn_schema.fetch("properties").keys.sort == %w[branch prompt session_type_id target_id ticket_id workspace_id],
+  "published spawn properties drifted: #{spawn_schema.fetch("properties").keys.sort.inspect}"
+)
+spawn_schema.fetch("properties").each do |property, definition|
+  assert(definition["type"] == "string", "published spawn property #{property} is not typed string")
+end
+assert(
+  spawn_schema.fetch("required") == %w[workspace_id target_id branch session_type_id],
+  "published spawn required set drifted: #{spawn_schema.fetch("required").inspect}"
+)
+assert(
+  !JSON.generate(spawn_descriptor).include?("template_id"), # cold-cut negative control
+  "published spawn descriptor still advertises the superseded request field"
+)
 
 initial_surface = render_surface(socket)
 types = collect_types(initial_surface)
@@ -543,6 +587,18 @@ assert(
   "effective session type id is not fully qualified: #{session_type_id.inspect}"
 )
 
+# The Hub deserializes local manifests with serde defaults and no
+# deny_unknown_fields, so an enabled package that still declares the superseded
+# manifest key is admitted but contributes no effective session type. Prove that
+# it cannot reach the selector rather than assuming parse-time rejection.
+if legacy_manifest_package
+  offered_session_type_ids = Array(session_type_select.dig("slots", "options")).map { |option| option.dig("props", "value") }
+  assert(
+    offered_session_type_ids.none? { |id| id.to_s.start_with?("#{LEGACY_MANIFEST_PACKAGE}/") },
+    "superseded manifest key contributed an effective session type: #{offered_session_type_ids.inspect}"
+  )
+end
+
 spawn_form = find_node(selected_target.fetch("replacement"), "botster-workspaces-spawn-form-#{workspace_id}-#{target.fetch("target_id")}")
 assert(spawn_form, "target selection did not render the Spawn form")
 rejected_spawn_action = action(
@@ -625,6 +681,25 @@ assert(
   call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == membership_before_failure,
   "superseded spawn request field changed membership"
 )
+
+# The superseded manifest key is not translated into a spawnable session type.
+if legacy_manifest_package
+  legacy_manifest_spawn = call_tool(socket, "botster_workspaces.spawn", {
+    workspace_id: workspace_id,
+    target_id: target.fetch("target_id"),
+    branch: "#{branch}-legacy-manifest",
+    session_type_id: LEGACY_MANIFEST_SESSION_TYPE_ID,
+  })
+  assert(legacy_manifest_spawn["ok"] == false, "superseded manifest key produced a spawnable session type")
+  assert(
+    legacy_manifest_spawn.dig("error", "code") == "unknown_session_type",
+    "superseded manifest key returned #{legacy_manifest_spawn.dig("error", "code").inspect} instead of unknown_session_type"
+  )
+  assert(
+    call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == membership_before_failure,
+    "superseded manifest spawn attempt changed membership"
+  )
+end
 
 removed_spawned = call_tool(socket, "botster_workspaces.spawn", {
   workspace_id: workspace_id,

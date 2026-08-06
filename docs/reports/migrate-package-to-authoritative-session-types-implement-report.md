@@ -6,7 +6,17 @@
 - Target: `tgt_71266a8d976d4535902ffed09c18a7ba` → `trybotster/botster-workspaces`. Resolved from the ticket target, not from the process working directory; the run worktree remote is `https://github.com/trybotster/botster-workspaces.git`.
 - Run: `run_1786035894_642389`, step `botster_stack_implement`, branch `project-pipelines/ticket_1785984128_479155`, base `main` at `7587c7f`.
 - Approved plan: `docs/plans/migrate-package-to-authoritative-session-types.md`, artifact `artifact_1786037699_726580` at plan commit `72e2544`, approved by `review_1786038162_269267`. It supersedes `artifact_1786036783_774551` and the cancelled run `run_1785987292_480836`.
-- Implementation commit: `64b9e99`. PR [#15](https://github.com/trybotster/botster-workspaces/pull/15), linked as `pr_1786039501_692188`.
+- Implementation commits: `64b9e99`, `96d2985`, and the Review-response commit recorded below. PR [#15](https://github.com/trybotster/botster-workspaces/pull/15), linked as `pr_1786039501_692188`.
+
+### Review response
+
+Review `review_1786040646_461844` returned three high findings; all three are fixed rather than argued.
+
+| Finding | Disposition |
+| --- | --- |
+| `finding_1786040646_329148` — real-Hub discovery never proved the renamed public spawn schema | Fixed. `script/hub_acceptance_smoke` now selects the discovered `botster_workspaces.spawn` descriptor and asserts its exact description, object schema, property set and types, required set, `additionalProperties: false`, and absence of `template_id`. The finding was correct and immediately paid for itself: the Hub serializes `McpToolDescriptor` with `rename_all = "camelCase"`, so the published key is `inputSchema` while the Lua spec authors `input_schema` — drift that name-only discovery could never surface. `test/plugin_runtime_test.lua` asserts the same shape locally. |
+| `finding_1786040646_168103` — mandatory gate 2 reported green without its promised real-Hub proof | Fixed, and the finding's Hub reading is confirmed. `LocalPackageManifest` uses `#[serde(flatten)]` with `#[serde(default)] session_types` and no `deny_unknown_fields`, so a legacy `session_templates` key is **ignored, not rejected**. The first pass proved only the request half of gate 2 while claiming the gate green; that was an overbroad claim. New fixture `test/fixtures/legacy-session-template-manifest/` is installed and enabled by `script/test-hub-flow`, and the smoke proves the observed contract: admitted and enabled, zero effective session types offered, and a spawn keyed on its id returns typed `unknown_session_type` with no membership change. The committed plan's gate 2 and step 4 were rewritten from "rejected" to that behavior. |
+| `finding_1786040646_528981` — generated PR footer published a `sess-*` identifier | Fixed. PR #15's body no longer contains the session token; the stable ticket branch remains. Rerunning the repository's four literal leak patterns against the complete live body returns no match, with a known-positive probe confirming the matcher executes. |
 
 ## Guidance applied
 
@@ -32,7 +42,8 @@ Targeted notes that constrained the change:
 | `test/plugin_runtime_test.lua` | Fake boundary exposes only `session_types` and returns fully qualified rows; exact managed-request assertion; `template_id` rejection; three frozen keys assert `obsolete_field`; action-adapter forwarding test. |
 | `script/test` | New required/contract/fixture assertions; scoped cold-cut token audit with exact allowlist; frozen-key presence assertion; scanned-file list extended to both renamed fixture trees. |
 | `script/test-hub-flow` | Renamed fixture path/constant and enabled package name. |
-| `script/hub_acceptance_smoke` | Protocol-6 `DaemonCompatibilityRequirement` handshake; Hub-emitted compatibility assertions; qualified `session_type_id` selection; `/session` entity session-type assertion; `template_id` negative control. |
+| `script/hub_acceptance_smoke` | Protocol-6 `DaemonCompatibilityRequirement` handshake; Hub-emitted compatibility assertions; published `botster_workspaces.spawn` descriptor assertions from real Hub discovery; qualified `session_type_id` selection; `/session` entity session-type assertion; `template_id` and legacy-manifest negative controls. |
+| `test/fixtures/legacy-session-template-manifest/**` | New cold-cut negative control retaining the superseded `session_templates` manifest key, pinned to that role by `script/test` assertions. |
 | `script/shared_stack_acceptance` | `SESSION_TYPE_ID` / `OWNER_SESSION_TYPE_ID`; `.botster/session-types.json` with required descriptor fields; renamed fixture path and package name; `session_type_id` in driver cases and collision proof. |
 | `test/fixtures/session-type-package/**` | Renamed from `session-template-package`; package `botster-workspaces-acceptance-session-type`; `session_types` manifest key with `label`/`role`/`interaction`/`traits`/`lifecycle`. |
 | `test/fixtures/shared-stack-owner-session-type/**` | Renamed from `shared-stack-owner-template`; package `botster-workspaces-shared-stack-owner-session-type`; same manifest shape. |
@@ -69,7 +80,13 @@ Renaming the spawn request field `template_id` → `session_type_id` determinist
 
 4. **`script/test-hub-flow` added to the cold-cut audit file list** (but not to the leak-pattern scan, which it would fail on its `@example.invalid` Git fixture address). It is an active harness that names fixture package ids, so leaving it unaudited would have permitted a surviving alias.
 
-No plan acceptance check was weakened, and no scope was dropped. The plan's committed acceptance checks remain accurate; deviations 1–4 add or sharpen guards rather than replacing them.
+5. **Gate 2's manifest clause corrected from "rejected" to "contributes nothing"** and proven with a real fixture, after Review. See the Review response above. The plan's gate 2 and implementation step 4 were rewritten accordingly.
+
+6. **Published MCP descriptor assertions added** to `script/hub_acceptance_smoke` and `test/plugin_runtime_test.lua`, after Review. The plan's implementation step 4 and acceptance gate 4 were extended accordingly.
+
+No plan acceptance check was weakened, and no scope was dropped. All six deviations are folded back into the committed plan under "Implement-stage plan corrections", per [[implementation deviations must resync committed plan acceptance checks]]; they add or sharpen guards rather than replacing them.
+
+**Correction to the first Implement pass.** That pass reported "all six mandatory merge gates green" while gate 2's legacy-manifest clause had only a static token-audit substitute. The plan's implementation step 4 was worded disjunctively ("an old `session_templates` manifest **or** an old `template_id` request") while acceptance gate 2 was worded conjunctively; I resolved that discrepancy silently in favour of the weaker reading instead of surfacing it. The correct response was to flag the ambiguity. The gate is now proven in full and the plan's wording is no longer ambiguous.
 
 ## Tests and downstream proof
 
@@ -100,6 +117,8 @@ Provenance of the runtime used for every real-Hub result:
 | Revert the capability scope in manifest **and** contract together | `./script/test` exit 1: `botster-package.json retains superseded session-template vocabulary session_template_` |
 | **Real Hub** — restore the pre-protocol-6 compatibility block | `script/test-hub-flow` exit 1: `daemon closed before hello`. Confirms the handshake repair is on the critical path. |
 | **Real Hub** — restore the legacy capability scope | `script/test-hub-flow` exit 1: `package botster-workspaces denied for enable: UngrantedCapability(Capability { surface: SessionActions, scope: Some("session_template_managed_git_spawn") })`. This is the ticket's stated root cause, reproduced and then removed. |
+| **Real Hub** — revert only the published descriptor field, leaving the handler allowlist migrated | `script/test-hub-flow` exit 1: `published spawn properties drifted: ["branch", "prompt", "target_id", "template_id", "ticket_id", "workspace_id"]`. Proves the descriptor assertion is independent of handler behavior. |
+| **Real Hub** — switch the legacy-manifest fixture to the current `session_types` key | `script/test-hub-flow` exit 1: `superseded manifest key contributed an effective session type: ["botster-workspaces-legacy-manifest-negative/legacy-acceptance", ...]`. This is the non-vacuity control: it proves the fixture *can* carry a session type, so its absence under the superseded key is a real observation and not a tautology. |
 
 ### Unproven at merge — by design, owned elsewhere
 
@@ -123,3 +142,7 @@ Neither item below is a gate on this ticket, and neither was weakened, skipped, 
 3. **New gotcha, now confirmed by ablation.** A Botster daemon client's `DaemonHello.compatibility` is `#[serde(default)]` at the field level but strict inside `DaemonCompatibilityRequirement`, so a *stale-but-present* block fails the handshake (`daemon closed before hello`) while omitting the block entirely succeeds. Nothing in the vault records this asymmetry, and the failure reads as a package defect rather than a client-harness defect.
 4. **New convention candidate.** A cold-cut token audit needs an exact allowlist for frozen rejection vocabulary *and* an explicit marker for negative controls, because a cold cut that must prove the old token is rejected necessarily writes that token in an audited file. A bare substring audit invites deleting the very keys it should protect.
 5. **New convention candidate.** When a package rename breaks first-party consumers that key on a request field name, the owner work belongs in separate tickets rather than folded into mid-flight ones — folding recreates circular dependencies. Related: a ticket that must stay open until a dependent proves something is a deadlock whenever that dependent carries a blocking edge back.
+
+6. **New gotcha, found by the Review-driven descriptor assertion.** A Botster plugin's MCP tool descriptor is authored in Lua as `input_schema` but published over the daemon protocol as `inputSchema`, because Hub serializes `McpToolDescriptor` with `rename_all = "camelCase"`. A harness that reads the in-memory registered spec and a harness that reads real Hub discovery therefore key on different names, and only the latter is the downstream agent contract. Nothing in the vault records this.
+
+7. **New convention candidate, from `finding_1786040646_168103`.** "The old key is rejected" and "the old key contributes nothing" are different claims with different proofs, and a cold-cut migration should establish which one the host actually implements before asserting either. Hub `LocalPackageManifest` uses `#[serde(flatten)]` plus per-field defaults, which makes `deny_unknown_fields` unavailable and silent-ignore the only possible behavior — so a superseded manifest key fails closed at the *consumption* seam, never at parse time.

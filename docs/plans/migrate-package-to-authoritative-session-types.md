@@ -8,9 +8,9 @@
 - Repository charter: [[botster-workspaces-playbook]].
 - Role and stack context: [[planner-playbook]], [[botster-planner-playbook]], [[botster repository playbooks are ownership charters composed with role overlays]], [[botster-architecture]], [[cli-patterns]], [[spa-patterns]], [[vault example paths are not repository placement conventions]].
 - Targeted guidance: [[workspaces are semantic groupings by purpose not by branch]], [[botster workspace records are plugin owned references not hub authority]], [[botster plugin entities are canonical for plugin-owned dynamic state]], [[botster package manifests and lockfiles should declare capabilities and provenance]], [[botster hub gravity must be watched before it becomes the new monolith]], [[acceptance harness region oracles must key on node identity not concatenated text]], [[plugin ui action ids are a two site change and hub fails closed on unregistered ids]], [[plugin capability tests must validate against real lua runtime table not injected stubs]], [[workspace session templates are hub owned capabilities callable from lua workers]], [[session template override sources use package device repo explicit precedence]], [[cold turkey migrations eliminate dual code paths and version suffixes]], [[a regression test must be shown to go red with the fix reverted]].
-- Project Pipelines package/plugin code and workflow policy are not changing, so [[project-pipelines-playbook]] is intentionally not a task-surface overlay. Project Pipelines is used only to record this plan, gate, artifact, question, and checklist evidence.
+- Workflow-policy overlay: [[project-pipelines-playbook]], plus [[project pipeline step activation gates open ticket dependencies before side effects]], [[implement gate must verify committed work and pr link before review]], [[plan review must verify a plan artifact exists before trusting gate summaries]], and [[project pipelines mcp create calls can time out after committing]]. No Project Pipelines package or plugin source changes here, but this plan's closure and PR-link decisions are governed by that charter, so it is loaded as a real overlay rather than declared out of scope. The first revision of this plan omitted it and that omission is what let a lifecycle contradiction reach Plan Review.
 
-This revision supersedes the plan approved on the cancelled run `run_1785987292_480836`. That plan's technical migration content is retained; its ordering decision is replaced by the answer to `question_1786036155_624060`.
+This revision supersedes the plan approved on the cancelled run `run_1785987292_480836` and the first revision of this run (commit `a8cefe9`, artifact `artifact_1786036783_774551`). The technical migration content is unchanged; the closure model is replaced per `question_1786037262_451218`.
 
 ## Verified contract facts
 
@@ -31,13 +31,22 @@ Local baseline: `./script/test` is green at `6651083` (`test/plugin_runtime_test
 
 `script/hub_acceptance_smoke` sends a `compatibility` block using the pre-protocol-6 field names `minimum_protocol_version` / `minimum_conformance_fixture_revision` at lines 100-109 and 165-182. `DaemonHello.compatibility` is `#[serde(default)]` but its inner `DaemonCompatibilityRequirement` (`crates/botster-hub-client/src/lib.rs:500-507`) has no per-field defaults, so a *present* block missing `protocol_version` fails deserialization and the handshake dies before Workspaces loads. This is not a stylistic cleanup — the real-Hub smoke cannot connect to a protocol-6 Hub until it is fixed. `script/shared_stack_acceptance` is unaffected; its hello at line 85 sends only `protocol`.
 
-## Dependency state and ordering decision
+## Dependency state, ordering, and closure
 
 The Hub prerequisite `ticket_1785970233_236046` is closed against Hub target `tgt_7e208a0c76a44980a83b63af976b1f22`, merged as PR #193 at `8a60bd58`. The matching public artifact is `@trybotster/hub-test-support@0.1.24`, integrity `sha512-n0/DDMw5PmnFdxp54dk4Y4pdAM0VfotQblBnamqkViwbmJgmSS7ZrAFPskzOcVZ70hHgJdfHaH4UwArwP0DvXw==`. It is the sole registered dependency of this ticket.
 
-The prior run blocked implementation on Web `ticket_1785970233_750553` and TUI `ticket_1785970234_132113`. That ordering was circular: `ticket_1785976581_841608` states botster-tui's Workspaces lanes cannot pass until *this* ticket lands, while this ticket was told to wait for botster-tui. `question_1786036155_624060` resolved it — implement now, break the cycle in the direction botster-tui already assumes, and keep the downstream proofs mandatory for ticket closure rather than waived.
+Ordering took two corrections, both of which removed a circular dependency:
 
-**The PR merges on real-Hub proof. The ticket does not close until the registered downstream proofs land.** These are distinct gates and must not be collapsed.
+1. The cancelled run blocked implementation on Web `ticket_1785970233_750553` and TUI `ticket_1785970234_132113`, while `ticket_1785976581_841608` says botster-tui's Workspaces lanes cannot pass until *this* ticket lands. `question_1786036155_624060` broke that cycle in the direction botster-tui already assumes: implement now, botster-workspaces-only.
+2. That answer still held this ticket open until the downstream proofs landed — which was itself a deadlock, because `ticket_1786036326_597046` and `ticket_1786036336_442121` both carry blocking dependency edges on this ticket, and `project_pipelines_start_run` genuinely refuses to start a run with open blocking dependencies. Neither follow-up could begin until this ticket closed; this ticket would not close until they finished. `question_1786037262_451218` withdrew the hold.
+
+### Closure model
+
+**This ticket closes automatically when its own botster-workspaces PR merges, and that is correct.** The authoritative `botster-project-pipelines` `origin/main` (`8990969`) `handle_pr_merged` sets both `run.status` and `ticket.status` to `closed` for a linked PR, asserted at its `script/test:1220-1221`. Verified from source, not assumed. Linking the PR before Review stays as planned; there is no longer any conflict in doing so.
+
+The ticket's scope is the package migration, and that is complete at merge. Its proof is this repository's own real-Hub gates. The botster-tui and botster-web lanes are **unproven at merge by design** — they are downstream obligations owned by their own tickets, not closure conditions here. Recording them as gaps keeps the trail durable; gating on them would prevent the very proofs they describe.
+
+Do not weaken or skip a botster-workspaces merge gate to compensate for the unproven downstream set. The unproven set is downstream only.
 
 ## Scope
 
@@ -133,12 +142,14 @@ Under the charter, botster-workspaces does not own either repository, so this ru
 
 | Gap | Owner repository | Ticket |
 | --- | --- | --- |
-| TUI acceptance-driver field rename, plus un-skip and proof of all three `script/test-live-hub` Workspaces lanes | `trybotster/botster-tui` | `ticket_1786036326_597046` (blocked on this ticket **and** `ticket_1785976581_841608`) |
-| Web shared-hub browser-driver field rename and smoke proof | `trybotster/botster-web` | `ticket_1786036336_442121` (blocked on this ticket) |
+| TUI acceptance-driver field rename at `crates/botster-tui/src/app.rs:3893`, plus un-skip and proof of all three `script/test-live-hub` Workspaces lanes | `trybotster/botster-tui` | `ticket_1786036326_597046` (blocked on this ticket **and** `ticket_1785976581_841608`) |
+| Web shared-hub browser-driver field rename at `workspaces-shared-hub-browser-helpers.mjs:69` and `-smoke.mjs:135`, **and** the stale repo fixture at `-smoke.mjs:152-154` which still writes `.botster/session-templates.json` with key `session_templates` and omits the now-required `role`/`interaction`/`lifecycle` | `trybotster/botster-web` | `ticket_1786036336_442121` (blocked on this ticket) |
+
+The third item was found by the `ticket_1785970234_234515` Implement agent, not by this run, and confirmed here at `botster-web` `origin/main` `9753297`. It lives in the same file as the rename and shares the stale-driver subject, so it belongs with that ticket; splitting them would leave the lane broken either way.
 
 The three TUI lanes need two independent conditions, and only one of them is this ticket's: Workspaces must declare the granted scope, **and** botster-tui must repin to protocol 6, because `ensure_compatible` now demands exact protocol equality and botster-tui `origin/main` (`fe03a90`) is still pinned to Hub rev `e8febabf` = protocol 4 / revision 27. A lane that still fails after this ticket lands is not automatically a Workspaces defect.
 
-The ticket's premise that the lanes are already “marked blocked-pending-THIS-TICKET” is not yet true on botster-tui `origin/main` — `script/test-live-hub` currently carries no skip markers, and `ticket_1785976581_841608` holds only a plan commit. The lane obligation is therefore forward-looking, and the closure gate below is written against the tickets rather than against markers that do not exist yet.
+The ticket's earlier premise that the lanes are already “marked blocked-pending-THIS-TICKET” is not true on botster-tui `origin/main` — `script/test-live-hub` currently carries no skip markers, and `ticket_1785976581_841608` holds only a plan commit. The lane obligation is therefore forward-looking, which is a further reason it is recorded against owner tickets rather than against markers that do not exist yet.
 
 ## Assumptions and unknowns
 
@@ -166,27 +177,33 @@ If the running Hub's exact package schema contradicts the merged source or publi
 
 ## Acceptance checks
 
-**Gates 1-5 must pass before the PR merges.**
+**Gates 1-6 are mandatory merge gates. All must be green before the PR merges, and merging closes this ticket.**
 
 1. **Local gate.** `./script/test` passes Lua behavior, manifest/contract synchronization, active vocabulary guards, action-registration ablations, Ruby syntax checks, and shared-stack input validation. Baseline before implementation was green at `6651083`.
 2. **Cold-cut negative proof.** A `template_id` Workspaces spawn request returns `unknown_field`, makes zero session-type capability calls, and records no membership. An old `session_templates` fixture is rejected by the protocol-6 Hub rather than admitted as an alias. Separately, each frozen create argument (`default_session_template`, `default_session_template_id`, `default_session_template_refs`) returns `obsolete_field`, explicitly not `unknown_field`, while the existing persisted-state `legacy_workspace_schema` regression stays green. Each negative assertion is demonstrated red against pre-change behavior.
-3. **Published contract proof.** In a new temporary npm consumer, install exactly `@trybotster/hub-test-support@0.1.24` from the normal registry, retain lock/integrity evidence, import `metadata`, run `verifyPackageAssets()`, and assert protocol 6, conformance revision 31, required `session_type_entity_subscriptions`, and generated `session_type_id` / session-type DTOs. No tarball, no local or sibling override.
+3. **Published contract proof.** In a new temporary npm consumer, install exactly `@trybotster/hub-test-support@0.1.24` from the normal registry and retain lock/integrity evidence. No tarball, no local or sibling override. Assert against the package's *actual* exported surfaces — verified from a clean install during planning, because `metadata` has no `features` field and asserting `metadata.features` would silently compare `undefined`:
+   - `verifyPackageAssets()` returns `{ ok: true, failures: [] }`.
+   - `metadata.protocol === "botster-hub-daemon-v1"`, `metadata.protocol_version === 6`, `metadata.conformance_fixture_revision === 31`.
+   - `readFirstPartyClientSupportMatrix().required_features` includes `session_type_entity_subscriptions` (it is in both `required_features` and `supported_features`; assert the required list, since that is what makes a stale client fail).
+   - `readDaemonProtocolTypescript()` contains `session_types`, `session_type_id`, and `resolved_session_type`, and contains **zero** occurrences of `session_template` — the cold-cut assertion.
 4. **Real package path.** With `BOTSTER_HUB_BIN` and `BOTSTER_SESSION_WORKER_BIN` built from a clean checkout at Hub `8a60bd5`, `script/test-hub-flow` starts one fresh Hub, admits the Git target, installs and enables the renamed session-type fixture and this package, renders the target-first surface, lists effective session types through the real worker capability table, submits the returned fully qualified `session_type_id`, creates or reuses the managed worktree as expected, spawns, and appends exactly the returned `result.session_id` only after success. Package enable succeeding is itself proof that the scope migration is correct, since Hub `8a60bd58` hard-denies the legacy scope.
 5. **Runtime truth.** The same smoke asserts Hub-emitted protocol 6 / revision 31 / `session_type_entity_subscriptions` at hello, observes the spawned `/session` entity carrying the selected `session_type_id`, preserves the UUID through plugin reload, records nothing on typed spawn rejection, retains ended history, and leaves Hub sessions, worktrees, and repositories untouched by workspace deletion.
 6. **Final audit.** `git diff --check`, a clean `git status --short` after committed changes, and a scoped `rg` over active source, manifests, tests, scripts, and current docs showing no `session_templates`, `session_template_`, `template_id`, or `session-templates.json` tokens outside the exact frozen `OBSOLETE_FIELDS` allowlist. Historical plan/report matches and the three legacy rejection keys are documented, not treated as live aliases.
 
-**Gates 7-8 block closure of this ticket. They do not block the PR, and they must not be weakened to make them pass.**
+### Unproven at merge — by design, owned elsewhere
 
-7. **Generic-consumer proof (this repository).** `script/test-hub-flow shared-stack validate-inputs ...` and `shared-stack run ...` with immutable protocol-6 provenance, driving the renamed form field from the authored tree through generic Web and TUI consumers without hard-coded template vocabulary or renderer-specific package state. Currently unrunnable: `verify_contract_provenance!` requires both clients pinned to the supplied Hub, and botster-web `origin/main` (`9753297`) pins `@trybotster/hub-test-support` 0.1.21 while botster-tui `origin/main` (`fe03a90`) pins Hub rev `e8febabf`. Unblocked by `ticket_1786036336_442121` and `ticket_1786036326_597046`.
-8. **TUI live-hub lanes.** All three `script/test-live-hub workspaces` profiles — `installed-driver`, `plumbing`, and `lifecycle` — green against a protocol-6 Hub with the migrated package. Owned by `ticket_1786036326_597046`, which is blocked on both this ticket and `ticket_1785976581_841608`.
+The following are **not** gates on this ticket and must not be treated as such. They are downstream obligations that become runnable only after this ticket closes. The implementation report must name each one, with its owning ticket id and the reason it is unproven, so a missing proof reads as a known gap and never as a pass.
 
-Do not close this ticket on the strength of the PR merging. Do not re-apply a skip to make a lane appear green.
+- **Generic-consumer profile (this repository's script).** `script/test-hub-flow shared-stack validate-inputs ...` and `shared-stack run ...` drive the renamed form field from the authored tree through generic Web and TUI consumers. Unrunnable today: `verify_contract_provenance!` requires both clients pinned to the supplied Hub, and botster-web `origin/main` (`9753297`) pins `@trybotster/hub-test-support` 0.1.21 while botster-tui `origin/main` (`fe03a90`) pins Hub rev `e8febabf`. The script itself is migrated by this ticket; only its execution waits. Unblocked by `ticket_1786036336_442121` and `ticket_1786036326_597046`.
+- **TUI live-hub lanes.** All three `script/test-live-hub workspaces` profiles — `installed-driver`, `plumbing`, `lifecycle` — against a protocol-6 Hub with the migrated package. Owned by `ticket_1786036326_597046`. These need two independent conditions: this ticket landing so the granted scope is declared, and botster-tui repinning to protocol 6 so exact protocol equality is satisfiable. The second is independent of anything Workspaces does, so a still-failing lane after this ticket merges is not automatically a Workspaces defect.
+
+Do not weaken or skip a merge gate to compensate for the unproven downstream set, and do not re-apply a skip to make a lane appear green.
 
 ## Required evidence and artifacts
 
-- Implementation report under `docs/reports/`, naming changed files, Hub/npm provenance, exact commands and results, negative proofs, the three named downstream gaps with their owner ticket ids, and any deviation from this plan.
-- Project Pipelines gate evidence with target/repository routing, this plan URI, dependency state, checklist id, assumptions, and verification results.
-- PR linked before Review, per the pipeline merge policy.
+- Implementation report under `docs/reports/`, naming changed files, Hub/npm provenance, exact commands and results, negative proofs, the downstream gaps unproven at merge with their owner ticket ids (`ticket_1786036326_597046`, `ticket_1786036336_442121`), and any deviation from this plan.
+- Project Pipelines gate evidence with target/repository routing, this plan URI **and its artifact id**, dependency state, checklist id, assumptions, and verification results. Per [[plan review must verify a plan artifact exists before trusting gate summaries]], the artifact id must appear in step completion evidence, not only in the gate summary.
+- PR linked before Review, per the pipeline merge policy and [[implement gate must verify committed work and pr link before review]]. Merging that PR closes this run and ticket automatically; that is the intended terminal state.
 
 ## Vault gaps worth capturing
 
@@ -194,5 +211,7 @@ Do not close this ticket on the strength of the PR merging. Do not re-apply a sk
 - The same note also still says workspace plugins "can normalize legacy `default_session_template_id` into `default_session_template_refs`". The repository already cold-cut those to rejected `OBSOLETE_FIELDS` under the five-field record, so that sentence is stale independently of this ticket. Recorded as a convention conflict; the resolution is to supersede the note, not to soften the repository's reduced schema.
 - Candidate new gotcha: a Botster daemon client's `DaemonHello.compatibility` is `#[serde(default)]` at the field level but strict inside, so a *stale-but-present* compatibility block fails the handshake while omitting it entirely succeeds. That asymmetry cost real diagnosis time here and is not recorded anywhere in the vault.
 - Candidate new convention: when a package rename breaks first-party consumers that key on a request field name, the owner-work split belongs in separate tickets rather than folded into mid-flight ones, because folding recreates circular dependencies. This run's `question_1786036155_624060` exchange is the worked example.
+- Candidate new convention: a ticket that must stay open until a dependent ticket proves something is a deadlock whenever that dependent carries a blocking edge back, because `project_pipelines_start_run` enforces those edges. "This work is done" and "everything this work implies is proven" are different claims and belong on different tickets. `question_1786037262_451218` is the worked example, and this was the third circular dependency caught in this project.
+- Applied, not a gap: [[project pipelines mcp create calls can time out after committing]] already covers the failure this run hit — `create_vault_checklist` and `create_checklist` returned `plugin worker invoke timeout` while committing server-side, and retrying produced five checklists. The note prescribes an owner-scoped read before any retry; this run retried first and read after, which is why four empty duplicates exist (renamed `VOID 1/4`..`4/4`, pointing at `checklist_1786036694_412664`). No new capture is warranted — the vault was right and the run did not consult it early enough. Worth noting only because the same defect will meet the Implement step.
 
 Do not capture implementation guesses before the live verification lands.

@@ -576,27 +576,26 @@ local function spawn_targets()
   return targets, nil
 end
 
-local function templates_for_target(target_id)
+local function session_types_for_target(target_id)
   local capability = botster and botster.capabilities
-    and botster.capabilities.session_templates
+    and botster.capabilities.session_types
   if not capability or type(capability.list) ~= "function" then
-    return nil, error_result("session_templates_unavailable", "Hub session-template projection is unavailable")
+    return nil, error_result("session_types_unavailable", "Hub session-type projection is unavailable")
   end
   local ok, result = pcall(capability.list, { target_id = target_id })
   if not ok or type(result) ~= "table" then
-    return nil, error_result("session_templates_failed", "failed to list effective Hub session types")
+    return nil, error_result("session_types_failed", "failed to list effective Hub session types")
   end
-  local source = type(result.templates) == "table" and result.templates or result
-  local templates = {}
-  for _, template in ipairs(source) do
-    if type(template) == "table" and trim(template.template_id or template.id) then
-      templates[#templates + 1] = {
-        id = trim(template.template_id or template.id),
-        label = trim(template.label or template.name) or trim(template.template_id or template.id),
+  local session_types = {}
+  for _, session_type in ipairs(result) do
+    if type(session_type) == "table" and trim(session_type.session_type_id) then
+      session_types[#session_types + 1] = {
+        id = trim(session_type.session_type_id),
+        label = trim(session_type.label) or trim(session_type.session_type_id),
       }
     end
   end
-  return templates, nil
+  return session_types, nil
 end
 
 local function spawn_session(arguments)
@@ -604,7 +603,7 @@ local function spawn_session(arguments)
     workspace_id = true,
     target_id = true,
     branch = true,
-    template_id = true,
+    session_type_id = true,
     prompt = true,
     ticket_id = true,
   })
@@ -615,7 +614,7 @@ local function spawn_session(arguments)
   local workspace_id = trim(arguments.workspace_id)
   local target_id = trim(arguments.target_id)
   local branch = trim(arguments.branch)
-  local template_id = trim(arguments.template_id)
+  local session_type_id = trim(arguments.session_type_id)
   local missing = {}
   if not workspace_id then
     missing[#missing + 1] = "workspace_id"
@@ -626,8 +625,8 @@ local function spawn_session(arguments)
   if not branch then
     missing[#missing + 1] = "branch"
   end
-  if not template_id then
-    missing[#missing + 1] = "template_id"
+  if not session_type_id then
+    missing[#missing + 1] = "session_type_id"
   end
   if #missing > 0 then
     return error_result("validation_failed", "spawn requires workspace, spawn point, branch, and session type", missing)
@@ -643,14 +642,14 @@ local function spawn_session(arguments)
   end
 
   local capability = botster and botster.capabilities
-    and botster.capabilities.session_templates
+    and botster.capabilities.session_types
   if not capability or type(capability.ensure_worktree_and_spawn) ~= "function" then
     return error_result("managed_git_spawn_unavailable", "Hub atomic managed-Git spawn is unavailable")
   end
   local ok, result = pcall(capability.ensure_worktree_and_spawn, {
     target_id = target_id,
     branch = branch,
-    template_id = template_id,
+    session_type_id = session_type_id,
     context = {
       workspace_id = workspace_id,
       prompt = trim(arguments.prompt),
@@ -880,14 +879,14 @@ local function spawn_session_action(arguments)
     workspace_id = form_value(arguments, "workspace_id", "botster-workspaces-spawn-workspace-id"),
     target_id = form_value(arguments, "target_id", "botster-workspaces-spawn-target-id"),
     branch = form_value(arguments, "branch", "botster-workspaces-spawn-branch"),
-    template_id = form_value(arguments, "template_id", "botster-workspaces-spawn-template"),
+    session_type_id = form_value(arguments, "session_type_id", "botster-workspaces-spawn-template"),
     prompt = form_value(arguments, "prompt", "botster-workspaces-spawn-prompt"),
     ticket_id = form_value(arguments, "ticket_id", "botster-workspaces-spawn-ticket"),
   }, true, {
     workspace_id = "botster-workspaces-spawn-workspace-id",
     target_id = "botster-workspaces-spawn-target-id",
     branch = "botster-workspaces-spawn-branch",
-    template_id = "botster-workspaces-spawn-template",
+    session_type_id = "botster-workspaces-spawn-template",
   })
 end
 
@@ -1009,7 +1008,7 @@ local function create_dialog()
   )
 end
 
-local function workspace_dialogs(workspace, rows, targets, templates_by_target)
+local function workspace_dialogs(workspace, rows, targets, session_types_by_target)
   local move_destinations = {}
   for _, row in ipairs(rows) do
     if row.id ~= workspace.id then
@@ -1179,8 +1178,8 @@ local function workspace_dialogs(workspace, rows, targets, templates_by_target)
   end
 
   for _, target in ipairs(targets) do
-    local projection = templates_by_target[target.id]
-    local templates = projection.templates
+    local projection = session_types_by_target[target.id]
+    local session_types = projection.session_types
     local spawn_body
     if projection.error then
       spawn_body = {
@@ -1193,7 +1192,7 @@ local function workspace_dialogs(workspace, rows, targets, templates_by_target)
           },
         },
       }
-    elseif #templates == 0 then
+    elseif #session_types == 0 then
       spawn_body = {
         {
           type = "empty_state",
@@ -1231,9 +1230,9 @@ local function workspace_dialogs(workspace, rows, targets, templates_by_target)
             ),
             select_input(
               "botster-workspaces-spawn-template",
-              "template_id",
+              "session_type_id",
               "Session type",
-              templates
+              session_types
             ),
             text_input("botster-workspaces-spawn-prompt", "prompt", "Prompt"),
             text_input("botster-workspaces-spawn-ticket", "ticket_id", "Ticket"),
@@ -1380,7 +1379,7 @@ local function session_groups(workspace)
   }
 end
 
-local function workspace_detail(workspace, rows, targets, templates_by_target)
+local function workspace_detail(workspace, rows, targets, session_types_by_target)
   local actions = {
     button_node(
       "botster-workspaces-spawn-" .. workspace.id,
@@ -1428,7 +1427,7 @@ local function workspace_detail(workspace, rows, targets, templates_by_target)
       },
     },
   }
-  for _, dialog in ipairs(workspace_dialogs(workspace, rows, targets, templates_by_target)) do
+  for _, dialog in ipairs(workspace_dialogs(workspace, rows, targets, session_types_by_target)) do
     body[#body + 1] = dialog
   end
   return {
@@ -1521,12 +1520,12 @@ workspaces_surface = function()
   end
   local rows = sorted_rows(state)
   local targets = spawn_targets() or {}
-  local templates_by_target = {}
+  local session_types_by_target = {}
   for _, target in ipairs(targets) do
-    local templates, template_error = templates_for_target(target.id)
-    templates_by_target[target.id] = {
-      templates = templates or {},
-      error = template_error,
+    local session_types, session_type_error = session_types_for_target(target.id)
+    session_types_by_target[target.id] = {
+      session_types = session_types or {},
+      error = session_type_error,
     }
   end
   local body = {
@@ -1534,7 +1533,7 @@ workspaces_surface = function()
     create_dialog(),
   }
   for _, workspace in ipairs(state.workspaces) do
-    body[#body + 1] = workspace_detail(workspace, rows, targets, templates_by_target)
+    body[#body + 1] = workspace_detail(workspace, rows, targets, session_types_by_target)
   end
   return {
     type = "panel",
@@ -1768,11 +1767,11 @@ return botster.register({
           workspace_id = { type = "string" },
           target_id = { type = "string" },
           branch = { type = "string" },
-          template_id = { type = "string" },
+          session_type_id = { type = "string" },
           prompt = { type = "string" },
           ticket_id = { type = "string" },
         },
-        required = { "workspace_id", "target_id", "branch", "template_id" },
+        required = { "workspace_id", "target_id", "branch", "session_type_id" },
         additionalProperties = false,
       },
       handler = "spawn_session",

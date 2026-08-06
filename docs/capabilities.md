@@ -7,7 +7,7 @@ The package requests:
 - `mcp`
 - `plugin_db` scoped to `botster-workspaces`
 - `surfaces`
-- `session_actions` scoped to `session_template_managed_git_spawn`
+- `session_actions` scoped to `session_type_managed_git_spawn`
 
 It requests no filesystem, shell, raw process, terminal, or lifecycle
 authority.
@@ -21,12 +21,17 @@ UiNode actions.
 ## Hub-Owned Authority
 
 The Hub owns admitted spawn points, target-filtered effective session types,
-repositories, branches, managed worktrees, locks, rollback, canonical session
-UUIDs, process and PTY lifecycle, terminals, and lifecycle truth.
+their package/device/repo source precedence and editability, their role,
+interaction, trait, and lifecycle taxonomy, the fully qualified
+`session_type_id`, repositories, branches, managed worktrees, locks, rollback,
+canonical session UUIDs, process and PTY lifecycle, terminals, and lifecycle
+truth.
 
 The plugin may read `spawn_targets.list` and target-filtered
-`session_templates.list`. The only privileged mutation it invokes is
-`session_templates.ensure_worktree_and_spawn`.
+`session_types.list`. The only privileged mutation it invokes is
+`session_types.ensure_worktree_and_spawn`, keyed by the `session_type_id` the
+Hub returned. The plugin displays Hub-provided session-type presentation and
+never derives or overrides that semantic truth.
 
 ## Failure Atomicity
 

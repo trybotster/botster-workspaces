@@ -1,8 +1,9 @@
 {
-  "name": "botster-workspaces-acceptance-template",
+  "name": "botster-workspaces-legacy-manifest-negative",
   "version": "0.0.0",
   "kind": "plugin",
   "botster": ">=0.1.0",
+  "description": "cold-cut negative control: a pre-protocol-6 manifest retained on purpose to prove the superseded key contributes no effective session type.",
   "source": { "type": "path", "path": "." },
   "capabilities": [],
   "entrypoints": [
@@ -10,7 +11,7 @@
   ],
   "session_templates": [
     {
-      "id": "workspace-acceptance",
+      "id": "legacy-acceptance",
       "target_id": "workspaces-acceptance",
       "command": "bin/session.sh",
       "context": ["workspace_id", "prompt", "ticket_id", "branch_name"]

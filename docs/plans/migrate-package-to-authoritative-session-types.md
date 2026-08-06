@@ -18,6 +18,13 @@ The normal npm registry publishes the corresponding downstream contract as `@try
 
 No additional cross-repository implementation is part of this run. A missing or incompatible Hub artifact is a dependency failure to report against the Hub target, not permission to patch Hub from this worktree.
 
+Two first-party client prerequisites are also registered against their owning repository targets:
+
+- `ticket_1785970233_750553`, “Web: manage authoritative Hub session types”, target `tgt_40abcf71ccf049f4ac0c99953a799869` (`trybotster/botster-web`).
+- `ticket_1785970234_132113`, “TUI: manage and launch authoritative Hub session types”, target `tgt_c3d470bab78549df920a41e8fb0e58d8` (`trybotster/botster-tui`).
+
+Both are blocking dependencies. Workspaces implementation must wait until they close with Web and TUI pinned to the protocol-6 Hub/UI contract. Current Web (`@trybotster/hub-test-support@0.1.21`, protocol 4/revision 28) and TUI (`botster-hub-client` revision `e8febab`, protocol 4/revision 27) cannot satisfy `script/shared_stack_acceptance`: provenance checks fail and the protocol-6 Hub requires `session_type_entity_subscriptions`. This run does not defer or waive the charter-required shared-stack gate.
+
 ## Scope
 
 Cold-replace the active Workspaces package contract with Hub session-type vocabulary:
@@ -26,7 +33,7 @@ Cold-replace the active Workspaces package contract with Hub session-type vocabu
 2. Change package and repository acceptance declarations from `session_templates` to `session_types`, including `.botster/session-types.json`, and supply the authoritative semantic descriptor fields required by protocol 6 (`role`, `interaction`, `traits`, and `lifecycle`) while preserving launch/context fields.
 3. Change the production Lua boundary from `botster.capabilities.session_templates` to `botster.capabilities.session_types`.
 4. Consume list rows only through `session_type_id`; remove `template_id` / bare-`id` list-row fallbacks and result-wrapper fallbacks rather than retaining aliases.
-5. Rename the Workspaces spawn request, MCP input schema, form field, node ids, locals, errors, and active fixture/test vocabulary from template terms to `session_type_id` / session types. Keep `session_id` only where it denotes the canonical spawned session UUID.
+5. Rename the Workspaces spawn request, MCP input schema, form field name, locals, errors, and active fixture/test vocabulary from template terms to `session_type_id` / session types. Keep `session_id` only where it denotes the canonical spawned session UUID, and keep authored node identities stable.
 6. Preserve the existing target-first, Hub-owned managed-Git operation and failure atomicity: call only `session_types.ensure_worktree_and_spawn`, append exactly `result.session_id` after success, and record nothing on rejection or worker failure.
 7. Update active package documentation, contract fixtures, repository test guards, and both real-Hub acceptance harnesses to describe and exercise the new contract.
 
@@ -36,6 +43,8 @@ Cold-replace the active Workspaces package contract with Hub session-type vocabu
 - No session-type CRUD, source precedence, descriptor taxonomy, spawn admission, Git/worktree policy, or lifecycle authority in Workspaces; all remain Hub-owned.
 - No changes to the five-field workspace record, membership semantics, plugin.db schema, workspace entity family, `/session` lifecycle bindings, surface action ids, or grouping-only deletion.
 - No compatibility aliases, dual manifest keys, dual Lua capability tables, acceptance of `template_id`, or fallback decoding of old list rows.
+- No rename of the authored `botster-workspaces-spawn-template` node id. It is stable presentation identity, not a request/result field; the form field it carries changes to `session_type_id`.
+- No rename or deletion of `plugin.lua`'s `OBSOLETE_FIELDS` keys `default_session_template`, `default_session_template_id`, and `default_session_template_refs`. They are frozen pre-production workspace-record keys that must continue to produce `legacy_workspace_schema`, not active Hub vocabulary.
 - No npm/build toolchain added to this Lua package. The published npm artifact is consumed in a clean temporary verification consumer, not made a production dependency.
 - Existing `docs/plans/` and `docs/reports/` files that describe completed historical tickets remain historical artifacts. The cold-cut token audit covers current code, manifests, fixtures, scripts, README, and reference docs; it does not rewrite history.
 
@@ -53,14 +62,14 @@ Cold-replace the active Workspaces package contract with Hub session-type vocabu
 - In `plugin.lua`, rename the target-filtered projection helper/state from templates to session types and call only `botster.capabilities.session_types.list({ target_id = ... })`.
 - Accept only list rows with nonblank `session_type_id`; use the existing presentation label but do not fall back to `template_id`, bare `id`, `result.templates`, or other legacy shapes.
 - Change `botster_workspaces.spawn` and its registered input schema to require `session_type_id`. Reject `template_id` as `unknown_field` before any Hub capability call or workspace write.
-- Change the action adapter, form input name, stable field-error mapping, node ids, locals, projection errors, and internal variables to session-type vocabulary. Keep the public tool/action name `botster_workspaces.spawn` and the semantic `botster_workspaces.open_spawn` action id unchanged; this ticket changes the request contract, not action ownership.
+- Change the action adapter, form input name, stable field-error mapping, locals, projection errors, and internal variables to session-type vocabulary. Keep the public tool/action name `botster_workspaces.spawn`, the semantic `botster_workspaces.open_spawn` action id, and the authored `botster-workspaces-spawn-template` node id unchanged; this ticket changes the request contract, not presentation identity or action ownership.
 - Call only `botster.capabilities.session_types.ensure_worktree_and_spawn` with `{ target_id, branch, session_type_id, context }`. Preserve the trusted-field exclusions and the post-success `result.session_id` persistence path exactly.
 
 ### 3. Make the repository tests enforce the cold cut
 
 - Update `test/plugin_runtime_test.lua` so its fake boundary exposes only `session_types`, returns rows with fully qualified `session_type_id`, and asserts the exact managed spawn request.
 - Add a negative assertion that `template_id` is rejected and does not call the capability or mutate membership. Keep rejection, thrown-worker, duplicate UUID, and post-spawn persistence-failure coverage on the new request shape.
-- Update `test/fixtures/workspaces/contract.json` and `script/test` to assert the new Hub API, field names, scope, fixture directories, and docs. Add a scoped forbidden-token audit across active files for `session_templates`, `session_template_`, `template_id`, and `.botster/session-templates.json`; exclude historical plans/reports deliberately.
+- Update `test/fixtures/workspaces/contract.json` and `script/test` to assert the new Hub API, field names, scope, fixture directories, and docs. Add a scoped forbidden-token audit across active files for `session_templates`, `session_template_`, `template_id`, and `.botster/session-templates.json`; exclude historical plans/reports and only the exact allowlisted `OBSOLETE_FIELDS` record keys. Assert those three legacy keys remain present and add a positive regression proving a record carrying `default_session_template_id` still returns `legacy_workspace_schema`.
 - Update `script/hub_acceptance_smoke` to locate and submit the authored `session_type_id` field, require protocol 6 / conformance revision 31 and `session_type_entity_subscriptions`, and assert the canonical spawned `/session` entity carries the selected fully qualified `session_type_id` as well as the returned UUID.
 - Update `script/test-hub-flow` and `script/shared_stack_acceptance` fixture paths, package ids, constants, values, messages, and repository definition paths. Keep their existing parent-owned Hub, managed-Git collision, persistence/restart, lifecycle, and teardown oracles.
 - In the isolated real-Hub flow, add a negative admission/request check proving an old `session_templates` manifest or old `template_id` request is rejected rather than silently translated.
@@ -87,6 +96,8 @@ Workspaces continues to own only semantic grouping records, workspace UI/actions
 
 The package reads the Hub contract and invokes one granted capability; it does not duplicate session-type rows in plugin.db or publish a competing session-type entity family. Web and TUI remain generic consumers of the owner-authored UiNode tree and Hub entities. Any failure in protocol 6, package admission, the real Lua capability table, or session metadata projection is routed back to the Hub dependency rather than worked around locally.
 
+Web and TUI own their protocol pins and generic renderer/driver compatibility. Their registered tickets must close before Workspaces implementation proceeds, after which this repository owns rerunning the mandatory shared-stack profile against those updated artifacts. Workspaces does not patch either client or substitute local-only evidence for that proof.
+
 ## Assumptions and unknowns
 
 - The closed dependency's merged commit and published npm coordinate are authoritative. Registry lookup confirmed `0.1.24` is the current latest version with the announced integrity.
@@ -95,6 +106,7 @@ The package reads the Hub contract and invokes one granted capability; it does n
 - Historical plans and implementation reports are immutable evidence, not live compatibility paths, so their old terminology is not rewritten.
 - No repository CI configuration exists; `script/test` is the repository-owned local gate and the documented Hub/shared-stack scripts are the integration gates.
 - A clean Hub binary and session-worker binary from merged Hub commit `8a60bd5` must be available or built for the real-runtime check. Their absence blocks verification but does not justify a sibling-source fallback or cross-repository edit.
+- Current Web and TUI mainline pins are incompatible with protocol 6. Their two registered owner tickets are blocking prerequisites, not optional future evidence.
 
 No human decision is currently required. If the current Hub's exact package schema contradicts the merged source or published artifact during implementation, stop and register that as a Hub dependency issue rather than choosing a compatibility path.
 
@@ -103,7 +115,7 @@ No human decision is currently required. If the current Hub's exact package sche
 - A partial rename could leave the fake Lua test green while the production worker table fails. The real installed-package Hub path is mandatory.
 - Retaining `template_id` as a fallback would make the migration look successful while preserving a second contract. Negative tests and an active-file token audit must fail that state.
 - Fully qualified session-type ids can expose bugs hidden by bare ids. Tests and the real smoke must select the id returned by `session_types.list` and pass it through unchanged.
-- Renaming authored input/node ids can break a client or driver that improperly hard-codes product fields. The generic Web/TUI shared-stack path is the downstream guard; no renderer-specific workaround belongs here.
+- Renaming the form request field can expose a client or driver that improperly hard-codes submitted values even though the authored node id stays stable. The mandatory generic Web/TUI shared-stack path is the downstream guard; no renderer-specific workaround belongs here.
 - The npm package proves public contract bytes but does not prove a running Hub. Verification must record npm integrity and live Hub/session-worker provenance separately.
 - Real-Hub scripts currently use pre-protocol-6 handshake fields. Updating only the spawn call without making the handshake exact could produce misleading failures before Workspaces loads.
 - Broad repository greps will find historical template-era plans. The guard must enumerate active files so it detects live aliases without rewriting durable history.
@@ -115,8 +127,8 @@ No human decision is currently required. If the current Hub's exact package sche
 3. Published contract proof: in a new temporary npm consumer, install exactly `@trybotster/hub-test-support@0.1.24` from the normal registry, retain the lock/integrity evidence, import `metadata`, run `verifyPackageAssets()`, and assert protocol 6, conformance revision 31, required `session_type_entity_subscriptions`, and generated `session_type_id`/session-type DTOs. Do not use a tarball or local/sibling override.
 4. Real package path: with `BOTSTER_HUB_BIN` and `BOTSTER_SESSION_WORKER_BIN` proven from Hub merge `8a60bd5`, run `script/test-hub-flow`. It must start one fresh Hub, admit the Git target, install/enable the renamed session-type fixture and this package, render the target-first surface, list effective session types through the real worker capability table, submit the returned fully qualified `session_type_id`, create/reuse the managed worktree as expected, spawn, and append exactly the returned `result.session_id` only after success.
 5. Runtime truth: the same smoke must assert protocol/revision/features at hello, observe the spawned `/session` entity carrying the selected `session_type_id`, preserve the UUID through plugin reload, record nothing on typed spawn rejection, retain ended history, and leave Hub sessions/worktrees/repositories untouched by workspace deletion.
-6. UI downstream proof: when current Web and TUI consumer inputs are available, run the repository-owned `script/test-hub-flow shared-stack validate-inputs ...` and `shared-stack run ...` profile with immutable provenance. Both generic consumers must drive the renamed form field from the authored tree against the same protocol-6 Hub, without hard-coded template vocabulary or renderer-specific package state.
-7. Final audit: `git diff --check`, a clean `git status --short` after committed changes, and a scoped `rg` over active source/manifests/tests/scripts/current docs showing no `session_templates`, `session_template_`, `template_id`, or `session-templates.json` tokens. Historical plan/report matches are documented, not treated as live aliases.
+6. UI downstream proof: after blocking Web ticket `ticket_1785970233_750553` and TUI ticket `ticket_1785970234_132113` close, run the repository-owned `script/test-hub-flow shared-stack validate-inputs ...` and `shared-stack run ...` profile with immutable protocol-6 provenance. Both generic consumers must drive the renamed form field from the authored tree against the same Hub, without hard-coded template vocabulary or renderer-specific package state. This gate is mandatory for this run and is not replaced by local Lua or single-Hub smoke evidence.
+7. Final audit: `git diff --check`, a clean `git status --short` after committed changes, and a scoped `rg` over active source/manifests/tests/scripts/current docs showing no `session_templates`, `session_template_`, `template_id`, or `session-templates.json` tokens outside the exact frozen `OBSOLETE_FIELDS` allowlist. Historical plan/report matches and those three legacy workspace-record rejection keys are documented, not treated as live aliases.
 
 ## Required evidence and artifacts
 

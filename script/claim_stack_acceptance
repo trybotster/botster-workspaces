@@ -228,24 +228,35 @@ def parse_web_summary(output)
   JSON.parse(line.delete_prefix("claim-stack-web-summary "))
 end
 
+def dig_code(value)
+  case value
+  when Hash
+    value["code"] || value[:code]
+  when String
+    value
+  else
+    nil
+  end
+end
+
 def action_classification(entry)
   result = entry["result"] || {}
   plugin = result.dig("result", "plugin_action_result") || result["plugin_action_result"] || {}
+  plugin = {} unless plugin.is_a?(Hash)
   payload = result.dig("result", "payload") || plugin["payload"] || result["payload"] || {}
+  payload = {} unless payload.is_a?(Hash)
   accepted = result["accepted"] == true || plugin["state"] == "accepted"
   state = plugin["state"] || result["state"] || result["status"]
   idempotent = payload["idempotent"] == true || plugin["idempotent"] == true || result["idempotent"] == true
-  error_code = result.dig("error", "code") ||
-    plugin.dig("error", "code") ||
-    payload.dig("error", "code") ||
-    result["code"] ||
-    plugin["error"]
-  error_code = error_code["code"] if error_code.is_a?(Hash)
-  # Typed conflict and package error strings may land in plugin.error string/form_errors.
+  error_code = dig_code(result["error"]) ||
+    dig_code(plugin["error"]) ||
+    dig_code(payload["error"]) ||
+    result["code"]
   error_text = [
-    plugin["error"],
+    plugin["error"].is_a?(String) ? plugin["error"] : nil,
     Array(plugin["form_errors"]).join(" "),
     result["reason"],
+    dig_code(plugin["error"]),
   ].compact.join(" ")
   if error_code.nil? && error_text.include?("session_already_owned")
     error_code = "session_already_owned"

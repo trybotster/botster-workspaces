@@ -423,28 +423,23 @@ local function membership_publish_frame(frame)
   return result
 end
 
+-- Hub returns ok=true for accepted, pending_gap, and resync_scheduled. Status is
+-- diagnostic; ok is the admission truth. resync_scheduled is active recovery, not failure.
 local function membership_publish_result_ok(result)
-  if type(result) ~= "table" then
-    return false
-  end
-  local status = result.status
-  if result.ok == true then
-    return status == nil
-      or status == "accepted"
-      or status == "pending_gap"
-  end
-  return status == "accepted" or status == "pending_gap"
+  return type(result) == "table" and result.ok == true
 end
 
 -- Publish pre-reserved frames after a successful membership batch. Never allocates
--- new sequence values here. Each failed frame is retried once with the same reserved
--- sequence; unrecovered delivery is reported as degraded so callers stay truthful.
+-- new sequence values here. Each failed frame (ok ~= true) is retried once with the
+-- same reserved sequence; unrecovered delivery is reported as degraded.
 local function publish_membership_frames(frames)
   local results = {}
   local degraded = false
   for _, frame in ipairs(frames or {}) do
     local result = membership_publish_frame(frame)
     if not membership_publish_result_ok(result) then
+      -- Transient transport/bridge failures may succeed on a second attempt.
+      -- Stable stale_sequence / duplicate_sequence remain rejected on retry.
       result = membership_publish_frame(frame)
     end
     if not membership_publish_result_ok(result) then
@@ -453,6 +448,25 @@ local function publish_membership_frames(frames)
     results[#results + 1] = result
   end
   return results, degraded
+end
+
+-- Shared public seam: every membership mutator attaches delivery truth the same way.
+local function with_membership_delivery(result, reserved_frames, publish_results, publish_degraded)
+  local reserved = reserved_frames or {}
+  if #reserved == 0 then
+    result.membership_delivery = "none"
+    result.membership_publish = publish_results or {}
+    result.membership_reserved_seqs = {}
+    return result
+  end
+  local reserved_seqs = {}
+  for _, frame in ipairs(reserved) do
+    reserved_seqs[#reserved_seqs + 1] = frame.snapshot_seq
+  end
+  result.membership_publish = publish_results or {}
+  result.membership_reserved_seqs = reserved_seqs
+  result.membership_delivery = publish_degraded and "degraded" or "published"
+  return result
 end
 
 local function build_reserved_frames(last_seq, draft_frames)
@@ -481,14 +495,14 @@ local function commit_membership_batch(mutations, draft_frames)
   if n > 0 then
     local last_seq, seq_revision, seq_error = get_membership_seq()
     if seq_error then
-      return seq_error, nil
+      return seq_error, nil, nil, nil
     end
     mutations[#mutations + 1] = membership_seq_mutation(last_seq, seq_revision, n)
     reserved = build_reserved_frames(last_seq, frames)
   end
   local persist_error = batch_mutations(mutations)
   if persist_error then
-    return persist_error, nil, nil
+    return persist_error, nil, nil, nil
   end
   local publish_results = {}
   local publish_degraded = false
@@ -757,14 +771,15 @@ local function delete_workspace(arguments)
       expected_revision = state_revision,
       payload = state,
     }
-    local persist_error = select(1, commit_membership_batch(mutations, draft_frames))
+    local persist_error, reserved_frames, publish_results, publish_degraded =
+      commit_membership_batch(mutations, draft_frames)
     if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
       return attempt()
     end
     if persist_error then
       return persist_error
     end
-    return {
+    return with_membership_delivery({
       ok = true,
       deleted = true,
       workspace = copy(workspace),
@@ -774,7 +789,7 @@ local function delete_workspace(arguments)
         "branches",
         "repositories",
       },
-    }
+    }, reserved_frames, publish_results, publish_degraded)
   end
 
   return attempt()
@@ -840,28 +855,29 @@ local function add_session(arguments)
           workspace.session_refs[#workspace.session_refs + 1] = session_id
           workspace.updated_at = next_timestamp(state)
         end
-        local repair_error = select(1, claim_session_batch(workspace_id, session_id, state, state_revision))
+        local repair_error, reserved_frames, publish_results, publish_degraded =
+          claim_session_batch(workspace_id, session_id, state, state_revision)
         if repair_error and repair_error.error and repair_error.error.code == "revision_conflict" then
           return attempt()
         end
         if repair_error then
           return repair_error
         end
-        return {
+        return with_membership_delivery({
           ok = true,
           idempotent = true,
           repaired = true,
           workspace = copy(workspace),
           entity = read_model(workspace),
-        }
+        }, reserved_frames, publish_results, publish_degraded)
       end
       -- Pure no-op: N=0, no durable write, no publish.
-      return {
+      return with_membership_delivery({
         ok = true,
         idempotent = true,
         workspace = copy(workspace),
         entity = read_model(workspace),
-      }
+      }, {}, {}, false)
     end
     if owner_id then
       return error_result("session_already_owned", "session already belongs to workspace: " .. owner_id, nil, {
@@ -879,18 +895,11 @@ local function add_session(arguments)
     if persist_error then
       return persist_error
     end
-    local reserved_seqs = {}
-    for _, frame in ipairs(reserved_frames or {}) do
-      reserved_seqs[#reserved_seqs + 1] = frame.snapshot_seq
-    end
-    return {
+    return with_membership_delivery({
       ok = true,
       workspace = copy(workspace),
       entity = read_model(workspace),
-      membership_publish = publish_results,
-      membership_reserved_seqs = reserved_seqs,
-      membership_delivery = publish_degraded and "degraded" or "published",
-    }
+    }, reserved_frames, publish_results, publish_degraded)
   end
 
   return attempt()
@@ -994,19 +1003,20 @@ local function move_session(arguments)
         entity = membership_record(session_id, destination.id),
       },
     }
-    local persist_error = select(1, commit_membership_batch(mutations, draft_frames))
+    local persist_error, reserved_frames, publish_results, publish_degraded =
+      commit_membership_batch(mutations, draft_frames)
     if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
       return attempt()
     end
     if persist_error then
       return persist_error
     end
-    return {
+    return with_membership_delivery({
       ok = true,
       source = copy(source),
       destination = copy(destination),
       entities = { read_model(source), read_model(destination) },
-    }
+    }, reserved_frames, publish_results, publish_degraded)
   end
 
   return attempt()
@@ -1074,19 +1084,19 @@ local function remove_session(arguments)
         expected_revision = membership_revision,
       }
     end
-    local persist_error, _, publish_results, publish_degraded = commit_membership_batch(mutations, draft_frames)
+    local persist_error, reserved_frames, publish_results, publish_degraded =
+      commit_membership_batch(mutations, draft_frames)
     if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
       return attempt()
     end
     if persist_error then
       return persist_error
     end
-    local result = { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
-    if publish_results then
-      result.membership_publish = publish_results
-      result.membership_delivery = publish_degraded and "degraded" or "published"
-    end
-    return result
+    return with_membership_delivery({
+      ok = true,
+      workspace = copy(workspace),
+      entity = read_model(workspace),
+    }, reserved_frames, publish_results, publish_degraded)
   end
 
   return attempt()
@@ -1221,20 +1231,21 @@ local function spawn_session(arguments)
 
   workspace.session_refs[#workspace.session_refs + 1] = session_id
   workspace.updated_at = next_timestamp(state)
-  local persist_error = select(1, claim_session_batch(workspace_id, session_id, state, state_revision))
+  local persist_error, reserved_frames, publish_results, publish_degraded =
+    claim_session_batch(workspace_id, session_id, state, state_revision)
   if persist_error then
     return error_result("persist_failed", "Hub spawned the session but workspace membership could not be persisted", nil, {
       spawned_session_id = session_id,
       membership_recorded = false,
     })
   end
-  return {
+  return with_membership_delivery({
     ok = true,
     session_id = session_id,
     workspace = copy(workspace),
     entity = read_model(workspace),
     hub_result = copy(result.result),
-  }
+  }, reserved_frames, publish_results, publish_degraded)
 end
 
 local function entity_snapshot()

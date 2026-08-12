@@ -1418,6 +1418,7 @@ local function run_review_rework_tests()
   assert_eq(publish_calls[publish_before_multi_pre + 1].id, multi_pre_a, "preindex multi-delete order first")
   assert_eq(publish_calls[publish_before_multi_pre + 2].id, multi_pre_b, "preindex multi-delete order second")
 
+  -- Transient call exception then acceptance: real retry recovery shape.
   local retry_ws = create({ name = "Publish retry" })
   local retry_session = "f5555555-5555-4555-8555-555555555555"
   local original_publish = botster.entity_publish
@@ -1425,7 +1426,7 @@ local function run_review_rework_tests()
   botster.entity_publish = function(frame)
     publish_attempts = publish_attempts + 1
     if publish_attempts == 1 then
-      return { ok = false, status = "stale_sequence", last_accepted_seq = 0, high_water_seq = 0 }
+      error("injected transient entity_publish failure")
     end
     return original_publish(frame)
   end
@@ -1434,17 +1435,19 @@ local function run_review_rework_tests()
     session_id = retry_session,
   })
   botster.entity_publish = original_publish
-  assert_eq(retry_claim.ok, true, "claim succeeds even when first publish is rejected")
-  assert_eq(publish_attempts, 2, "rejected publish is retried once")
+  assert_eq(retry_claim.ok, true, "claim succeeds after transient publish exception")
+  assert_eq(publish_attempts, 2, "failed publish is retried once")
   assert_eq(retry_claim.membership_delivery, "published", "retry recovers delivery")
-  assert_eq(retry_claim.membership_publish[1].status, "accepted", "retry result is accepted")
+  assert_eq(retry_claim.membership_publish[1].ok, true, "retry result is Hub ok=true")
+  assert_eq(retry_claim.membership_publish[1].status, "accepted", "retry status is accepted")
 
+  -- Stable stale/duplicate rejection stays degraded after retry.
   local fail_ws = create({ name = "Publish degraded" })
   local fail_session = "f6666666-6666-4666-8666-666666666666"
   publish_attempts = 0
   botster.entity_publish = function(_frame)
     publish_attempts = publish_attempts + 1
-    return { ok = false, status = "stale_sequence", last_accepted_seq = 0, high_water_seq = 0 }
+    return { ok = false, status = "stale_sequence", last_accepted_seq = 9, high_water_seq = 9 }
   end
   local degraded_claim = add_session({
     workspace_id = fail_ws.workspace.id,
@@ -1455,6 +1458,114 @@ local function run_review_rework_tests()
   assert_eq(publish_attempts, 2, "degraded path still retries once")
   assert_eq(degraded_claim.membership_delivery, "degraded", "unrecovered publish reports degraded delivery")
   assert_true(database["membership:" .. fail_session] ~= nil, "degraded path keeps membership key committed")
+
+  -- resync_scheduled is ok=true active recovery, not degraded.
+  local resync_ws = create({ name = "Publish resync scheduled" })
+  local resync_session = "f7777777-7777-4777-8777-777777777777"
+  publish_attempts = 0
+  botster.entity_publish = function(frame)
+    publish_attempts = publish_attempts + 1
+    return {
+      ok = true,
+      status = "resync_scheduled",
+      last_accepted_seq = frame.snapshot_seq - 1,
+      high_water_seq = frame.snapshot_seq,
+      resync_needed = true,
+      resync_degraded = false,
+    }
+  end
+  local resync_claim = add_session({
+    workspace_id = resync_ws.workspace.id,
+    session_id = resync_session,
+  })
+  botster.entity_publish = original_publish
+  assert_eq(resync_claim.ok, true, "claim succeeds with resync_scheduled")
+  assert_eq(publish_attempts, 1, "resync_scheduled is not retried as failure")
+  assert_eq(resync_claim.membership_delivery, "published", "resync_scheduled is active recovery delivery")
+  assert_eq(resync_claim.membership_publish[1].status, "resync_scheduled", "status preserved for diagnostics")
+  assert_eq(resync_claim.membership_publish[1].ok, true, "resync_scheduled keeps Hub ok=true")
+
+  -- Every membership mutation shape reports delivery.
+  botster.entity_publish = function(_frame)
+    return { ok = false, status = "duplicate_sequence", last_accepted_seq = 1, high_water_seq = 1 }
+  end
+
+  local move_src = create({ name = "Delivery move source" })
+  local move_dst = create({ name = "Delivery move dest" })
+  local move_sid = "f8888888-8888-4888-8888-888888888888"
+  botster.entity_publish = original_publish
+  assert_eq(add_session({
+    workspace_id = move_src.workspace.id,
+    session_id = move_sid,
+  }).ok, true, "move delivery seed claim")
+  botster.entity_publish = function(_frame)
+    return { ok = false, status = "duplicate_sequence", last_accepted_seq = 1, high_water_seq = 1 }
+  end
+  local moved = move_session({
+    destination_workspace_id = move_dst.workspace.id,
+    session_id = move_sid,
+  })
+  assert_eq(moved.ok, true, "move commits despite rejected publish")
+  assert_eq(moved.membership_delivery, "degraded", "move reports degraded delivery")
+  assert_true(#moved.membership_publish >= 1, "move attaches publish results")
+
+  local del_ws = create({ name = "Delivery delete" })
+  local del_session = "f9999999-9999-4999-8999-999999999999"
+  botster.entity_publish = original_publish
+  assert_eq(add_session({
+    workspace_id = del_ws.workspace.id,
+    session_id = del_session,
+  }).ok, true, "delete delivery seed claim")
+  botster.entity_publish = function(_frame)
+    return { ok = false, status = "duplicate_sequence", last_accepted_seq = 1, high_water_seq = 1 }
+  end
+  local deleted = delete({ id = del_ws.workspace.id })
+  assert_eq(deleted.ok, true, "delete commits despite rejected publish")
+  assert_eq(deleted.membership_delivery, "degraded", "delete reports degraded delivery")
+  assert_true(#deleted.membership_publish >= 1, "delete attaches publish results")
+
+  local rem_ws = create({ name = "Delivery remove" })
+  local rem_session = "faaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  botster.entity_publish = original_publish
+  assert_eq(add_session({
+    workspace_id = rem_ws.workspace.id,
+    session_id = rem_session,
+  }).ok, true, "remove delivery seed claim")
+  botster.entity_publish = function(_frame)
+    return { ok = false, status = "duplicate_sequence", last_accepted_seq = 1, high_water_seq = 1 }
+  end
+  local removed = remove_session({
+    workspace_id = rem_ws.workspace.id,
+    session_id = rem_session,
+  })
+  assert_eq(removed.ok, true, "remove commits despite rejected publish")
+  assert_eq(removed.membership_delivery, "degraded", "remove reports degraded delivery")
+
+  next_spawn_uuid = "fbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  botster.entity_publish = function(_frame)
+    return { ok = false, status = "duplicate_sequence", last_accepted_seq = 1, high_water_seq = 1 }
+  end
+  local spawn_ws = create({ name = "Delivery spawn" })
+  local spawned = spawn({
+    workspace_id = spawn_ws.workspace.id,
+    target_id = "tgt_git",
+    branch = "delivery-spawn",
+    session_type_id = "acceptance-package/implement",
+  })
+  botster.entity_publish = original_publish
+  assert_eq(spawned.ok, true, "spawn commits despite rejected publish")
+  assert_eq(spawned.membership_delivery, "degraded", "spawn reports degraded delivery")
+  assert_eq(spawned.membership_recorded, nil, "spawn success does not claim membership_recorded=false")
+  assert_true(database["membership:" .. next_spawn_uuid] ~= nil, "spawn keeps membership key on degraded publish")
+
+  -- Idempotent pure no-op reports delivery none.
+  local noop = add_session({
+    workspace_id = move_dst.workspace.id,
+    session_id = move_sid,
+  })
+  assert_eq(noop.ok, true, "idempotent claim succeeds")
+  assert_eq(noop.idempotent, true, "idempotent claim flagged")
+  assert_eq(noop.membership_delivery, "none", "pure no-op publishes nothing")
 end
 
 run_membership_producer_matrix_tests()

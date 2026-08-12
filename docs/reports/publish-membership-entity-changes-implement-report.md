@@ -118,3 +118,11 @@ Same gaps recorded in the plan: producer vs visible-picker split; durable seq ra
 | Silent publish failure | Post-commit publish retries each reserved frame once; mutators report `membership_delivery=degraded` when recovery fails |
 | Absolute path in report | Replaced with repository name + target_id |
 | Strict diff EOF | Trailing blank line removed |
+
+## Review rework (`review_1786510531_540187`)
+
+| Finding | Fix |
+| --- | --- |
+| Degraded delivery only on add/remove | Shared `with_membership_delivery` on add (claim+repair+noop), remove, move, delete, spawn |
+| Partial status allowlist | Hub `ok` is admission truth; `resync_scheduled` is published recovery, not failure |
+| Retry test realism | Transient exception→accept for retry; stable stale/duplicate→degraded; resync_scheduled not retried |

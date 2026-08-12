@@ -56,12 +56,11 @@
 | --- | --- |
 | Prior closed Hub/Web/TUI/Workspaces deps | closed |
 | `ticket_1786518263_839128` Web frame-drop | closed (`dependency_1786518942_244198`) |
-| **`ticket_1786529885_807584` TUI shared-Hub claim** | **open** (`dependency_1786529892_674521`) |
+| **`ticket_1786529885_807584` TUI shared-Hub claim** | **closed** at `d40f28f…` (`dependency_1786529892_674521`) — wired into parent claim-stack |
 
 ## Deviations
 
-1. Full parent TUI keyboard claim on the shared Hub waits on `ticket_1786529885_807584` (routed, not waived).
-2. Bare Hub spawn sessions may omit dedicated `label`/`session_type`/`spawn_point` fields; C1 records which fields Hub supplies and proves lifecycle (+ derived label text) live update via `shutdown_session`.
+1. Bare Hub spawn sessions may omit dedicated `label`/`session_type`/`spawn_point` fields; C1 records which fields Hub supplies and proves lifecycle (+ derived label text) live update via `shutdown_session`.
 
 ## Tests and proof
 
@@ -71,19 +70,20 @@ script/test
 
 script/test-hub-flow claim-stack run MANIFEST EVIDENCE_DIR
 # script/claim_stack_acceptance: ok
-# evidence: /private/tmp/claim-stack-evidence-reviewfix3-1786530294
+# evidence: /private/tmp/claim-stack-evidence-tui2-1786554202
 ```
 
 | Lane / check | Result |
 | --- | --- |
 | C1 live appear + lifecycle update + restore | true |
-| C3 accept + typed conflict | accepted + `session already belongs to workspace` |
-| C4 accept + idempotent | accepted + accepted/idempotent |
+| C3 accept + typed conflict | accepted + conflict |
+| C4 accept + idempotent | accepted + idempotent |
 | C5/C6a/C6b | completed |
+| **C2 TUI shared-Hub keyboard claim** | **passed** (`membership_join` + `option_excluded` + complete) |
 | Supporting Web lifecycle | passed |
-| Supporting TUI lifecycle | passed (not shared-Hub keyboard claim) |
+| Supporting TUI lifecycle | passed |
 
-Head `370862b…` on PR #18.
+TUI pin floor: `d40f28f9de2b621e50367c0f014880429eddedde` (`botster.tui.workspaces-claim-driver/v1`).
 
 ## Production entry point
 

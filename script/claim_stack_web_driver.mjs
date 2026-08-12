@@ -161,59 +161,59 @@ async function waitForHarnessKind(page, kind, label, timeoutMs = 30_000) {
   });
 }
 
+const SELECTED_SURFACE = "selected-app-surface";
+const APPS_VIEW = "apps-view";
+
 async function openAppsAndWorkspaces(page) {
-  await page.getByText("Local Botster health").waitFor({ timeout: 30_000 }).catch(() => {});
-  // Diagnostics may not always show that exact string on all pins; still wait transport.
   await page.waitForFunction(
     () => Boolean(globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__),
     null,
     { timeout: 30_000 }
   );
-  // Prefer navigation entry when present; fall back to Apps package surface.
-  const nav = page.locator("[data-ui-node-id='botster-workspaces-nav'], a[href*='botster-workspaces'], ion-item:has-text('Workspaces')").first();
-  if (await nav.count()) {
-    await nav.click({ timeout: 10_000 }).catch(() => {});
+  // Open Apps host chrome, then the botster-workspaces package surface.
+  const appsNav = page.getByTestId(APPS_VIEW).or(page.getByRole("tab", { name: /apps/i })).or(page.getByText("Apps", { exact: true }));
+  if (await appsNav.count()) {
+    await appsNav.first().click({ timeout: 15_000 }).catch(() => {});
   }
-  const appsTab = page.getByRole("tab", { name: /apps/i }).or(page.getByText("Apps", { exact: true }));
-  if (await appsTab.count()) {
-    await appsTab.first().click({ timeout: 10_000 }).catch(() => {});
-  }
-  const workspacesApp = page.locator(
-    "[data-package-name='botster-workspaces'], [data-ui-node-id*='botster-workspaces'], ion-item:has-text('Workspaces'), button:has-text('Workspaces')"
-  ).first();
-  await workspacesApp.waitFor({ timeout: 30_000 });
-  await workspacesApp.click();
-  await page.locator("[data-ui-node-id='botster-workspaces-app'], [data-package-name='botster-workspaces']").first().waitFor({
-    timeout: 30_000
-  });
+  const installed = page.getByTestId(APPS_VIEW).or(page.locator("body"));
+  const workspacesRow = installed.getByText(/botster[- ]workspaces|workspaces/i).first();
+  await workspacesRow.waitFor({ timeout: 30_000 });
+  await workspacesRow.click();
+  await page.getByTestId(SELECTED_SURFACE).waitFor({ timeout: 30_000 });
+  await page.getByTestId(SELECTED_SURFACE)
+    .locator("[data-ui-node-id='botster-workspaces-app'], [data-ui-node-id^='botster-workspaces-']")
+    .first()
+    .waitFor({ timeout: 30_000 });
 }
 
 async function selectWorkspace(page, workspaceId, workspaceName) {
-  const row = page.locator(
-    `[data-ui-node-id='botster-workspaces-row-${workspaceId}'], [data-workspace-id='${workspaceId}']`
-  ).first();
-  if (await row.count()) {
+  const surface = page.getByTestId(SELECTED_SURFACE);
+  const row = surface.locator(`[data-ui-node-id='botster-workspaces-row-${workspaceId}']`);
+  await row.waitFor({ timeout: 20_000 });
+  const openButton = row.locator("ion-button[data-action-id]").first();
+  if (await openButton.count()) {
+    await openButton.click();
+  } else {
     await row.click();
-    return;
   }
-  // Fall back to visible name.
-  await page.getByText(workspaceName, { exact: true }).first().click({ timeout: 15_000 });
+  // Detail should expose Add existing session.
+  await surface.getByRole("button", { name: /Add existing session/i }).waitFor({ timeout: 20_000 });
 }
 
 async function openAddDialog(page, workspaceId) {
-  const openers = [
-    page.locator(`[data-ui-node-id='botster-workspaces-add-${workspaceId}']`),
-    page.locator(`[data-action-id='botster_workspaces.open_add'][data-workspace-id='${workspaceId}']`),
-    page.getByRole("button", { name: /add existing session|add session/i })
-  ];
-  for (const opener of openers) {
-    if (await opener.count()) {
-      await opener.first().click({ timeout: 10_000 });
-      break;
-    }
+  const surface = page.getByTestId(SELECTED_SURFACE);
+  const openButton = surface
+    .locator("ion-button[data-action-id='botster_workspaces.open']")
+    .filter({ hasText: "Add existing session" })
+    .or(surface.getByRole("button", { name: /Add existing session/i }));
+  await openButton.first().waitFor({ timeout: 20_000 });
+  const actionId = await openButton.first().getAttribute("data-action-id");
+  if (actionId && actionId !== "botster_workspaces.open") {
+    // Still allow if role button matched without action id; production path prefers open action.
   }
+  await openButton.first().click();
   const form = page.locator(`form[data-ui-node-id='botster-workspaces-add-form-${workspaceId}']`);
-  await form.waitFor({ timeout: 20_000 });
+  await form.waitFor({ timeout: 30_000 });
   return form;
 }
 
@@ -338,8 +338,19 @@ async function bootstrapClient(browser, appUrl, label) {
   const page = await browser.newPage();
   await installHarnessHooks(page);
   await page.goto(appUrl, { waitUntil: "domcontentloaded" });
-  // Give transport time to install harness transportControl from production client.
-  await page.waitForTimeout(1500);
+  // Diagnostics establishes the production WebRTC transport and harness controls.
+  const diagnostics = page.getByTestId("diagnostics-view").or(page.getByText(/Diagnostics|Local Botster health/i));
+  if (await diagnostics.count()) {
+    await diagnostics.first().click({ timeout: 10_000 }).catch(() => {});
+  }
+  await page.waitForFunction(
+    () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function"
+      || (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).some((entry) => entry.kind === "daemon_request"),
+    null,
+    { timeout: 45_000 }
+  ).catch(() => {
+    // Continue; some pins only install transportControl after first app open.
+  });
   await openAppsAndWorkspaces(page);
   return page;
 }

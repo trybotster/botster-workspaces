@@ -69,12 +69,21 @@
 script/test
 # ok
 
-# After TUI dependency closes, re-run full:
-script/test-hub-flow claim-stack validate-inputs MANIFEST
 script/test-hub-flow claim-stack run MANIFEST EVIDENCE_DIR
+# script/claim_stack_acceptance: ok
+# evidence: /private/tmp/claim-stack-evidence-reviewfix3-1786530294
 ```
 
-Static guards cover interaction bans and pin ancestry. Live claim-stack re-run required after this revisit for green evidence on the tightened oracles.
+| Lane / check | Result |
+| --- | --- |
+| C1 live appear + lifecycle update + restore | true |
+| C3 accept + typed conflict | accepted + `session already belongs to workspace` |
+| C4 accept + idempotent | accepted + accepted/idempotent |
+| C5/C6a/C6b | completed |
+| Supporting Web lifecycle | passed |
+| Supporting TUI lifecycle | passed (not shared-Hub keyboard claim) |
+
+Head `370862b…` on PR #18.
 
 ## Production entry point
 

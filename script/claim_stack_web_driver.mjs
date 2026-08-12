@@ -1201,7 +1201,8 @@ async function run() {
     const gapP1 = await bootstrapClient(browser, appUrl, "gapP1");
     const gapP2 = await bootstrapClient(browser, appUrl, "gapP2");
     await selectWorkspace(gapP1, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
-    await selectWorkspace(gapP2, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
+    // Peer claims into W1 so membership exclude frames are cross-workspace fanout to gapP1's W2 picker.
+    await selectWorkspace(gapP2, assignment.workspace_w1, assignment.workspace_w1_name || "Claim W1");
     const gapForm1 = await openAddDialog(gapP1, assignment.workspace_w2);
     await waitForOption(gapP1, gapForm1, heldA);
     await selectSession(gapP1, gapForm1, heldA); // held stale candidate
@@ -1218,16 +1219,19 @@ async function run() {
       if (typeof control.disarmDropNextInboundEntityFrame === "function") {
         control.disarmDropNextInboundEntityFrame();
       }
-      return control.armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" });
+      return control.armDropNextInboundEntityFrame({
+        entity_type: "botster-workspaces.membership",
+        frame_types: ["entity_upsert", "entity_patch", "entity_remove"]
+      });
     });
     if (!arm?.ok) {
       throw new Error(`C6b armDropNextInboundEntityFrame failed: ${JSON.stringify(arm)}`);
     }
-    // Peer claims held A — this membership frame is dropped on gapP1.
-    let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
+    // Peer claims held A on W1 — membership upsert must fan out to gapP1 and be dropped there.
+    let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w1);
     await waitForOption(gapP2, gapForm2, heldA);
     await selectSession(gapP2, gapForm2, heldA);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, heldA, "C6b drop peer-claim held A");
+    await submitAdd(gapP2, gapForm2, assignment.workspace_w1, heldA, "C6b drop peer-claim held A");
     // Wait for the armed drop to consume the membership frame for the held-A claim.
     const dropState = await gapP1.waitForFunction(
       () => {
@@ -1249,10 +1253,10 @@ async function run() {
       throw new Error(`C6b expected dropped membership frame for held A: ${JSON.stringify(state)}`);
     });
     // Later membership change triggers sequence_gap on the armed client.
-    gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
+    gapForm2 = await openAddDialog(gapP2, assignment.workspace_w1);
     await waitForOption(gapP2, gapForm2, gapTrigger);
     await selectSession(gapP2, gapForm2, gapTrigger);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapTrigger, "C6b gap trigger claim");
+    await submitAdd(gapP2, gapForm2, assignment.workspace_w1, gapTrigger, "C6b gap trigger claim");
     const gapEvidence = await gapP1.waitForFunction(
       ({ sinceEventCount, membershipFamily }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];

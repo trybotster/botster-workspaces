@@ -255,29 +255,29 @@ async function selectSession(page, form, sessionId) {
   const select = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select");
   await select.waitFor({ timeout: 15_000 });
   await select.click({ timeout: 15_000 });
-  // Ionic may present options as alert buttons, action sheet buttons, or popover radios.
-  const candidates = [
-    page.locator("ion-alert button, ion-alert .alert-radio-label").filter({ hasText: sessionId }),
-    page.locator("ion-action-sheet button, .action-sheet-button").filter({ hasText: sessionId }),
-    page.locator("ion-select-popover ion-item, ion-select-popover ion-radio").filter({ hasText: sessionId }),
-    page.locator(`ion-select-option[value='${sessionId}']`),
-    page.getByRole("radio", { name: new RegExp(sessionId) }),
-    page.getByRole("button", { name: new RegExp(sessionId) })
-  ];
-  let clicked = false;
-  for (const candidate of candidates) {
-    if (await candidate.count()) {
-      await candidate.first().click({ timeout: 10_000 });
-      clicked = true;
-      break;
-    }
-  }
-  if (!clicked) {
-    // Last resort: any visible overlay item containing the uuid text.
-    const fallback = page.locator("ion-alert, ion-action-sheet, ion-select-popover, [role='dialog']")
+  // Wait for Ionic overlay; ion-select-option nodes in the form are not themselves visible.
+  await page.waitForSelector("ion-alert, ion-action-sheet, ion-select-popover, .alert-wrapper", {
+    state: "visible",
+    timeout: 10_000
+  }).catch(() => {});
+  const overlay = page.locator("ion-alert, ion-action-sheet, ion-select-popover").last();
+  // Prefer role-based options inside the open overlay.
+  const roleOption = overlay.getByRole("radio", { name: new RegExp(sessionId) })
+    .or(overlay.getByRole("button", { name: new RegExp(sessionId) }))
+    .or(overlay.locator("button, ion-item, .alert-radio-label, .action-sheet-button").filter({ hasText: sessionId }));
+  if (await roleOption.count()) {
+    await roleOption.first().click({ timeout: 10_000 });
+  } else {
+    // Global overlay text click (still a real pointer interaction on the visible control).
+    await page.locator("ion-alert, ion-action-sheet, ion-select-popover")
       .locator(`text=${sessionId}`)
-      .first();
-    await fallback.click({ timeout: 10_000 });
+      .first()
+      .click({ timeout: 10_000 });
+  }
+  // Dismiss alert confirm if present (some interfaces require OK after radio select).
+  const ok = page.locator("ion-alert button.alert-button").filter({ hasText: /OK|Confirm|Done/i });
+  if (await ok.count()) {
+    await ok.first().click({ timeout: 5_000 }).catch(() => {});
   }
   // Confirm the select now holds the value via rendered production state (not synthetic set).
   await page.waitForFunction(
@@ -288,7 +288,7 @@ async function selectSession(page, form, sessionId) {
       return (selectNode?.value ?? selectNode?.getAttribute("value")) === expected;
     },
     { formId: await form.getAttribute("data-ui-node-id"), expected: sessionId },
-    { timeout: 10_000 }
+    { timeout: 15_000 }
   );
 }
 

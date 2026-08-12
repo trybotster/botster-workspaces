@@ -201,18 +201,24 @@ async function selectWorkspace(page, workspaceId, workspaceName) {
 }
 
 async function openAddDialog(page, workspaceId) {
+  const formSelector = `form[data-ui-node-id='botster-workspaces-add-form-${workspaceId}']`;
+  const existing = page.locator(formSelector);
+  if (await existing.count()) {
+    const visible = await existing.first().isVisible().catch(() => false);
+    if (visible) return existing.first();
+  }
   const surface = page.getByTestId(SELECTED_SURFACE);
   const openButton = surface
-    .locator("ion-button[data-action-id='botster_workspaces.open']")
-    .filter({ hasText: "Add existing session" })
+    .locator(`ion-button[data-ui-node-id='botster-workspaces-add-${workspaceId}']`)
+    .or(
+      surface
+        .locator("ion-button[data-action-id='botster_workspaces.open']")
+        .filter({ hasText: "Add existing session" })
+    )
     .or(surface.getByRole("button", { name: /Add existing session/i }));
   await openButton.first().waitFor({ timeout: 20_000 });
-  const actionId = await openButton.first().getAttribute("data-action-id");
-  if (actionId && actionId !== "botster_workspaces.open") {
-    // Still allow if role button matched without action id; production path prefers open action.
-  }
-  await openButton.first().click();
-  const form = page.locator(`form[data-ui-node-id='botster-workspaces-add-form-${workspaceId}']`);
+  await openButton.first().click({ timeout: 15_000 });
+  const form = page.locator(formSelector);
   await form.waitFor({ timeout: 30_000 });
   return form;
 }

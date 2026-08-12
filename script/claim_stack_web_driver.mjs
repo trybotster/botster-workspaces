@@ -613,8 +613,9 @@ async function run() {
     if (!metadata?.value) {
       throw new Error(`C1: option metadata missing after live appear: ${JSON.stringify(metadata)}`);
     }
-    // Dedicated producer label is a field that is not uuid/lifecycle/session_type composed text.
-    // Hub /session entities typically omit a separate label field; joined option text is not a label.
+    // Dedicated producer label is a field that is not uuid/lifecycle/session_type/spawn_point
+    // composed text. Hub /session entities typically omit a separate label field; joined option
+    // text is not a label, and spawn_point must not be double-counted as label.
     const producerLabel = (() => {
       const parts = (metadata.label || "").split(/\s*·\s*/).map((part) => part.trim()).filter(Boolean);
       const lifecycleWord = /^(running|exited|starting|stopping|failed|stale)$/i;
@@ -624,6 +625,7 @@ async function run() {
         && !lifecycleWord.test(part)
         && !classWord.test(part)
         && part !== metadata.session_type
+        && part !== metadata.spawn_point
       );
       return dedicated || null;
     })();
@@ -1000,8 +1002,13 @@ async function run() {
     };
 
     // ---- C6a reconnect via closeDataChannel ----
-    // Order is load-bearing: disconnect first, claim S2 from a second production client while
-    // offline, then prove recon subscription+snapshot pairs remove S2 before stale submit.
+    // Order is load-bearing:
+    // 1. Prepare the peer browser before disconnection (claim must be ready while offline).
+    // 2. Close the recon data channel and prove a closed transport state.
+    // 3. Peer-claim S2 while recon is offline; prove S2 still on the disconnected picker.
+    // 4. Only then set the recovery baseline and require post-baseline subscribe+ready pairs
+    //    (real subscription_id/generation/snapshot_seq from webrtc_entity_subscription ready)
+    //    that remove S2 before the stale submit check.
     const recon = await bootstrapClient(browser, appUrl, "recon");
     await selectWorkspace(recon, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     const reconForm = await openAddDialog(recon, assignment.workspace_w2);
@@ -1012,6 +1019,12 @@ async function run() {
       globalThis.__CLAIM_STACK_DOCUMENT_SENTINEL__ = marker;
       return marker;
     });
+    // Prepare peer production client before disconnect so the offline claim is immediate.
+    const reconPeer = await bootstrapClient(browser, appUrl, "reconPeer");
+    await selectWorkspace(reconPeer, assignment.workspace_w1, assignment.workspace_w1_name || "Claim W1");
+    const reconPeerForm = await openAddDialog(reconPeer, assignment.workspace_w1);
+    await waitForOption(reconPeer, reconPeerForm, assignment.session_s2, 60_000);
+    await selectSession(reconPeer, reconPeerForm, assignment.session_s2);
     const preClose = await recon.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return { event_count: events.length };
@@ -1021,27 +1034,51 @@ async function run() {
       null,
       { timeout: 20_000 }
     );
-    // Disconnect first so the later membership change cannot clear the held value on a live path.
     const closed = await recon.evaluate(() =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
     );
     if (!closed) {
       throw new Error("C6a closeDataChannel returned false");
     }
-    await recon.waitForFunction(
+    // Require a closed transport event — not any lifecycle noise.
+    const closedEvidence = await recon.waitForFunction(
       ({ sinceEventCount }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return events.slice(sinceEventCount).some((entry) => entry.kind === "webrtc_lifecycle");
+        for (let i = sinceEventCount; i < events.length; i += 1) {
+          const entry = events[i];
+          if (entry.kind === "webrtc_data_channel" && entry.payload?.state === "closed") {
+            return {
+              kind: "webrtc_data_channel",
+              state: "closed",
+              event_index: i,
+              event_count_at_closed: i + 1
+            };
+          }
+          if (entry.kind === "webrtc_lifecycle") {
+            const detail = entry.payload ?? {};
+            const text = JSON.stringify(detail).toLowerCase();
+            if (
+              detail.state === "closed"
+              || detail.state === "disconnected"
+              || detail.readyState === "closed"
+              || text.includes("\"closed\"")
+              || text.includes("\"disconnected\"")
+            ) {
+              return {
+                kind: "webrtc_lifecycle",
+                state: detail.state || detail.readyState || "closed",
+                event_index: i,
+                event_count_at_closed: i + 1
+              };
+            }
+          }
+        }
+        return null;
       },
       { sinceEventCount: preClose.event_count },
       { timeout: 20_000 }
-    );
-    // Second production client claims S2 while recon is disconnected (no package-tool claim path).
-    const reconPeer = await bootstrapClient(browser, appUrl, "reconPeer");
-    await selectWorkspace(reconPeer, assignment.workspace_w1, assignment.workspace_w1_name || "Claim W1");
-    const reconPeerForm = await openAddDialog(reconPeer, assignment.workspace_w1);
-    await waitForOption(reconPeer, reconPeerForm, assignment.session_s2, 60_000);
-    await selectSession(reconPeer, reconPeerForm, assignment.session_s2);
+    ).then((handle) => handle.jsonValue());
+    // Peer claims S2 while recon is offline (no package-tool claim path).
     const peerClaim = await submitAdd(
       reconPeer,
       reconPeerForm,
@@ -1054,8 +1091,38 @@ async function run() {
     if (!peerAccepted) {
       throw new Error(`C6a peer claim was not accepted: ${JSON.stringify(peerClaim.result)}`);
     }
-    // Post-close: each required family must have a new subscribe_id with a later family-matched snapshot.
-    // Harness snapshots key family via payload.payload.family (Web reconnectGenerationEvidence shape).
+    // Offline proof: disconnected picker still holds S2 after the peer claim succeeded.
+    // If recon had already recovered live, membership reconciliation would have cleared S2.
+    const optionsAfterPeerClaim = await readSelectOptions(reconForm);
+    if (!optionsAfterPeerClaim.includes(assignment.session_s2)) {
+      throw new Error(
+        `C6a: S2 cleared before recovery baseline (peer claim not proven offline): ${JSON.stringify(optionsAfterPeerClaim)}`
+      );
+    }
+    // Transport state at peer-claim proof time. Channel reopen alone is not a fail: a fast
+    // reconnect can open before the membership snapshot applies. S2 still on the picker is
+    // the offline-claim oracle (live membership would have cleared it).
+    const offlineAtPeerClaim = await recon.evaluate(({ closedEventIndex }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const afterClosed = events.slice(closedEventIndex + 1);
+      const reopened = afterClosed.some((entry) =>
+        entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
+      );
+      return {
+        channel_still_closed: !reopened,
+        event_count: events.length,
+        closed_event_index: closedEventIndex
+      };
+    }, { closedEventIndex: closedEvidence.event_index });
+    // Recovery baseline is set only after offline peer-claim proof so early reconnect
+    // snapshots cannot satisfy the recovery oracle.
+    const recoveryBaseline = await recon.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return { event_count: events.length };
+    });
+    // Post-baseline: real subscribe_entities + webrtc_entity_subscription ready correlation.
+    // hub_frame entity_snapshot projections strip subscription_id; ready events carry the
+    // wire fields (subscription_id, generation, snapshot_seq). Do not copy subscribe ids.
     const postCloseEvidence = await recon.waitForFunction(
       ({ sinceEventCount, requiredFamilies }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -1079,46 +1146,68 @@ async function run() {
             const subscriptionId = entry.payload.subscription_id
               || entry.payload.request?.subscription_id;
             if (entityType !== family || !subscriptionId) continue;
-            let snapshot = null;
+            let ready = null;
             for (let j = i + 1; j < tail.length; j += 1) {
               const later = tail[j];
+              if (later.kind !== "webrtc_entity_subscription") continue;
+              const payload = later.payload ?? {};
+              if (payload.state !== "ready") continue;
+              if (payload.entity_type !== family) continue;
+              if (payload.subscription_id !== subscriptionId) continue;
+              // Require real correlation fields from the wire-side ready event.
+              if (typeof payload.subscription_id !== "string" || !payload.subscription_id) continue;
+              if (payload.generation == null && payload.snapshot_seq == null) continue;
+              ready = {
+                subscription_id: payload.subscription_id,
+                subscription_id_exact: true,
+                snapshot_seq: payload.snapshot_seq ?? null,
+                generation: payload.generation ?? null,
+                event_index: sinceEventCount + j
+              };
+              break;
+            }
+            if (!ready) continue;
+            // Authoritative projected snapshot after ready (family + sequence when present).
+            let projectedSnapshot = null;
+            for (let k = ready.event_index - sinceEventCount; k < tail.length; k += 1) {
+              const later = tail[k];
               if (later.kind !== "hub_frame") continue;
               const payload = later.payload ?? {};
               const nested = payload.payload ?? {};
               const kind = payload.kind || payload.type || nested.kind || nested.type;
               if (kind !== "entity_snapshot") continue;
               if (snapshotFamily(payload) !== family) continue;
-              const snapSub = payload.subscription_id || nested.subscription_id || null;
-              // Prefer exact subscription_id match when the harness exposes it; otherwise
-              // temporal family-matched snapshot after this subscribe is authoritative.
-              if (snapSub && snapSub !== subscriptionId) continue;
-              snapshot = {
-                subscription_id: snapSub || subscriptionId,
-                subscription_id_exact: Boolean(snapSub),
-                snapshot_seq: payload.snapshot_seq ?? nested.snapshot_seq ?? null,
-                generation: payload.generation ?? nested.generation ?? null
+              const sequence = nested.sequence ?? payload.sequence ?? nested.snapshot_seq ?? payload.snapshot_seq ?? null;
+              if (ready.snapshot_seq != null && sequence != null && sequence !== ready.snapshot_seq) continue;
+              projectedSnapshot = {
+                family,
+                sequence,
+                event_index: sinceEventCount + k
               };
               break;
             }
-            if (snapshot) {
-              familyPairs.push({
-                family,
-                subscribe_subscription_id: subscriptionId,
-                snapshot
-              });
-            }
+            if (!projectedSnapshot) continue;
+            familyPairs.push({
+              family,
+              subscribe_subscription_id: subscriptionId,
+              snapshot: {
+                subscription_id: ready.subscription_id,
+                subscription_id_exact: true,
+                snapshot_seq: ready.snapshot_seq,
+                generation: ready.generation
+              },
+              ready,
+              projected_snapshot: projectedSnapshot
+            });
           }
           pairs[family] = familyPairs;
         }
         const allPaired = requiredFamilies.every((family) => (pairs[family] || []).length >= 1);
-        const lifecycleTail = tail.some((entry) =>
-          entry.kind === "webrtc_lifecycle" || entry.kind === "webrtc_data_channel"
-        );
-        if (!allPaired || !lifecycleTail) return null;
-        return { pairs, lifecycle_tail: true };
+        if (!allPaired) return null;
+        return { pairs, recovery_since: sinceEventCount, tail_count: tail.length };
       },
       {
-        sinceEventCount: preClose.event_count,
+        sinceEventCount: recoveryBaseline.event_count,
         requiredFamilies: REQUIRED_ENTITY_FAMILIES
       },
       { timeout: 60_000 }
@@ -1129,7 +1218,7 @@ async function run() {
     if (!sameDocument) {
       throw new Error("C6a document reloaded; reconnect must be in-page");
     }
-    // Held S2 must disappear via authoritative reconnect snapshot, not pre-close live path.
+    // Held S2 must disappear via post-baseline authoritative reconnect, not offline live path.
     await recon.waitForFunction(
       ({ formId, sessionId }) => {
         const formNode = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
@@ -1175,12 +1264,28 @@ async function run() {
     summary.lanes.c6a = {
       control: "transportControl.closeDataChannel",
       closed: true,
-      disconnected_before_peer_claim: true,
+      closed_evidence: closedEvidence,
+      peer_prepared_before_disconnect: true,
+      // Derived from ordered events: closed transport event index, then S2 still projected.
+      disconnected_before_peer_claim: Boolean(
+        closedEvidence
+        && typeof closedEvidence.event_index === "number"
+        && optionsAfterPeerClaim.includes(assignment.session_s2)
+      ),
+      s2_still_present_after_peer_claim: optionsAfterPeerClaim.includes(assignment.session_s2),
+      offline_at_peer_claim: offlineAtPeerClaim,
       peer_claim_path: "production_ui_second_browser",
       package_tool_claim: false,
       page_reload: false,
       document_sentinel_survived: true,
       pre_close: preClose,
+      recovery_baseline: recoveryBaseline,
+      chronology: {
+        closed_event_index: closedEvidence.event_index,
+        peer_claim_while_s2_held: true,
+        recovery_baseline_event_count: recoveryBaseline.event_count,
+        recovery_after_offline_proof: recoveryBaseline.event_count > closedEvidence.event_count_at_closed
+      },
       post_close_generation: true,
       subscription_snapshot_pairs: postCloseEvidence.pairs,
       authoritative_snapshot_after_close: true,
@@ -1297,7 +1402,9 @@ async function run() {
             || payload?.family
             || null;
         };
-        // Require a post-gap membership subscribe + later family-matched snapshot.
+        // Post-gap: subscribe_entities + webrtc_entity_subscription ready (real sub id /
+        // generation / snapshot_seq). Do not copy the subscribe id onto missing snapshot data.
+        // hub_frame projections omit subscription_id; ready carries the wire fields.
         const pairs = [];
         for (let i = 0; i < tail.length; i += 1) {
           const entry = tail[i];
@@ -1306,32 +1413,57 @@ async function run() {
           const subscriptionId = entry.payload.subscription_id
             || entry.payload.request?.subscription_id;
           if (entityType !== membershipFamily || !subscriptionId) continue;
-          let snapshot = null;
+          let ready = null;
           for (let j = i + 1; j < tail.length; j += 1) {
             const later = tail[j];
+            if (later.kind !== "webrtc_entity_subscription") continue;
+            const payload = later.payload ?? {};
+            if (payload.state !== "ready") continue;
+            if (payload.entity_type !== membershipFamily) continue;
+            if (payload.subscription_id !== subscriptionId) continue;
+            if (typeof payload.subscription_id !== "string" || !payload.subscription_id) continue;
+            if (payload.generation == null && payload.snapshot_seq == null) continue;
+            ready = {
+              subscription_id: payload.subscription_id,
+              subscription_id_exact: true,
+              snapshot_seq: payload.snapshot_seq ?? null,
+              generation: payload.generation ?? null,
+              event_index: sinceEventCount + j
+            };
+            break;
+          }
+          if (!ready) continue;
+          let projectedSnapshot = null;
+          for (let k = (ready.event_index - sinceEventCount); k < tail.length; k += 1) {
+            const later = tail[k];
             if (later.kind !== "hub_frame") continue;
             const payload = later.payload ?? {};
             const nested = payload.payload ?? {};
             const kind = payload.kind || payload.type || nested.kind || nested.type;
             if (kind !== "entity_snapshot") continue;
             if (snapshotFamily(payload) !== membershipFamily) continue;
-            const snapSub = payload.subscription_id || nested.subscription_id || null;
-            if (snapSub && snapSub !== subscriptionId) continue;
-            snapshot = {
-              subscription_id: snapSub || subscriptionId,
-              subscription_id_exact: Boolean(snapSub),
-              snapshot_seq: payload.snapshot_seq ?? nested.snapshot_seq ?? null,
-              generation: payload.generation ?? nested.generation ?? null
+            const sequence = nested.sequence ?? payload.sequence ?? nested.snapshot_seq ?? payload.snapshot_seq ?? null;
+            if (ready.snapshot_seq != null && sequence != null && sequence !== ready.snapshot_seq) continue;
+            projectedSnapshot = {
+              family: membershipFamily,
+              sequence,
+              event_index: sinceEventCount + k
             };
             break;
           }
-          if (snapshot) {
-            pairs.push({
-              family: membershipFamily,
-              subscribe_subscription_id: subscriptionId,
-              snapshot
-            });
-          }
+          if (!projectedSnapshot) continue;
+          pairs.push({
+            family: membershipFamily,
+            subscribe_subscription_id: subscriptionId,
+            snapshot: {
+              subscription_id: ready.subscription_id,
+              subscription_id_exact: true,
+              snapshot_seq: ready.snapshot_seq,
+              generation: ready.generation
+            },
+            ready,
+            projected_snapshot: projectedSnapshot
+          });
         }
         if (pairs.length < 1) return null;
         return {

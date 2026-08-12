@@ -647,6 +647,24 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       "C6a must disconnect before the peer claim"
     )
     assert(
+      web_summary.dig("lanes", "c6a", "peer_prepared_before_disconnect") == true,
+      "C6a must prepare the peer browser before disconnect"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "s2_still_present_after_peer_claim") == true,
+      "C6a must prove S2 still on the disconnected picker after the offline peer claim"
+    )
+    c6a_closed = web_summary.dig("lanes", "c6a", "closed_evidence") || {}
+    assert(
+      c6a_closed["state"].to_s != "" && c6a_closed["event_index"].is_a?(Integer),
+      "C6a must record a closed transport event index: #{c6a_closed.inspect}"
+    )
+    c6a_recovery = web_summary.dig("lanes", "c6a", "recovery_baseline") || {}
+    assert(
+      c6a_recovery["event_count"].is_a?(Integer) && c6a_recovery["event_count"] > c6a_closed["event_index"],
+      "C6a recovery baseline must be after the closed event: closed=#{c6a_closed.inspect} recovery=#{c6a_recovery.inspect}"
+    )
+    assert(
       web_summary.dig("lanes", "c6a", "package_tool_claim") == false,
       "C6a must not use package-tool claims for the offline peer path"
     )
@@ -664,6 +682,14 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
         assert(
           snap["subscription_id"].to_s == pair["subscribe_subscription_id"].to_s,
           "C6a snapshot subscription_id must match subscribe: #{pair.inspect}"
+        )
+        assert(
+          snap["subscription_id_exact"] == true,
+          "C6a must use real snapshot subscription_id (no fabricate): #{pair.inspect}"
+        )
+        assert(
+          !snap["generation"].nil? || !snap["snapshot_seq"].nil?,
+          "C6a ready correlation must expose generation or snapshot_seq: #{pair.inspect}"
         )
       end
     end
@@ -687,6 +713,14 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       assert(
         snap["subscription_id"].to_s == pair["subscribe_subscription_id"].to_s,
         "C6b snapshot subscription_id must match subscribe: #{pair.inspect}"
+      )
+      assert(
+        snap["subscription_id_exact"] == true,
+        "C6b must use real snapshot subscription_id (no fabricate): #{pair.inspect}"
+      )
+      assert(
+        !snap["generation"].nil? || !snap["snapshot_seq"].nil?,
+        "C6b ready correlation must expose generation or snapshot_seq: #{pair.inspect}"
       )
     end
 

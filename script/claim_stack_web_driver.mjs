@@ -1040,7 +1040,7 @@ async function run() {
     if (!closed) {
       throw new Error("C6a closeDataChannel returned false");
     }
-    // Require a closed transport event — not any lifecycle noise.
+    // Require an exact webrtc_data_channel closed event (not lifecycle heuristics).
     const closedEvidence = await recon.waitForFunction(
       ({ sinceEventCount }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -1054,30 +1054,15 @@ async function run() {
               event_count_at_closed: i + 1
             };
           }
-          if (entry.kind === "webrtc_lifecycle") {
-            const detail = entry.payload ?? {};
-            const text = JSON.stringify(detail).toLowerCase();
-            if (
-              detail.state === "closed"
-              || detail.state === "disconnected"
-              || detail.readyState === "closed"
-              || text.includes("\"closed\"")
-              || text.includes("\"disconnected\"")
-            ) {
-              return {
-                kind: "webrtc_lifecycle",
-                state: detail.state || detail.readyState || "closed",
-                event_index: i,
-                event_count_at_closed: i + 1
-              };
-            }
-          }
         }
         return null;
       },
       { sinceEventCount: preClose.event_count },
       { timeout: 20_000 }
     ).then((handle) => handle.jsonValue());
+    if (closedEvidence.kind !== "webrtc_data_channel" || closedEvidence.state !== "closed") {
+      throw new Error(`C6a expected exact webrtc_data_channel closed: ${JSON.stringify(closedEvidence)}`);
+    }
     // Peer claims S2 while recon is offline (no package-tool claim path).
     const peerClaim = await submitAdd(
       reconPeer,
@@ -1091,29 +1076,35 @@ async function run() {
     if (!peerAccepted) {
       throw new Error(`C6a peer claim was not accepted: ${JSON.stringify(peerClaim.result)}`);
     }
-    // Offline proof: disconnected picker still holds S2 after the peer claim succeeded.
-    // If recon had already recovered live, membership reconciliation would have cleared S2.
+    // Offline proof requires BOTH: channel still closed (no open after closed) AND S2 still
+    // projected. Picker-only is insufficient — a delayed live membership update can leave S2
+    // rendered after the channel already reopened.
+    const offlineAtPeerClaim = await recon.evaluate(({ closedEventIndex }) => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const afterClosed = events.slice(closedEventIndex + 1);
+      const openEntry = afterClosed.find((entry) =>
+        entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
+      );
+      return {
+        channel_still_closed: !openEntry,
+        event_count: events.length,
+        closed_event_index: closedEventIndex,
+        reopen_event_index: openEntry
+          ? closedEventIndex + 1 + afterClosed.indexOf(openEntry)
+          : null
+      };
+    }, { closedEventIndex: closedEvidence.event_index });
+    if (!offlineAtPeerClaim.channel_still_closed) {
+      throw new Error(
+        `C6a: data channel reopened before offline peer-claim proof: ${JSON.stringify(offlineAtPeerClaim)}`
+      );
+    }
     const optionsAfterPeerClaim = await readSelectOptions(reconForm);
     if (!optionsAfterPeerClaim.includes(assignment.session_s2)) {
       throw new Error(
         `C6a: S2 cleared before recovery baseline (peer claim not proven offline): ${JSON.stringify(optionsAfterPeerClaim)}`
       );
     }
-    // Transport state at peer-claim proof time. Channel reopen alone is not a fail: a fast
-    // reconnect can open before the membership snapshot applies. S2 still on the picker is
-    // the offline-claim oracle (live membership would have cleared it).
-    const offlineAtPeerClaim = await recon.evaluate(({ closedEventIndex }) => {
-      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const afterClosed = events.slice(closedEventIndex + 1);
-      const reopened = afterClosed.some((entry) =>
-        entry.kind === "webrtc_data_channel" && entry.payload?.state === "open"
-      );
-      return {
-        channel_still_closed: !reopened,
-        event_count: events.length,
-        closed_event_index: closedEventIndex
-      };
-    }, { closedEventIndex: closedEvidence.event_index });
     // Recovery baseline is set only after offline peer-claim proof so early reconnect
     // snapshots cannot satisfy the recovery oracle.
     const recoveryBaseline = await recon.evaluate(() => {
@@ -1266,10 +1257,13 @@ async function run() {
       closed: true,
       closed_evidence: closedEvidence,
       peer_prepared_before_disconnect: true,
-      // Derived from ordered events: closed transport event index, then S2 still projected.
+      // Derived: exact webrtc_data_channel closed, channel still closed at peer claim, S2 held.
       disconnected_before_peer_claim: Boolean(
         closedEvidence
+        && closedEvidence.kind === "webrtc_data_channel"
+        && closedEvidence.state === "closed"
         && typeof closedEvidence.event_index === "number"
+        && offlineAtPeerClaim.channel_still_closed === true
         && optionsAfterPeerClaim.includes(assignment.session_s2)
       ),
       s2_still_present_after_peer_claim: optionsAfterPeerClaim.includes(assignment.session_s2),

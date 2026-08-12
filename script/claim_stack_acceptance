@@ -656,8 +656,17 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
     )
     c6a_closed = web_summary.dig("lanes", "c6a", "closed_evidence") || {}
     assert(
-      c6a_closed["state"].to_s != "" && c6a_closed["event_index"].is_a?(Integer),
+      c6a_closed["kind"] == "webrtc_data_channel" && c6a_closed["state"] == "closed",
+      "C6a must record an exact webrtc_data_channel closed event: #{c6a_closed.inspect}"
+    )
+    assert(
+      c6a_closed["event_index"].is_a?(Integer),
       "C6a must record a closed transport event index: #{c6a_closed.inspect}"
+    )
+    c6a_offline = web_summary.dig("lanes", "c6a", "offline_at_peer_claim") || {}
+    assert(
+      c6a_offline["channel_still_closed"] == true,
+      "C6a must require channel_still_closed at peer claim: #{c6a_offline.inspect}"
     )
     c6a_recovery = web_summary.dig("lanes", "c6a", "recovery_baseline") || {}
     assert(

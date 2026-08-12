@@ -101,27 +101,39 @@ script/test
 # includes claim-stack Ruby syntax, input validator negatives, driver contract tokens, README tokens
 ```
 
-### Live claim-stack (opt-in)
+### Live claim-stack (opt-in) — **passed**
 
 ```sh
 script/test-hub-flow claim-stack validate-inputs /absolute/path/to/inputs.json
 script/test-hub-flow claim-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
+# script/claim_stack_acceptance: ok
 ```
 
-Pin floors enforced in harness + README:
+Representative green evidence directory: `/private/tmp/claim-stack-evidence-1786529019` (`summary.json` status `passed`).
 
-| Component | Minimum |
+| Component | Live pin used |
 | --- | --- |
-| Workspaces | `7ab4d1334214b3ea3c8b02e9ea665a27e70c0916` |
-| Hub | `de6b09982e72fd5efd04a5258f5fc645f611adbc` |
-| Web | `102d39ea6c8ae7b927006dfba109171191c7b775` (`armDropNextInboundEntityFrame`) |
-| TUI | `abc804e19bc3e01465cd308c11de5f4292331c3d` |
+| Workspaces harness | `f038d1d72b853b5a26cca18049cba947766c9d88` (≥ `7ab4d13`) |
+| Hub binary source | `de6b09982e72fd5efd04a5258f5fc645f611adbc` |
+| Web package + driver | `102d39ea6c8ae7b927006dfba109171191c7b775` |
+| TUI package + driver | `abc804e19bc3e01465cd308c11de5f4292331c3d` |
 
-Frame-drop control name (from Web implement report):  
+Parent Web campaign lanes completed: **c1, c3, c4, c5, c6a, c6b**.
+
+Supporting consumers:
+
+| Consumer | Result |
+| --- | --- |
+| Web `smoke:workspaces-lifecycle` | passed |
+| TUI `script/test-live-hub workspaces lifecycle` | passed |
+
+Frame-drop control:  
 `globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })`  
 Chronology: warmup A → drop B → gap C.
 
 Reconnect control: `transportControl.closeDataChannel` (not page reload).
+
+SPA request-state: dual-browser results correlate per SPA document (`ui-action-N` sequences are not globally unique across browser contexts; oracles key on workspace/request pairs).
 
 ### Production entry-point statement
 
@@ -129,10 +141,9 @@ Workspaces app surface → Add existing session → Available sessions `entity_o
 
 ## Unverified behavior or residual risk
 
-1. Full end-to-end live claim-stack evidence directory may be incomplete if pin worktree builds or supporting consumer smokes fail in this environment; static contract coverage always runs in `script/test`.
-2. Dual-browser SPA request-state oracles depend on Web harness event emission of `plugin_surface_action` / action results; pin mismatch without frame-drop control fails closed at source scan.
-3. TUI same-Hub keyboard claim is supporting-only (see deviations).
-4. Historical C5 requires the parent to end/remove the seed session before the advanced path; Hub remove API variance is tolerated with fallbacks.
+1. TUI keyboard claim on the **same** parent Hub data-dir remains supporting-only (`script/test-live-hub workspaces lifecycle` owns its Hub). Parent campaign proves Web dual-browser claim on the shared Hub.
+2. Label/lifecycle live metadata projection depends on Hub supplying those fields; when absent, the driver records null rather than inventing values.
+3. Dual-browser request_id strings may collide across documents; correlation uses per-context request observation plus workspace id.
 
 ## Missing vault guidance discovered
 

@@ -646,11 +646,23 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       web_summary.dig("lanes", "c6b", "stale_outbound_for_held_a").to_i == 0,
       "C6b must assert zero stale outbound for held A"
     )
-    c6b_families = web_summary.dig("lanes", "c6b", "gap_evidence", "by_family") || {}
+    c6b_evidence = web_summary.dig("lanes", "c6b", "gap_evidence") || {}
+    assert(c6b_evidence["sequence_gap"] == true, "C6b must prove sequence_gap")
+    assert(c6b_evidence["resubscribe"] == true, "C6b must prove membership resubscribe")
+    assert(c6b_evidence["replacement_snapshot"] == true, "C6b must prove membership replacement snapshot")
+    c6b_families = c6b_evidence["by_family"] || {}
     membership_gap = c6b_families["botster-workspaces.membership"]
     assert(
       membership_gap.is_a?(Hash) && membership_gap.fetch("subscribe_count", 0).to_i > 0,
       "C6b must family-correlate membership resubscribe: #{c6b_families.inspect}"
+    )
+    assert(
+      c6b_evidence.fetch("membership_subscribe_delta", 0).to_i >= 1,
+      "C6b membership subscribe delta must be positive: #{c6b_evidence.inspect}"
+    )
+    assert(
+      c6b_evidence.fetch("membership_snapshot_delta", 0).to_i >= 1,
+      "C6b membership snapshot delta must be positive: #{c6b_evidence.inspect}"
     )
 
     # ---- C2: parent-owned TUI keyboard claim on the same clean Hub ----

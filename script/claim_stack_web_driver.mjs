@@ -1315,25 +1315,23 @@ async function run() {
             }
           }
         }
-        // Membership family must resubscribe and replace after the armed drop (primary gap family).
+        // Armed drop is membership-only; require that family's post-gap resubscribe + replacement
+        // snapshot. Session family counters are recorded for correlation evidence but are not
+        // required to advance when the gap was not on that family.
         const membershipAdvanced =
           byFamily[membershipFamily].subscribe_count > (priorByFamily[membershipFamily]?.subscribe_count ?? 0)
           && byFamily[membershipFamily].snapshot_count > (priorByFamily[membershipFamily]?.snapshot_count ?? 0);
-        // Session family must also show a post-gap replacement snapshot when it was subscribed.
-        const sessionFamily = "session";
-        const sessionWasSubscribed = (priorByFamily[sessionFamily]?.subscribe_count ?? 0) > 0
-          || byFamily[sessionFamily].subscribe_count > 0;
-        const sessionAdvanced = !sessionWasSubscribed || (
-          byFamily[sessionFamily].subscribe_count > (priorByFamily[sessionFamily]?.subscribe_count ?? 0)
-          && byFamily[sessionFamily].snapshot_count > (priorByFamily[sessionFamily]?.snapshot_count ?? 0)
-        );
-        if (!gapHit || !membershipAdvanced || !sessionAdvanced) return null;
+        if (!gapHit || !membershipAdvanced) return null;
         return {
           sequence_gap: true,
           resubscribe: true,
           replacement_snapshot: true,
           by_family: byFamily,
           membership_family: membershipFamily,
+          membership_subscribe_delta:
+            byFamily[membershipFamily].subscribe_count - (priorByFamily[membershipFamily]?.subscribe_count ?? 0),
+          membership_snapshot_delta:
+            byFamily[membershipFamily].snapshot_count - (priorByFamily[membershipFamily]?.snapshot_count ?? 0),
           tail_count: tail.length
         };
       },

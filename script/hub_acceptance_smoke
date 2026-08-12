@@ -9,7 +9,7 @@ PACKAGE = "botster-workspaces"
 SURFACE = "workspaces"
 PROTOCOL = "botster-hub-daemon-v1"
 PROTOCOL_VERSION = 6
-CONFORMANCE_FIXTURE_REVISION = 34
+CONFORMANCE_FIXTURE_REVISION = 35
 SESSION_TYPE_FEATURE = "session_type_entity_subscriptions"
 LEGACY_MANIFEST_PACKAGE = "botster-workspaces-legacy-manifest-negative"
 LEGACY_MANIFEST_SESSION_TYPE_ID = "#{LEGACY_MANIFEST_PACKAGE}/legacy-acceptance"
@@ -571,12 +571,23 @@ assert(
 # ---------------------------------------------------------------------------
 # Six operator producer checks (question_1786508223_721040).
 # Production claim/remove tools + held generic membership subscription.
-# Free-text advanced field is historical recovery only; normal path is entity_options.
-#
-# Seed one membership before SubscribeEntities so the provider baseline is a
-# non-empty JSON array. Empty Lua `items = {}` still fails validation on some
-# Hub builds; non-empty baselines exercise the real held-open fanout path.
+# Advanced historical UUID field is recovery only; normal path is entity_options.
 # ---------------------------------------------------------------------------
+
+# Empty membership snapshot must be truthful items == [] (no sentinel rows).
+# Hub coerce_entity_frame_empty_items makes empty Lua items tables valid arrays.
+empty_membership_socket, empty_membership_snapshot = open_membership_entity_subscription(
+  socket_path,
+  "workspaces-membership-empty-#{Process.pid}"
+)
+assert(empty_membership_snapshot["type"] == "entity_snapshot", "empty membership baseline must be entity_snapshot")
+assert(empty_membership_snapshot["entity_type"] == "botster-workspaces.membership", "empty membership family mismatch")
+assert(
+  empty_membership_snapshot["items"] == [],
+  "empty membership snapshot must be items == [] with no sentinel rows: #{empty_membership_snapshot["items"].inspect}"
+)
+empty_membership_socket.close
+
 producer_seed_session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 producer_session_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 seed_claim = call_tool(
@@ -593,6 +604,10 @@ held_membership_socket, held_membership_baseline = open_membership_entity_subscr
 assert(held_membership_baseline["type"] == "entity_snapshot", "held membership baseline must be entity_snapshot")
 assert(held_membership_baseline["entity_type"] == "botster-workspaces.membership", "held membership family mismatch")
 assert(held_membership_baseline["items"].is_a?(Array), "held membership baseline items must be an array")
+assert(
+  held_membership_baseline["items"].none? { |item| item["session_uuid"].to_s.empty? || item["id"].to_s.start_with?("__") },
+  "membership snapshot must not include sentinel rows"
+)
 assert(
   held_membership_baseline["items"].any? { |item| item["session_uuid"] == producer_seed_session_id },
   "held membership baseline must include the seed claim"

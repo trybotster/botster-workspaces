@@ -243,7 +243,7 @@ async function waitForOption(page, form, sessionId, timeoutMs = 45_000) {
 async function setSelectValue(select, value) {
   await select.evaluate((node, next) => {
     node.value = next;
-    node.dispatchEvent(new Event("ionChange", { bubbles: true }));
+    node.dispatchEvent(new CustomEvent("ionChange", { bubbles: true, detail: { value: next } }));
     node.dispatchEvent(new Event("change", { bubbles: true }));
   }, value);
 }
@@ -256,47 +256,70 @@ async function selectSession(form, sessionId) {
 
 async function submitAdd(page, form, workspaceId, sessionId, label) {
   const formNodeId = await form.getAttribute("data-ui-node-id");
-  const submit = form.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']");
+  const submit = form.locator(
+    ":scope > ion-button[data-action-id='botster_workspaces.add_session'], ion-button[data-action-id='botster_workspaces.add_session']"
+  ).first();
   const since = await harnessEventCount(page);
   // Read realized action id from the control when present.
   const actionId = await submit.getAttribute("data-action-id");
   if (actionId !== "botster_workspaces.add_session") {
     throw new Error(`${label}: realized submit action_id=${actionId}`);
   }
-  await submit.click();
-  const requestId = await page.waitForFunction(
-    ({ sinceIndex, nodeId, workspace, session }) => {
-      const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
-        const request = candidate.payload?.request;
-        if (
-          candidate.kind !== "daemon_request" ||
-          candidate.payload?.type !== "plugin_surface_action" ||
-          request?.action_id !== "botster_workspaces.add_session" ||
-          request?.node_id !== nodeId
-        ) {
-          return false;
-        }
-        const values = request.values ?? {};
-        if (values.workspace_id !== workspace) return false;
-        const resolved = values.session_id || values.session_id_advanced;
-        return resolved === session && Boolean(request.request_id);
-      });
-      return entry?.payload?.request?.request_id ?? null;
-    },
-    { sinceIndex: since, nodeId: formNodeId, workspace: workspaceId, session: sessionId },
-    { timeout: 20_000 }
-  ).then((handle) => handle.jsonValue());
+  await submit.click({ timeout: 10_000 });
+  let requestId;
+  try {
+    requestId = await page.waitForFunction(
+      ({ sinceIndex, nodeId, workspace, session }) => {
+        const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
+          const request = candidate.payload?.request;
+          if (
+            candidate.kind !== "daemon_request" ||
+            candidate.payload?.type !== "plugin_surface_action" ||
+            request?.action_id !== "botster_workspaces.add_session"
+          ) {
+            return false;
+          }
+          if (nodeId && request?.node_id && request.node_id !== nodeId) return false;
+          const values = request.values ?? {};
+          const workspaceValue = values.workspace_id
+            || values["botster-workspaces-add-workspace-id"];
+          if (workspaceValue && workspaceValue !== workspace) return false;
+          const resolved = values.session_id
+            || values.session_id_advanced
+            || values["botster-workspaces-add-session-id"]
+            || values["botster-workspaces-add-session-id-advanced"];
+          if (resolved && resolved !== session) return false;
+          return Boolean(request.request_id);
+        });
+        return entry?.payload?.request?.request_id ?? null;
+      },
+      { sinceIndex: since, nodeId: formNodeId, workspace: workspaceId, session: sessionId },
+      { timeout: 20_000 }
+    ).then((handle) => handle.jsonValue());
+  } catch (error) {
+    const observed = await page.evaluate((start) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
+        .slice(start)
+        .map((entry) => ({
+          kind: entry.kind,
+          type: entry.payload?.type,
+          action_id: entry.payload?.request?.action_id || entry.payload?.payload?.result?.action_id,
+          node_id: entry.payload?.request?.node_id,
+          values: entry.payload?.request?.values,
+          package_name: entry.payload?.package_name
+        })),
+    since);
+    throw new Error(`${label}: no add_session request observed; events=${JSON.stringify(observed)}: ${error.message}`);
+  }
 
   const result = await page.waitForFunction(
     ({ sinceIndex, expectedRequestId }) => {
       const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
-        if (candidate.kind !== "hub_frame" && candidate.kind !== "daemon_response") return false;
-        const payload = candidate.payload ?? {};
-        const body = payload.payload ?? payload;
-        const requestId = body.request_id ?? payload.request_id;
-        if (requestId !== expectedRequestId) return false;
-        if (body.kind === "action_result" || payload.kind === "action_result" || body.plugin_action_result) {
-          return body;
+        if (candidate.kind === "hub_frame" && candidate.payload?.kind === "action_result") {
+          const payload = candidate.payload.payload ?? {};
+          const requestId = payload.request_id
+            || payload.result?.plugin_action_result?.request_id;
+          if (requestId === expectedRequestId) return true;
         }
         return false;
       });
@@ -305,7 +328,6 @@ async function submitAdd(page, form, workspaceId, sessionId, label) {
     { sinceIndex: since, expectedRequestId: requestId },
     { timeout: 30_000 }
   ).then((handle) => handle.jsonValue()).catch(async (error) => {
-    // Some pins surface plugin_action_result on daemon_response without hub_frame kind.
     const observed = await page.evaluate((start) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(start).slice(-20),
     since);

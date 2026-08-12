@@ -31,7 +31,9 @@ RECONNECT_CONTROL = "transportControl.closeDataChannel"
 WEB_MIN_PIN = "102d39ea6c8ae7b927006dfba109171191c7b775"
 WORKSPACES_MIN_PIN = "7ab4d1334214b3ea3c8b02e9ea665a27e70c0916"
 HUB_MIN_PIN = "de6b09982e72fd5efd04a5258f5fc645f611adbc"
-TUI_MIN_PIN = "abc804e19bc3e01465cd308c11de5f4292331c3d"
+# Shared-Hub Available sessions keyboard claim seam (ticket_1786529885_807584).
+TUI_MIN_PIN = "d40f28f9de2b621e50367c0f014880429eddedde"
+TUI_CLAIM_SCHEMA = "botster.tui.workspaces-claim-driver/v1"
 
 class HubExited < RuntimeError
   attr_reader :status
@@ -322,6 +324,47 @@ def unique_session_refs!(refs, label)
   refs
 end
 
+def hub_build_target_dir(hub_binary)
+  # BOTSTER_HUB_BIN is typically $TARGET/release/botster-hub.
+  File.expand_path("..", File.dirname(File.realpath(hub_binary)))
+end
+
+def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
+  assert(File.file?(path), "TUI claim evidence missing: #{path}")
+  records = File.readlines(path, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+  assert(records.any? { |row| row["kind"] == "complete" }, "TUI claim evidence omitted complete: #{path}")
+  assert(records.none? { |row| row["kind"] == "failure" }, "TUI claim evidence recorded failure: #{path}")
+  join = records.find { |row| row["kind"] == "membership_join" }
+  assert(join, "TUI claim evidence omitted membership_join")
+  assert(join.dig("payload", "workspace_id") == workspace_id, "TUI membership_join workspace mismatch")
+  assert(join.dig("payload", "session_uuid") == session_uuid, "TUI membership_join session mismatch")
+  excluded = records.find { |row| row["kind"] == "option_excluded" }
+  assert(excluded, "TUI claim evidence omitted option_excluded")
+  assert(excluded.dig("payload", "session_uuid") == session_uuid, "TUI option_excluded session mismatch")
+  complete = records.find { |row| row["kind"] == "complete" }
+  assert(complete.dig("payload", "action_id") == "botster_workspaces.add_session", "TUI complete action_id mismatch")
+  assert(complete.dig("payload", "session_uuid") == session_uuid, "TUI complete session mismatch")
+  assert(complete.dig("payload", "workspace_id") == workspace_id, "TUI complete workspace mismatch")
+  add = records.find do |row|
+    row["kind"] == "dispatched_action" && row.dig("payload", "action_id") == "botster_workspaces.add_session"
+  end
+  assert(add, "TUI claim evidence omitted dispatched add_session")
+  values = add.dig("payload", "values") || {}
+  resolved = values["session_id"] || values["session_id_advanced"]
+  assert(resolved == session_uuid, "TUI add_session values must carry exact session_uuid: #{values.inspect}")
+  summary = records.find { |row| row["kind"] == "request_summary" }
+  if summary
+    assert(summary.dig("payload", "list_sessions_count").to_i == 0, "TUI claim issued list_sessions")
+  end
+  {
+    "record_count" => records.length,
+    "membership_join" => join.fetch("payload"),
+    "option_excluded" => excluded.fetch("payload"),
+    "complete" => complete.fetch("payload"),
+    "add_session_request_id" => add.dig("payload", "request_id"),
+  }
+end
+
 manifest_path, evidence_argument = ARGV
 unless ARGV.length == 2
   warn "usage: script/claim_stack_acceptance MANIFEST EVIDENCE_DIR"
@@ -548,6 +591,58 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       "C1 must prove lifecycle live update while dialog held open"
     )
 
+    # ---- C2: parent-owned TUI keyboard claim on the same clean Hub ----
+    # Consumes botster-tui claim seam from ticket_1786529885_807584 (≥ d40f28f).
+    claim_driver = File.join(tui_path, "script", "write-claim-build-receipt")
+    assert(File.executable?(claim_driver), "TUI pin lacks script/write-claim-build-receipt (need ≥ d40f28f)")
+    assert(
+      File.file?(File.join(tui_path, "crates", "botster-tui", "fixtures", "workspaces-claim-driver-v1.scenario.json")),
+      "TUI pin lacks workspaces-claim-driver fixtures"
+    )
+    hub_source = artifacts.fetch("hub_binary").fetch("source_checkout")
+    hub_build_target = hub_build_target_dir(hub_binary)
+    receipt_path = File.join(evidence_dir, "tui-claim-build-receipt.json")
+    session_tui = SecureRandom.uuid
+    spawn_unclaimed_session!(daemon, session_tui)
+    w_tui = create_workspace!(daemon, "Claim TUI")
+    tui_scenario_path = File.join(evidence_dir, "tui-claim.scenario.json")
+    tui_evidence_path = File.join(evidence_dir, "tui-claim.evidence.jsonl")
+    File.write(tui_scenario_path, JSON.pretty_generate({
+      "schema" => TUI_CLAIM_SCHEMA,
+      "workspace_id" => w_tui.fetch("id"),
+      "session_uuid" => session_tui,
+      "hub_source_path" => hub_source,
+      "workspaces_package_path" => workspaces_path,
+    }))
+    tui_claim_env = {
+      "BOTSTER_HUB_SOURCE_PATH" => hub_source,
+      "BOTSTER_HUB_BUILD_TARGET_DIR" => hub_build_target,
+      "BOTSTER_HUB_BIN" => hub_binary,
+      "BOTSTER_SESSION_WORKER_BIN" => worker_binary,
+      "BOTSTER_TUI_CLAIM_BUILD_RECEIPT" => receipt_path,
+      "BOTSTER_WORKSPACES_PACKAGE_PATH" => workspaces_path,
+      "BOTSTER_HUB_DATA_DIR" => data_dir,
+      "BOTSTER_LIVE_DATA_DIR" => data_dir,
+      "BOTSTER_TUI_ACCEPTANCE_SCENARIO" => tui_scenario_path,
+      "BOTSTER_TUI_ACCEPTANCE_EVIDENCE" => tui_evidence_path,
+      "PATH" => ENV.fetch("PATH"),
+    }
+    run!(claim_driver, chdir: tui_path, env: tui_claim_env)
+    assert(File.file?(receipt_path), "TUI claim build receipt was not written")
+    run_process!(
+      [hub_binary, "apps", "open", "--data-dir", data_dir, "botster-tui"],
+      chdir: tui_path,
+      env: tui_claim_env,
+      output_path: File.join(evidence_dir, "tui-claim.log"),
+      timeout: 300
+    )
+    tui_claim = parse_tui_claim_evidence!(tui_evidence_path, w_tui.fetch("id"), session_tui)
+    tui_refs = unique_session_refs!(workspace_session_refs(daemon, w_tui.fetch("id")), "TUI claim workspace")
+    assert(
+      tui_refs.count { |ref| ref == session_tui } == 1,
+      "TUI claim must leave exactly one membership for #{session_tui}: #{tui_refs.inspect}"
+    )
+
     # Supporting consumer re-checks (section D) — separate clean Hubs by consumer design.
     # Web lifecycle rejects BOTSTER_LIVE_DATA_DIR; TUI lifecycle owns its hub.
     supporting = { "web_lifecycle" => nil, "tui_lifecycle" => nil }
@@ -614,6 +709,8 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       "frame_drop_control" => FRAME_DROP_CONTROL,
       "reconnect_control" => RECONNECT_CONTROL,
       "web_dependency_ticket" => "ticket_1786518263_839128",
+      "tui_dependency_ticket" => "ticket_1786529885_807584",
+      "tui_claim_schema" => TUI_CLAIM_SCHEMA,
       "pins" => {
         "hub" => hub_revision,
         "web" => web_revision,
@@ -632,12 +729,14 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       "web_dist_sha256" => web_digest_before,
       "packages" => packages,
       "web_campaign" => web_summary,
+      "tui_claim" => tui_claim,
       "membership_oracles" => {
         "c3_race_owner_count" => race_owners,
         "c3_w1_refs" => race_refs_w1,
         "c3_w2_refs" => race_refs_w2,
         "c4_w1_has_idem" => idem_refs.include?(session_idem),
         "c1_removed" => !workspace_session_refs(daemon, w1.fetch("id")).include?(session_s),
+        "tui_claim_membership" => tui_refs.include?(session_tui),
       },
       "spa_request_state" => {
         "c3" => c3,
@@ -649,7 +748,8 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
         "Workspaces app surface → Add existing session → Available sessions entity_options " \
         "(or advanced historical when absent) → realized botster_workspaces.add_session with " \
         "correlated request_id → membership batch + entity_publish → generic Web entity stores " \
-        "update open pickers; reconnect baselines replace entity stores from authoritative snapshots; " \
+        "update open pickers; TUI claim uses botster.tui.workspaces-claim-driver/v1 keyboard path on " \
+        "the same Hub; reconnect baselines replace entity stores from authoritative snapshots; " \
         "ordered gap uses #{FRAME_DROP_CONTROL} before receiveEntityFrame.",
       "completed" => true,
     }

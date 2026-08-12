@@ -224,7 +224,7 @@ Minimum consumer pins (refresh at run time; dirty checkouts fail closed):
 | Workspaces package | `7ab4d1334214b3ea3c8b02e9ea665a27e70c0916` |
 | Hub binary source | `de6b09982e72fd5efd04a5258f5fc645f611adbc` |
 | Web package + driver | `102d39ea6c8ae7b927006dfba109171191c7b775` (includes `armDropNextInboundEntityFrame`) |
-| TUI package + driver | `abc804e19bc3e01465cd308c11de5f4292331c3d` |
+| TUI package + driver | `d40f28f9de2b621e50367c0f014880429eddedde` (shared-Hub claim-driver) |
 
 Parent campaign lanes (one shared `--data-dir`):
 
@@ -238,6 +238,12 @@ Parent campaign lanes (one shared `--data-dir`):
   `transportControl.closeDataChannel` reconnect, and ordered
   `sequence_gap` via `transportControl.armDropNextInboundEntityFrame` (Web
   ticket `ticket_1786518263_839128`).
+- Production TUI keyboard claim on the **same** Hub via
+  `botster.tui.workspaces-claim-driver/v1` (`apps open botster-tui` with
+  `BOTSTER_TUI_ACCEPTANCE_SCENARIO` / evidence, strict build receipt from
+  `script/write-claim-build-receipt`). Proves realized
+  `botster_workspaces.add_session`, membership join, and option exclusion
+  (TUI ticket `ticket_1786529885_807584`).
 - Supporting pin-matched consumer re-checks (separate clean Hubs by consumer
   design): Web `npm run smoke:workspaces-lifecycle` and TUI
   `script/test-live-hub workspaces lifecycle`.

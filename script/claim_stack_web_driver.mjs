@@ -416,8 +416,37 @@ async function bootstrapClient(browser, appUrl, label) {
   return page;
 }
 
+/**
+ * Parse projected option metadata from realized Ionic options.
+ * Web renders entity_options as joined label text (· separators), not data-* attributes.
+ */
+function parseProjectedOptionFields(value, label, attrs = {}) {
+  const text = (label || "").trim();
+  const parts = text.split(/\s*·\s*/).map((part) => part.trim()).filter(Boolean);
+  const lifecycleWord = /^(running|exited|starting|stopping|failed|stale)$/i;
+  const lifecycleClassWord = /^(current|ended|indeterminate)$/i;
+  let lifecycle = attrs.lifecycle || null;
+  let lifecycleClass = attrs.lifecycle_class || null;
+  let sessionType = attrs.session_type || attrs.session_type_id || null;
+  let spawnPoint = attrs.spawn_point || null;
+  for (const part of parts) {
+    if (!lifecycle && lifecycleWord.test(part)) lifecycle = part.toLowerCase();
+    else if (!lifecycleClass && lifecycleClassWord.test(part)) lifecycleClass = part.toLowerCase();
+    else if (!sessionType && part.includes("/") && part !== value) sessionType = part;
+    else if (!spawnPoint && /^(local|remote|device|host)/i.test(part)) spawnPoint = part;
+  }
+  return {
+    value,
+    label: text,
+    lifecycle,
+    lifecycle_class: lifecycleClass,
+    session_type: sessionType,
+    spawn_point: spawnPoint
+  };
+}
+
 async function optionMetadata(form, sessionId) {
-  return form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option").evaluateAll((nodes, expected) => {
+  const raw = await form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option").evaluateAll((nodes, expected) => {
     const match = nodes.find((node) => (node.value ?? node.getAttribute("value")) === expected);
     if (!match) return null;
     return {
@@ -428,6 +457,8 @@ async function optionMetadata(form, sessionId) {
       spawn_point: match.getAttribute("data-spawn-point") ?? match.dataset?.spawnPoint ?? null
     };
   }, sessionId);
+  if (!raw) return null;
+  return parseProjectedOptionFields(raw.value, raw.label, raw);
 }
 
 // Daemon subscribe_entities entity_type values (not UiNode path forms).
@@ -613,10 +644,16 @@ async function run() {
           `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
         )].find((option) => (option.value ?? option.getAttribute("value")) === sessionId);
         if (!match) return false;
-        const lifecycle = match.getAttribute("data-lifecycle") || "";
-        // Require the lifecycle attribute itself to change (not only derived label text).
+        const text = (match.textContent || "").trim();
+        const attr = match.getAttribute("data-lifecycle") || "";
+        const parts = text.split(/\s*·\s*/).map((part) => part.trim().toLowerCase());
+        const lifecycleFromLabel = parts.find((part) =>
+          /^(running|exited|starting|stopping|failed|stale)$/.test(part)
+        ) || "";
+        const lifecycle = attr || lifecycleFromLabel;
+        // Require lifecycle token change independent of a dedicated producer label field.
         return lifecycle
-          && lifecycle !== lifecycleBeforeValue
+          && lifecycle !== (lifecycleBeforeValue || "")
           && /exited|ended|failed|stopping/i.test(lifecycle);
       },
       {

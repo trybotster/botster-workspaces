@@ -1,7 +1,31 @@
 local PLUGIN = "botster-workspaces"
 local STATE_KEY = "workspace_state"
+local MEMBERSHIP_KEY_PREFIX = "membership:"
+local MEMBERSHIP_SEQ_KEY = "membership_entity_seq"
 local ENTITY_FAMILY = "botster-workspaces.workspace"
+local MEMBERSHIP_ENTITY_FAMILY = "botster-workspaces.membership"
 local SURFACE_ID = "workspaces"
+
+local MEMBERSHIP_PAYLOAD_KEYS = {
+  session_uuid = true,
+  workspace_id = true,
+}
+
+local MEMBERSHIP_SEQ_PAYLOAD_KEYS = {
+  next_seq = true,
+}
+
+local function membership_key(session_uuid)
+  return MEMBERSHIP_KEY_PREFIX .. session_uuid
+end
+
+local function membership_record(session_uuid, workspace_id)
+  return {
+    id = session_uuid,
+    session_uuid = session_uuid,
+    workspace_id = workspace_id,
+  }
+end
 
 local WORKSPACE_KEYS = {
   id = true,
@@ -160,44 +184,328 @@ local function validate_state(state)
   return nil
 end
 
+local function plugin_db_capability()
+  return botster and botster.capabilities and botster.capabilities.plugin_db or nil
+end
+
 local function load_state()
-  local plugin_db = botster and botster.capabilities
-    and botster.capabilities.plugin_db
+  local plugin_db = plugin_db_capability()
   if not plugin_db or type(plugin_db.get) ~= "function" then
-    return default_state(), nil
+    return default_state(), nil, 0
   end
 
   local ok, result = pcall(plugin_db.get, { key = STATE_KEY })
   if not ok then
-    return nil, error_result("workspace_state_read_failed", "failed to read workspace state")
+    return nil, error_result("workspace_state_read_failed", "failed to read workspace state"), nil
   end
   if not result or not result.record then
-    return default_state(), nil
+    return default_state(), nil, 0
   end
   local state = result.record.payload
   local invalid = validate_state(state)
   if invalid then
-    return nil, invalid
+    return nil, invalid, nil
   end
-  return copy(state), nil
+  return copy(state), nil, result.record.revision or 0
 end
 
-local function persist_state(state)
-  local plugin_db = botster and botster.capabilities
-    and botster.capabilities.plugin_db
+local function get_membership(session_uuid)
+  local plugin_db = plugin_db_capability()
+  if not plugin_db or type(plugin_db.get) ~= "function" then
+    return nil, 0
+  end
+  local ok, result = pcall(plugin_db.get, { key = membership_key(session_uuid) })
+  if not ok then
+    return nil, nil, error_result("membership_read_failed", "failed to read membership index")
+  end
+  if not result or not result.record then
+    return nil, 0
+  end
+  local payload = result.record.payload
+  if type(payload) ~= "table"
+    or not exact_keys(payload, MEMBERSHIP_PAYLOAD_KEYS)
+    or not valid_session_id(payload.session_uuid)
+    or payload.session_uuid ~= session_uuid
+    or trim(payload.workspace_id) ~= payload.workspace_id then
+    return nil, nil, error_result("legacy_workspace_schema", "membership index uses an unsupported schema")
+  end
+  return copy(payload), result.record.revision or 0
+end
+
+local function list_membership_records()
+  local plugin_db = plugin_db_capability()
+  if not plugin_db then
+    return {}, nil
+  end
+  local records = {}
+  if type(plugin_db.list) == "function" then
+    local ok, listed = pcall(plugin_db.list, { prefix = MEMBERSHIP_KEY_PREFIX })
+    if not ok then
+      return nil, error_result("membership_list_failed", "failed to list membership index")
+    end
+    local entries = type(listed) == "table" and (listed.entries or listed) or {}
+    for _, entry in ipairs(entries) do
+      local key = type(entry) == "table" and entry.key or entry
+      if type(key) == "string" and key:sub(1, #MEMBERSHIP_KEY_PREFIX) == MEMBERSHIP_KEY_PREFIX then
+        local session_uuid = key:sub(#MEMBERSHIP_KEY_PREFIX + 1)
+        local membership, _, membership_error = get_membership(session_uuid)
+        if membership_error then
+          return nil, membership_error
+        end
+        if membership then
+          records[#records + 1] = membership_record(membership.session_uuid, membership.workspace_id)
+        end
+      end
+    end
+  end
+  if #records > 0 then
+    table.sort(records, function(left, right)
+      return left.session_uuid < right.session_uuid
+    end)
+    return records, nil
+  end
+
+  -- Fallback for pre-index workspace_state only: derive exclusion rows without
+  -- inventing Hub session fields. Mutations always write membership keys.
+  local state, load_error = load_state()
+  if load_error then
+    return nil, load_error
+  end
+  for _, workspace in ipairs(state.workspaces) do
+    for _, session_uuid in ipairs(workspace.session_refs) do
+      records[#records + 1] = membership_record(session_uuid, workspace.id)
+    end
+  end
+  table.sort(records, function(left, right)
+    return left.session_uuid < right.session_uuid
+  end)
+  return records, nil
+end
+
+local function batch_mutations(mutations)
+  local plugin_db = plugin_db_capability()
+  if not plugin_db or type(plugin_db.batch) ~= "function" then
+    return error_result("persist_failed", "atomic plugin_db.batch capability is unavailable")
+  end
+  if #mutations == 0 then
+    return nil
+  end
+  local ok, result = pcall(plugin_db.batch, { mutations = mutations })
+  if not ok then
+    return error_result("persist_failed", "failed to persist workspace membership batch")
+  end
+  if type(result) ~= "table" or result.ok ~= true then
+    local code = (result and result.error_kind) or "persist_failed"
+    if code == "revision_conflict" then
+      return error_result("revision_conflict", "workspace membership batch revision conflict", nil, {
+        error_kind = code,
+        mutation_index = result and result.mutation_index,
+        key = result and result.key,
+      })
+    end
+    return {
+      ok = false,
+      error = {
+        code = code,
+        message = (result and result.message) or "failed to persist workspace membership batch",
+      },
+      error_kind = result and result.error_kind,
+      mutation_index = result and result.mutation_index,
+      key = result and result.key,
+    }
+  end
+  return nil
+end
+
+local function persist_state(state, expected_revision)
+  local plugin_db = plugin_db_capability()
   if not plugin_db or type(plugin_db.set) ~= "function" then
     return nil
   end
 
-  local ok, result = pcall(plugin_db.set, {
+  local request = {
     key = STATE_KEY,
     schema_version = 1,
     payload = state,
-  })
+  }
+  if expected_revision ~= nil then
+    request.expected_revision = expected_revision
+  end
+  local ok, result = pcall(plugin_db.set, request)
   if not ok or (type(result) == "table" and result.ok == false) then
+    local kind = type(result) == "table" and result.error_kind or nil
+    if kind == "revision_conflict" then
+      return error_result("revision_conflict", "workspace state revision conflict")
+    end
     return error_result("persist_failed", "failed to persist workspace state")
   end
   return nil
+end
+
+local function get_membership_seq()
+  local plugin_db = plugin_db_capability()
+  if not plugin_db or type(plugin_db.get) ~= "function" then
+    return 0, 0
+  end
+  local ok, result = pcall(plugin_db.get, { key = MEMBERSHIP_SEQ_KEY })
+  if not ok then
+    return nil, nil, error_result("membership_seq_read_failed", "failed to read membership entity sequence")
+  end
+  if not result or not result.record then
+    return 0, 0
+  end
+  local payload = result.record.payload
+  if type(payload) ~= "table"
+    or not exact_keys(payload, MEMBERSHIP_SEQ_PAYLOAD_KEYS)
+    or type(payload.next_seq) ~= "number"
+    or payload.next_seq < 0
+    or payload.next_seq ~= math.floor(payload.next_seq) then
+    return nil, nil, error_result("legacy_workspace_schema", "membership entity sequence uses an unsupported schema")
+  end
+  return payload.next_seq, result.record.revision or 0
+end
+
+local function membership_seq_mutation(last_seq, seq_revision, frame_count)
+  return {
+    operation = "set",
+    key = MEMBERSHIP_SEQ_KEY,
+    schema_version = 1,
+    expected_revision = seq_revision,
+    payload = {
+      next_seq = last_seq + frame_count,
+    },
+  }
+end
+
+local function membership_publish_frame(frame)
+  local publish = nil
+  if type(botster) == "table" then
+    publish = botster.entity_publish
+  end
+  if publish == nil then
+    return {
+      ok = false,
+      status = "publish_unavailable",
+      error = {
+        code = "entity_publish_unavailable",
+        message = "botster.entity_publish is nil (botster=" .. type(botster) .. ")",
+      },
+      botster_type = type(botster),
+      publish_type = "nil",
+    }
+  end
+  -- Prefer a zero-arg wrapper so both function and callable userdata work.
+  local ok, result = pcall(function()
+    return publish(frame)
+  end)
+  if not ok then
+    return {
+      ok = false,
+      status = "publish_failed",
+      error = {
+        code = "entity_publish_failed",
+        message = tostring(result),
+      },
+      publish_type = type(publish),
+    }
+  end
+  if type(result) ~= "table" then
+    return {
+      ok = false,
+      status = "publish_failed",
+      error = {
+        code = "entity_publish_failed",
+        message = "entity_publish returned non-table: " .. type(result),
+      },
+      publish_type = type(publish),
+    }
+  end
+  return result
+end
+
+-- Publish pre-reserved frames after a successful membership batch. Never allocates
+-- new sequence values here; retry uses the same reserved seqs only.
+local function publish_membership_frames(frames)
+  local results = {}
+  for _, frame in ipairs(frames or {}) do
+    results[#results + 1] = membership_publish_frame(frame)
+  end
+  return results
+end
+
+local function build_reserved_frames(last_seq, draft_frames)
+  local frames = {}
+  for index, draft in ipairs(draft_frames or {}) do
+    local frame = {
+      type = draft.type,
+      entity_type = MEMBERSHIP_ENTITY_FAMILY,
+      snapshot_seq = last_seq + index,
+      id = draft.id,
+    }
+    if draft.entity ~= nil then
+      frame.entity = draft.entity
+    end
+    frames[#frames + 1] = frame
+  end
+  return frames
+end
+
+-- Commit membership mutations with an atomic range reservation of N consecutive
+-- sequence values for N publish frames in the same plugin_db.batch.
+local function commit_membership_batch(mutations, draft_frames)
+  local frames = draft_frames or {}
+  local n = #frames
+  local reserved = {}
+  if n > 0 then
+    local last_seq, seq_revision, seq_error = get_membership_seq()
+    if seq_error then
+      return seq_error, nil
+    end
+    mutations[#mutations + 1] = membership_seq_mutation(last_seq, seq_revision, n)
+    reserved = build_reserved_frames(last_seq, frames)
+  end
+  local persist_error = batch_mutations(mutations)
+  if persist_error then
+    return persist_error, nil, nil
+  end
+  local publish_results = {}
+  if n > 0 then
+    publish_results = publish_membership_frames(reserved)
+  end
+  return nil, reserved, publish_results
+end
+
+local function claim_session_batch(workspace_id, session_id, state, state_revision, draft_frames)
+  local mutations = {
+    {
+      operation = "set",
+      key = membership_key(session_id),
+      schema_version = 1,
+      expected_revision = 0,
+      payload = {
+        session_uuid = session_id,
+        workspace_id = workspace_id,
+      },
+    },
+    {
+      operation = "set",
+      key = STATE_KEY,
+      schema_version = 1,
+      expected_revision = state_revision,
+      payload = state,
+    },
+  }
+  local frames = draft_frames
+  if frames == nil then
+    frames = {
+      {
+        type = "entity_upsert",
+        id = session_id,
+        entity = membership_record(session_id, workspace_id),
+      },
+    }
+  end
+  return commit_membership_batch(mutations, frames)
 end
 
 local function workspace_by_id(state, workspace_id)
@@ -277,7 +585,7 @@ local function create_workspace(arguments)
     return error_result("validation_failed", "workspace name is required", { "name" })
   end
 
-  local state, load_error = load_state()
+  local state, load_error, state_revision = load_state()
   if load_error then
     return load_error
   end
@@ -294,7 +602,7 @@ local function create_workspace(arguments)
     updated_at = timestamp,
   }
   state.workspaces[#state.workspaces + 1] = workspace
-  local persist_error = persist_state(state)
+  local persist_error = persist_state(state, state_revision)
   if persist_error then
     return persist_error
   end
@@ -351,7 +659,7 @@ local function rename_workspace(arguments)
     return error_result("validation_failed", "workspace rename requires id and name", missing)
   end
 
-  local state, load_error = load_state()
+  local state, load_error, state_revision = load_state()
   if load_error then
     return load_error
   end
@@ -364,7 +672,7 @@ local function rename_workspace(arguments)
   end
   workspace.name = name
   workspace.updated_at = next_timestamp(state)
-  local persist_error = persist_state(state)
+  local persist_error = persist_state(state, state_revision)
   if persist_error then
     return persist_error
   end
@@ -381,30 +689,85 @@ local function delete_workspace(arguments)
     return error_result("validation_failed", "workspace id is required", { "id" })
   end
 
-  local state, load_error = load_state()
-  if load_error then
-    return load_error
+  local function attempt()
+    local state, load_error, state_revision = load_state()
+    if load_error then
+      return load_error
+    end
+    local workspace, index = workspace_by_id(state, workspace_id)
+    if not workspace then
+      return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
+    end
+
+    local released = {}
+    for _, session_id in ipairs(workspace.session_refs) do
+      released[#released + 1] = session_id
+    end
+    table.sort(released)
+
+    local mutations = {}
+    local draft_frames = {}
+    for _, session_id in ipairs(released) do
+      local membership, membership_revision, membership_error = get_membership(session_id)
+      if membership_error then
+        return membership_error
+      end
+      if membership then
+        mutations[#mutations + 1] = {
+          operation = "delete",
+          key = membership_key(session_id),
+          expected_revision = membership_revision,
+        }
+        draft_frames[#draft_frames + 1] = {
+          type = "entity_remove",
+          id = session_id,
+        }
+      end
+    end
+    table.remove(state.workspaces, index)
+    mutations[#mutations + 1] = {
+      operation = "set",
+      key = STATE_KEY,
+      schema_version = 1,
+      expected_revision = state_revision,
+      payload = state,
+    }
+    local persist_error = select(1, commit_membership_batch(mutations, draft_frames))
+    if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
+      return attempt()
+    end
+    if persist_error then
+      return persist_error
+    end
+    return {
+      ok = true,
+      deleted = true,
+      workspace = copy(workspace),
+      does_not_delete = {
+        "hub_sessions",
+        "worktrees",
+        "branches",
+        "repositories",
+      },
+    }
   end
-  local workspace, index = workspace_by_id(state, workspace_id)
-  if not workspace then
-    return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
+
+  return attempt()
+end
+
+local function resolve_owner(state, session_id)
+  local membership, membership_revision, membership_error = get_membership(session_id)
+  if membership_error then
+    return nil, nil, membership_error
   end
-  table.remove(state.workspaces, index)
-  local persist_error = persist_state(state)
-  if persist_error then
-    return persist_error
+  if membership then
+    return membership.workspace_id, membership_revision, nil
   end
-  return {
-    ok = true,
-    deleted = true,
-    workspace = copy(workspace),
-    does_not_delete = {
-      "hub_sessions",
-      "worktrees",
-      "branches",
-      "repositories",
-    },
-  }
+  local owner = workspace_by_session(state, session_id)
+  if owner then
+    return owner.id, 0, nil
+  end
+  return nil, 0, nil
 end
 
 local function add_session(arguments)
@@ -425,27 +788,87 @@ local function add_session(arguments)
     return error_result("validation_failed", "add session requires a workspace and canonical session UUID", missing)
   end
 
-  local state, load_error = load_state()
-  if load_error then
-    return load_error
+  local function attempt()
+    local state, load_error, state_revision = load_state()
+    if load_error then
+      return load_error
+    end
+    local workspace = workspace_by_id(state, workspace_id)
+    if not workspace then
+      return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
+    end
+    local owner_id, membership_revision, owner_error = resolve_owner(state, session_id)
+    if owner_error then
+      return owner_error
+    end
+    if owner_id == workspace_id then
+      -- Idempotent same-workspace claim. Repair missing membership key if needed.
+      if membership_revision == 0 and not select(1, get_membership(session_id)) then
+        local already_listed = false
+        for _, candidate in ipairs(workspace.session_refs) do
+          if candidate == session_id then
+            already_listed = true
+            break
+          end
+        end
+        if not already_listed then
+          workspace.session_refs[#workspace.session_refs + 1] = session_id
+          workspace.updated_at = next_timestamp(state)
+        end
+        local repair_error = select(1, claim_session_batch(workspace_id, session_id, state, state_revision))
+        if repair_error and repair_error.error and repair_error.error.code == "revision_conflict" then
+          return attempt()
+        end
+        if repair_error then
+          return repair_error
+        end
+        return {
+          ok = true,
+          idempotent = true,
+          repaired = true,
+          workspace = copy(workspace),
+          entity = read_model(workspace),
+        }
+      end
+      -- Pure no-op: N=0, no durable write, no publish.
+      return {
+        ok = true,
+        idempotent = true,
+        workspace = copy(workspace),
+        entity = read_model(workspace),
+      }
+    end
+    if owner_id then
+      return error_result("session_already_owned", "session already belongs to workspace: " .. owner_id, nil, {
+        owner_workspace_id = owner_id,
+      })
+    end
+
+    workspace.session_refs[#workspace.session_refs + 1] = session_id
+    workspace.updated_at = next_timestamp(state)
+    local persist_error, reserved_frames, publish_results = claim_session_batch(workspace_id, session_id, state, state_revision)
+    if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
+      return attempt()
+    end
+    if persist_error then
+      return persist_error
+    end
+    return {
+      ok = true,
+      workspace = copy(workspace),
+      entity = read_model(workspace),
+      membership_publish = publish_results,
+      membership_reserved_seqs = reserved_frames and (function()
+        local seqs = {}
+        for _, frame in ipairs(reserved_frames) do
+          seqs[#seqs + 1] = frame.snapshot_seq
+        end
+        return seqs
+      end)() or {},
+    }
   end
-  local workspace = workspace_by_id(state, workspace_id)
-  if not workspace then
-    return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
-  end
-  local owner = workspace_by_session(state, session_id)
-  if owner then
-    return error_result("session_already_owned", "session already belongs to workspace: " .. owner.id, nil, {
-      owner_workspace_id = owner.id,
-    })
-  end
-  workspace.session_refs[#workspace.session_refs + 1] = session_id
-  workspace.updated_at = next_timestamp(state)
-  local persist_error = persist_state(state)
-  if persist_error then
-    return persist_error
-  end
-  return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+
+  return attempt()
 end
 
 local function move_session(arguments)
@@ -469,44 +892,99 @@ local function move_session(arguments)
     return error_result("validation_failed", "move session requires a destination and canonical session UUID", missing)
   end
 
-  local state, load_error = load_state()
-  if load_error then
-    return load_error
-  end
-  local destination = workspace_by_id(state, destination_id)
-  if not destination then
-    return error_result("workspace_not_found", "workspace not found: " .. destination_id)
-  end
-  local source = workspace_by_session(state, session_id)
-  if not source then
-    return error_result("session_not_grouped", "session does not belong to a workspace")
-  end
-  if source.id == destination.id then
-    return error_result("session_already_owned", "session already belongs to workspace: " .. destination.id, nil, {
-      owner_workspace_id = destination.id,
-    })
+  local function attempt()
+    local state, load_error, state_revision = load_state()
+    if load_error then
+      return load_error
+    end
+    local destination = workspace_by_id(state, destination_id)
+    if not destination then
+      return error_result("workspace_not_found", "workspace not found: " .. destination_id)
+    end
+    local owner_id, _, owner_error = resolve_owner(state, session_id)
+    if owner_error then
+      return owner_error
+    end
+    local source = owner_id and workspace_by_id(state, owner_id) or workspace_by_session(state, session_id)
+    if not source then
+      return error_result("session_not_grouped", "session does not belong to a workspace")
+    end
+    if source.id == destination.id then
+      return error_result("session_already_owned", "session already belongs to workspace: " .. destination.id, nil, {
+        owner_workspace_id = destination.id,
+      })
+    end
+
+    for index, candidate in ipairs(source.session_refs) do
+      if candidate == session_id then
+        table.remove(source.session_refs, index)
+        break
+      end
+    end
+    destination.session_refs[#destination.session_refs + 1] = session_id
+    local timestamp = next_timestamp(state)
+    source.updated_at = timestamp
+    destination.updated_at = timestamp
+    local membership, current_membership_revision, membership_error = get_membership(session_id)
+    if membership_error then
+      return membership_error
+    end
+    local mutations = {
+      {
+        operation = "set",
+        key = STATE_KEY,
+        schema_version = 1,
+        expected_revision = state_revision,
+        payload = state,
+      },
+    }
+    if membership then
+      mutations[#mutations + 1] = {
+        operation = "set",
+        key = membership_key(session_id),
+        schema_version = 1,
+        expected_revision = current_membership_revision,
+        payload = {
+          session_uuid = session_id,
+          workspace_id = destination.id,
+        },
+      }
+    else
+      mutations[#mutations + 1] = {
+        operation = "set",
+        key = membership_key(session_id),
+        schema_version = 1,
+        expected_revision = 0,
+        payload = {
+          session_uuid = session_id,
+          workspace_id = destination.id,
+        },
+      }
+    end
+    -- Move is a single authoritative upsert (not remove+upsert).
+    local draft_frames = {
+      {
+        type = "entity_upsert",
+        id = session_id,
+        entity = membership_record(session_id, destination.id),
+      },
+    }
+    local persist_error = select(1, commit_membership_batch(mutations, draft_frames))
+    if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
+      return attempt()
+    end
+    if persist_error then
+      return persist_error
+    end
+    return {
+      ok = true,
+      source = copy(source),
+      destination = copy(destination),
+      entities = { read_model(source), read_model(destination) },
+    }
   end
 
-  for index, candidate in ipairs(source.session_refs) do
-    if candidate == session_id then
-      table.remove(source.session_refs, index)
-      break
-    end
-  end
-  destination.session_refs[#destination.session_refs + 1] = session_id
-  local timestamp = next_timestamp(state)
-  source.updated_at = timestamp
-  destination.updated_at = timestamp
-  local persist_error = persist_state(state)
-  if persist_error then
-    return persist_error
-  end
-  return {
-    ok = true,
-    source = copy(source),
-    destination = copy(destination),
-    entities = { read_model(source), read_model(destination) },
-  }
+  return attempt()
 end
 
 local function remove_session(arguments)
@@ -524,31 +1002,63 @@ local function remove_session(arguments)
     )
   end
 
-  local state, load_error = load_state()
-  if load_error then
-    return load_error
-  end
-  local workspace = workspace_by_id(state, workspace_id)
-  if not workspace then
-    return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
-  end
-  local removed = false
-  for index, candidate in ipairs(workspace.session_refs) do
-    if candidate == session_id then
-      table.remove(workspace.session_refs, index)
-      removed = true
-      break
+  local function attempt()
+    local state, load_error, state_revision = load_state()
+    if load_error then
+      return load_error
     end
+    local workspace = workspace_by_id(state, workspace_id)
+    if not workspace then
+      return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
+    end
+    local removed = false
+    for index, candidate in ipairs(workspace.session_refs) do
+      if candidate == session_id then
+        table.remove(workspace.session_refs, index)
+        removed = true
+        break
+      end
+    end
+    if not removed then
+      return error_result("session_not_in_workspace", "session does not belong to workspace: " .. workspace_id)
+    end
+    workspace.updated_at = next_timestamp(state)
+    local membership, membership_revision, membership_error = get_membership(session_id)
+    if membership_error then
+      return membership_error
+    end
+    local mutations = {
+      {
+        operation = "set",
+        key = STATE_KEY,
+        schema_version = 1,
+        expected_revision = state_revision,
+        payload = state,
+      },
+    }
+    local draft_frames = {}
+    if membership then
+      mutations[#mutations + 1] = {
+        operation = "delete",
+        key = membership_key(session_id),
+        expected_revision = membership_revision,
+      }
+      draft_frames[#draft_frames + 1] = {
+        type = "entity_remove",
+        id = session_id,
+      }
+    end
+    local persist_error = select(1, commit_membership_batch(mutations, draft_frames))
+    if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
+      return attempt()
+    end
+    if persist_error then
+      return persist_error
+    end
+    return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
   end
-  if not removed then
-    return error_result("session_not_in_workspace", "session does not belong to workspace: " .. workspace_id)
-  end
-  workspace.updated_at = next_timestamp(state)
-  local persist_error = persist_state(state)
-  if persist_error then
-    return persist_error
-  end
-  return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+
+  return attempt()
 end
 
 local function spawn_targets()
@@ -632,7 +1142,7 @@ local function spawn_session(arguments)
     return error_result("validation_failed", "spawn requires workspace, spawn point, branch, and session type", missing)
   end
 
-  local state, load_error = load_state()
+  local state, load_error, state_revision = load_state()
   if load_error then
     return load_error
   end
@@ -670,13 +1180,17 @@ local function spawn_session(arguments)
   if not valid_session_id(session_id) then
     return error_result("invalid_hub_session_id", "Hub spawn did not return a canonical session UUID")
   end
-  if workspace_by_session(state, session_id) then
+  local owner_id, _, owner_error = resolve_owner(state, session_id)
+  if owner_error then
+    return owner_error
+  end
+  if owner_id then
     return error_result("duplicate_hub_session_id", "Hub returned a session UUID that is already grouped")
   end
 
   workspace.session_refs[#workspace.session_refs + 1] = session_id
   workspace.updated_at = next_timestamp(state)
-  local persist_error = persist_state(state)
+  local persist_error = select(1, claim_session_batch(workspace_id, session_id, state, state_revision))
   if persist_error then
     return error_result("persist_failed", "Hub spawned the session but workspace membership could not be persisted", nil, {
       spawned_session_id = session_id,
@@ -698,6 +1212,50 @@ local function entity_snapshot()
     return load_error
   end
   return { ok = true, entity_family = ENTITY_FAMILY, rows = sorted_rows(state) }
+end
+
+local function membership_items_for_snapshot(records)
+  local items = {}
+  for index, record in ipairs(records or {}) do
+    items[index] = {
+      id = record.session_uuid,
+      session_uuid = record.session_uuid,
+      workspace_id = record.workspace_id,
+    }
+  end
+  return items
+end
+
+-- Provider snapshots allocate exactly one durable sequence value via their own
+-- CAS, separate from mutator range reservation.
+local function membership_entity_provider(_request)
+  local function attempt()
+    local records, list_error = list_membership_records()
+    if list_error then
+      return list_error
+    end
+    local last_seq, seq_revision, seq_error = get_membership_seq()
+    if seq_error then
+      return seq_error
+    end
+    local snapshot_seq = last_seq + 1
+    local persist_error = batch_mutations({
+      membership_seq_mutation(last_seq, seq_revision, 1),
+    })
+    if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
+      return attempt()
+    end
+    if persist_error then
+      return persist_error
+    end
+    return {
+      type = "entity_snapshot",
+      entity_type = MEMBERSHIP_ENTITY_FAMILY,
+      snapshot_seq = snapshot_seq,
+      items = membership_items_for_snapshot(records),
+    }
+  end
+  return attempt()
 end
 
 local function action_result(arguments, state, extra)
@@ -1648,6 +2206,16 @@ return botster.register({
       descriptor_id = "botster_workspaces.spawn",
       descriptor = { action_id = "botster_workspaces.spawn", surface_id = SURFACE_ID },
       call = spawn_session_action,
+    },
+    {
+      id = "membership_entity_provider",
+      kind = "entity_provider",
+      descriptor_id = MEMBERSHIP_ENTITY_FAMILY,
+      descriptor = {
+        entity_type = MEMBERSHIP_ENTITY_FAMILY,
+        id_field = "id",
+      },
+      call = membership_entity_provider,
     },
   },
   tools = {

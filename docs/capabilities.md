@@ -15,8 +15,14 @@ authority.
 ## Plugin-Owned State
 
 The plugin owns exact workspace records, unique names, single-owner session
-membership, grouping CRUD, entity read models, and owner-authored workspace
-UiNode actions.
+membership (including the durable `membership:<session_uuid>` index and the
+`botster-workspaces.membership` entity family), grouping CRUD, entity read
+models, and owner-authored workspace UiNode actions.
+
+Membership mutations commit membership keys, `workspace_state`, and a durable
+range reservation of `membership_entity_seq` in one `plugin_db.batch`, then
+publish only the reserved frames through `botster.entity_publish`. The package
+never publishes false state for failed or conflicting writes.
 
 ## Hub-Owned Authority
 
@@ -35,10 +41,12 @@ never derives or overrides that semantic truth.
 
 ## Failure Atomicity
 
-Membership changes use one complete `plugin_db` write. Hub spawn rejection or
-worker failure records nothing. Successful spawn records only the returned
-canonical UUID, after success. A later persistence failure reports that UUID as
-ungrouped and never claims a durable membership or attempts session cleanup.
+Membership changes use one complete `plugin_db.batch` for membership keys,
+workspace state, and sequence reservation. Hub spawn rejection or worker failure
+records nothing. Successful spawn records only the returned canonical UUID,
+after success, through the same claim batch path. A later persistence failure
+reports that UUID as ungrouped and never claims a durable membership or attempts
+session cleanup.
 
 Workspace deletion and membership removal do not call Hub lifecycle or Git
 cleanup operations.

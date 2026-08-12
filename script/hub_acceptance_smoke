@@ -9,7 +9,7 @@ PACKAGE = "botster-workspaces"
 SURFACE = "workspaces"
 PROTOCOL = "botster-hub-daemon-v1"
 PROTOCOL_VERSION = 6
-CONFORMANCE_FIXTURE_REVISION = 31
+CONFORMANCE_FIXTURE_REVISION = 34
 SESSION_TYPE_FEATURE = "session_type_entity_subscriptions"
 LEGACY_MANIFEST_PACKAGE = "botster-workspaces-legacy-manifest-negative"
 LEGACY_MANIFEST_SESSION_TYPE_ID = "#{LEGACY_MANIFEST_PACKAGE}/legacy-acceptance"
@@ -152,6 +152,28 @@ def open_session_entity_subscription(socket_path, subscription_id)
   response = JSON.parse(socket.gets || raise("daemon closed before entity subscription response"))
   assert(response["kind"] == "entity_subscribed", "session entity subscription was not accepted")
   [socket, JSON.parse(socket.gets || raise("daemon closed before authoritative entity snapshot"))]
+end
+
+
+def open_membership_entity_subscription(socket_path, subscription_id)
+  socket = UNIXSocket.new(socket_path)
+  socket.puts(JSON.generate({
+    protocol: PROTOCOL,
+    compatibility: compatibility_requirement(
+      "botster-workspaces-membership-entity-smoke",
+      %w[session_entity_subscriptions plugin_entity_subscriptions session_type_entity_subscriptions]
+    ),
+  }))
+  hello = JSON.parse(socket.gets || raise("daemon closed before membership subscription hello"))
+  assert_hello_ack!(hello, "membership subscription")
+  socket.puts(JSON.generate({
+    type: "subscribe_entities",
+    entity_type: "botster-workspaces.membership",
+    subscription_id: subscription_id,
+  }))
+  response = JSON.parse(socket.gets || raise("daemon closed before membership subscription response"))
+  assert(response["kind"] == "entity_subscribed", "membership entity subscription was not accepted: #{response.inspect}")
+  [socket, JSON.parse(socket.gets || raise("daemon closed before membership entity snapshot"))]
 end
 
 def wait_for_entity_frame(socket, label, timeout: 15)
@@ -506,6 +528,153 @@ assert(
   call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs").empty?,
   "Remove session action did not remove destination membership"
 )
+
+
+# ---------------------------------------------------------------------------
+# Six operator producer checks (question_1786508223_721040).
+# Production claim/remove tools + held generic membership subscription.
+# Free-text Add dialog is not product proof for exclusion/restoration.
+#
+# Seed one membership before SubscribeEntities so the provider baseline is a
+# non-empty JSON array. Empty Lua `items = {}` still fails validation on some
+# Hub builds; non-empty baselines exercise the real held-open fanout path.
+# ---------------------------------------------------------------------------
+producer_seed_session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+producer_session_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+seed_claim = call_tool(
+  socket,
+  "botster_workspaces.add_session",
+  { workspace_id: workspace_id, session_id: producer_seed_session_id }
+)
+assert(seed_claim["ok"] == true, "producer seed claim must commit before held subscribe")
+
+held_membership_socket, held_membership_baseline = open_membership_entity_subscription(
+  socket_path,
+  "workspaces-membership-held-producer-#{Process.pid}"
+)
+assert(held_membership_baseline["type"] == "entity_snapshot", "held membership baseline must be entity_snapshot")
+assert(held_membership_baseline["entity_type"] == "botster-workspaces.membership", "held membership family mismatch")
+assert(held_membership_baseline["items"].is_a?(Array), "held membership baseline items must be an array")
+assert(
+  held_membership_baseline["items"].any? { |item| item["session_uuid"] == producer_seed_session_id },
+  "held membership baseline must include the seed claim"
+)
+
+producer_claim = call_tool(
+  socket,
+  "botster_workspaces.add_session",
+  { workspace_id: workspace_id, session_id: producer_session_id }
+)
+assert(producer_claim["ok"] == true, "producer check 1: production claim must commit")
+if producer_claim.key?("membership_publish")
+  assert(
+    Array(producer_claim["membership_publish"]).any?,
+    "producer check 1: claim must report membership_publish results: #{producer_claim.inspect}"
+  )
+  assert(
+    Array(producer_claim["membership_publish"]).all? { |r| r["status"] == "accepted" || r["ok"] == true },
+    "producer check 1: membership_publish must be accepted: #{producer_claim["membership_publish"].inspect}"
+  )
+end
+assert(
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(producer_session_id),
+  "producer check 1: claim must persist membership"
+)
+claim_upsert = wait_for_entity_frame(held_membership_socket, "producer claim entity_upsert") do |frame|
+  frame["type"] == "entity_upsert" &&
+    frame["entity_type"] == "botster-workspaces.membership" &&
+    frame["id"] == producer_session_id
+end
+assert(claim_upsert["snapshot_seq"].is_a?(Integer), "producer check 2: upsert must carry snapshot_seq")
+assert(claim_upsert.dig("entity", "session_uuid") == producer_session_id, "producer check 2: upsert entity session_uuid")
+assert(claim_upsert.dig("entity", "workspace_id") == workspace_id, "producer check 2: upsert entity workspace_id")
+assert(claim_upsert.dig("entity", "id") == producer_session_id, "producer check 2: upsert entity id equals session_uuid")
+assert(!claim_upsert.dig("entity", "lifecycle"), "producer check 2: membership must not copy Hub lifecycle")
+
+stale_add = call_tool(
+  socket,
+  "botster_workspaces.add_session",
+  { workspace_id: destination_workspace_id, session_id: producer_session_id }
+)
+assert(stale_add["ok"] == false, "producer check 6: stale add must fail")
+assert(
+  stale_add.dig("error", "code") == "session_already_owned",
+  "producer check 6: stale add must return session_already_owned"
+)
+assert(stale_add["owner_workspace_id"] == workspace_id, "producer check 6: stale add identifies owner")
+if IO.select([held_membership_socket], nil, nil, 0.4)
+  false_state = begin
+    JSON.parse(held_membership_socket.gets || "")
+  rescue StandardError
+    nil
+  end
+  assert(
+    false_state.nil? || !(
+      false_state["type"] == "entity_upsert" &&
+      false_state["id"] == producer_session_id &&
+      false_state.dig("entity", "workspace_id") == destination_workspace_id
+    ),
+    "producer check 5: conflict loser must not publish false ownership: #{false_state.inspect}"
+  )
+end
+
+# Failed validation publishes no membership frames (check 5 sample) while held open.
+invalid_claim = call_tool(
+  socket,
+  "botster_workspaces.add_session",
+  { workspace_id: workspace_id, session_id: "not-a-uuid" }
+)
+assert(invalid_claim["ok"] == false, "invalid claim must fail")
+assert(invalid_claim.dig("error", "code") == "validation_failed", "invalid claim is validation_failed")
+if IO.select([held_membership_socket], nil, nil, 0.4)
+  unexpected = begin
+    JSON.parse(held_membership_socket.gets || "")
+  rescue StandardError
+    nil
+  end
+  assert(
+    unexpected.nil? || unexpected["type"] == "entity_remove" || unexpected["type"] == "entity_upsert",
+    "producer check 5: validation failure must not invent non-entity noise: #{unexpected.inspect}"
+  )
+  # A validation failure must not publish a membership frame for the invalid id.
+  assert(
+    unexpected.nil? || unexpected["id"] != "not-a-uuid",
+    "producer check 5: validation failure must not publish frames for invalid ids: #{unexpected.inspect}"
+  )
+end
+
+producer_remove = call_tool(
+  socket,
+  "botster_workspaces.remove_session",
+  { workspace_id: workspace_id, session_id: producer_session_id }
+)
+assert(producer_remove["ok"] == true, "producer check 3: production remove must commit")
+assert(
+  !call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(producer_session_id),
+  "producer check 3: remove must drop membership"
+)
+claim_remove = wait_for_entity_frame(held_membership_socket, "producer remove entity_remove") do |frame|
+  frame["type"] == "entity_remove" &&
+    frame["entity_type"] == "botster-workspaces.membership" &&
+    frame["id"] == producer_session_id
+end
+assert(claim_remove["snapshot_seq"].is_a?(Integer), "producer check 4: remove must carry snapshot_seq")
+assert(
+  claim_remove["snapshot_seq"] > claim_upsert["snapshot_seq"],
+  "producer check 4: remove seq must be strictly after claim upsert"
+)
+
+# Cleanup seed so later workspace delete/move paths stay independent.
+seed_remove = call_tool(
+  socket,
+  "botster_workspaces.remove_session",
+  { workspace_id: workspace_id, session_id: producer_seed_session_id }
+)
+assert(seed_remove["ok"] == true, "producer seed remove must commit")
+wait_for_entity_frame(held_membership_socket, "producer seed entity_remove") do |frame|
+  frame["type"] == "entity_remove" && frame["id"] == producer_seed_session_id
+end
+held_membership_socket.close
 
 delete_destination_surface = render_surface(socket)
 delete_destination_form = find_node(

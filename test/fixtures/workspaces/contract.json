@@ -30,10 +30,20 @@
     }
   ],
   "manifest_capabilities": [
-    { "surface": "mcp" },
-    { "surface": "plugin_db", "scope": "botster-workspaces" },
-    { "surface": "surfaces" },
-    { "surface": "session_actions", "scope": "session_type_managed_git_spawn" }
+    {
+      "surface": "mcp"
+    },
+    {
+      "surface": "plugin_db",
+      "scope": "botster-workspaces"
+    },
+    {
+      "surface": "surfaces"
+    },
+    {
+      "surface": "session_actions",
+      "scope": "session_type_managed_git_spawn"
+    }
   ],
   "navigation": [
     {
@@ -41,37 +51,61 @@
       "label": "Workspaces",
       "icon": "rectangle-group",
       "description": "Open the workspace records surface.",
-      "target": { "kind": "surface", "surface_id": "workspaces" }
+      "target": {
+        "kind": "surface",
+        "surface_id": "workspaces"
+      }
     }
   ],
   "operations": {
     "create": {
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "rejects_obsolete_fields": true,
       "name_trimmed": true,
       "name_unique": true
     },
     "rename": {
-      "required": ["id", "name"],
-      "preserves": ["id", "session_refs", "created_at"],
+      "required": [
+        "id",
+        "name"
+      ],
+      "preserves": [
+        "id",
+        "session_refs",
+        "created_at"
+      ],
       "name_unique": true
     },
     "delete": {
       "mode": "remove_grouping_record",
       "releases_name": true,
-      "does_not_delete": ["hub_sessions", "worktrees", "branches", "repositories"]
+      "does_not_delete": [
+        "hub_sessions",
+        "worktrees",
+        "branches",
+        "repositories"
+      ],
+      "membership_removes": "N ordered by session_uuid"
     },
     "add_session": {
       "one_owner": true,
-      "duplicate_error": "session_already_owned"
+      "duplicate_error": "session_already_owned",
+      "idempotent_same_workspace": true,
+      "membership_index_key": "membership:<session_uuid>",
+      "publishes": "entity_upsert"
     },
     "move_session": {
       "one_state_write": true,
       "removes_source": true,
-      "adds_destination": true
+      "adds_destination": true,
+      "publishes": "entity_upsert",
+      "frame_count": 1
     },
     "remove_session": {
-      "grouping_only": true
+      "grouping_only": true,
+      "publishes": "entity_remove"
     },
     "spawn": {
       "hub_api": "session_types.ensure_worktree_and_spawn",
@@ -87,7 +121,10 @@
     "id": "workspaces",
     "stable_route": true,
     "initial_form_count": 0,
-    "presentation_keys": ["selected-workspace", "workspace-dialog"],
+    "presentation_keys": [
+      "selected-workspace",
+      "workspace-dialog"
+    ],
     "detail_actions": [
       "spawn",
       "rename",
@@ -104,8 +141,18 @@
       "source": "/session",
       "identity_field": "session_uuid",
       "classification_field": "lifecycle_class",
-      "groups": ["current", "ended", "indeterminate", "absent"],
-      "reconciliation": ["entity_snapshot", "entity_upsert", "entity_patch", "entity_remove"],
+      "groups": [
+        "current",
+        "ended",
+        "indeterminate",
+        "absent"
+      ],
+      "reconciliation": [
+        "entity_snapshot",
+        "entity_upsert",
+        "entity_patch",
+        "entity_remove"
+      ],
       "persists_lifecycle": false,
       "retains_ended_and_unavailable_refs": true,
       "bindings_per_reference_max": 4
@@ -114,5 +161,22 @@
   "entity_family": {
     "name": "botster-workspaces.workspace",
     "source": "plugin-owned"
+  },
+  "membership_entity_family": {
+    "name": "botster-workspaces.membership",
+    "source": "plugin-owned",
+    "id_field": "id",
+    "row_fields": [
+      "id",
+      "session_uuid",
+      "workspace_id"
+    ],
+    "id_equals": "session_uuid",
+    "sequence_key": "membership_entity_seq",
+    "sequence_payload": {
+      "next_seq": "last committed sequence"
+    },
+    "mutator_hot_path": "entity_upsert/entity_remove via botster.entity_publish after successful batch",
+    "provider": "entity_provider allocates one durable seq per snapshot"
   }
 }

@@ -28,8 +28,10 @@ The public plugin tools are:
 - `botster_workspaces.spawn`
 - `botster_workspaces.entity_snapshot`
 
-One session UUID belongs to at most one workspace. Add rejects an existing
-owner; move removes the source membership and adds the destination membership
+One session UUID belongs to at most one workspace, enforced by durable
+`membership:<session_uuid>` keys and published through the
+`botster-workspaces.membership` entity family after committed claims and
+removals. Add rejects an existing owner; move removes the source membership and adds the destination membership
 in one `plugin_db` write; remove changes only grouping. Deleting a workspace
 removes only that grouping record. It never terminates a session or removes a
 worktree, branch, or repository.

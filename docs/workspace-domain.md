@@ -19,15 +19,41 @@ UUIDs. Old or additional record fields fail closed with
 
 ## Membership Invariant
 
-A session UUID belongs to at most one workspace. Add rejects an existing owner
-and identifies it. Move computes the complete source and destination state and
-persists it once. Remove deletes only the reference. Missing, unavailable, or
-ended sessions remain deliberate history until the user explicitly moves or
-removes them.
+A session UUID belongs to at most one workspace. Membership is enforced through
+create-only `membership:<session_uuid>` keys in `plugin.db` alongside
+`workspace_state.session_refs`. Add rejects an existing owner and identifies it.
+Same-workspace reclaims are idempotent pure no-ops when the membership key
+already exists. Move computes the complete source and destination state and
+persists it once as an ownership upsert (not remove+upsert). Remove deletes only
+the reference and membership key. Delete of a workspace range-releases every
+membership key it owned. Missing, unavailable, or ended sessions remain
+deliberate history until the user explicitly moves or removes them.
 
 The `botster-workspaces.workspace` entity read model publishes the grouping
 fields plus a derived session count. It references Hub identities without
 becoming their authority.
+
+## Membership Entity Family
+
+Claimed sessions also publish through the plugin-owned
+`botster-workspaces.membership` family with exact rows:
+
+```text
+{ id, session_uuid, workspace_id }
+```
+
+where `id = session_uuid`. Rows carry no Hub lifecycle, label, or spawn fields.
+
+After a successful membership mutation batch, the package publishes ordered
+`entity_upsert` / `entity_remove` frames via `botster.entity_publish`. Sequence
+values are package-owned and durable under `membership_entity_seq` (`next_seq`
+is the last committed sequence). Multi-frame mutations (for example deleting a
+workspace that released N memberships) reserve N consecutive sequences in the
+same `plugin_db.batch` as the membership writes, then publish
+`last+1 … last+N` in deterministic order. Failed batches advance neither the
+counter nor the stream. Provider reconnect snapshots allocate one durable
+sequence value on their own CAS path and never invent a sequence at or below the
+committed floor.
 
 ## Rename and Delete
 

@@ -1,8 +1,12 @@
 local database = {}
 local registrations = {}
 local set_calls = 0
+local batch_calls = 0
+local publish_calls = {}
 local fail_next_set = false
 local fail_next_get = false
+local fail_next_batch = false
+local batch_conflict_once = false
 local spawn_calls = {}
 local session_type_list_calls = {}
 local fail_session_type_list_for = nil
@@ -22,7 +26,39 @@ local function copy(value)
   return result
 end
 
+local function apply_set(request)
+  local current = database[request.key]
+  local current_revision = current and (current.revision or 1) or 0
+  if request.expected_revision ~= nil and request.expected_revision ~= current_revision then
+    return {
+      ok = false,
+      error_kind = "revision_conflict",
+      message = "revision conflict for " .. request.key,
+      key = request.key,
+    }
+  end
+  local revision = current_revision + 1
+  if current_revision == 0 then
+    revision = 1
+  end
+  database[request.key] = {
+    schema_version = request.schema_version or 1,
+    payload = copy(request.payload),
+    revision = revision,
+  }
+  return { ok = true, record = copy(database[request.key]) }
+end
+
 botster = {
+  entity_publish = function(frame)
+    publish_calls[#publish_calls + 1] = copy(frame)
+    return {
+      ok = true,
+      status = "accepted",
+      last_accepted_seq = frame.snapshot_seq,
+      high_water_seq = frame.snapshot_seq,
+    }
+  end,
   capabilities = {
     plugin_db = {
       get = function(request)
@@ -42,11 +78,92 @@ botster = {
           fail_next_set = false
           error("injected persistence failure")
         end
-        database[request.key] = {
-          schema_version = request.schema_version,
-          payload = copy(request.payload),
-        }
-        return { ok = true }
+        local result = apply_set(request)
+        if not result.ok then
+          return result
+        end
+        return { ok = true, record = result.record }
+      end,
+      list = function(request)
+        local prefix = request.prefix or ""
+        local entries = {}
+        for key, record in pairs(database) do
+          if key:sub(1, #prefix) == prefix then
+            entries[#entries + 1] = {
+              key = key,
+              revision = record.revision or 1,
+            }
+          end
+        end
+        table.sort(entries, function(left, right)
+          return left.key < right.key
+        end)
+        return { entries = entries }
+      end,
+      batch = function(request)
+        batch_calls = batch_calls + 1
+        if fail_next_batch then
+          fail_next_batch = false
+          error("injected batch failure")
+        end
+        if batch_conflict_once then
+          batch_conflict_once = false
+          return {
+            ok = false,
+            error_kind = "revision_conflict",
+            message = "injected batch revision conflict",
+            mutation_index = 1,
+            key = request.mutations[1] and request.mutations[1].key,
+          }
+        end
+        local snapshot = copy(database)
+        local results = {}
+        for index, mutation in ipairs(request.mutations or {}) do
+          if mutation.operation == "set" then
+            local result = apply_set(mutation)
+            if not result.ok then
+              database = snapshot
+              result.mutation_index = index
+              return result
+            end
+            results[#results + 1] = result
+          elseif mutation.operation == "delete" then
+            local current = database[mutation.key]
+            local current_revision = current and (current.revision or 1) or 0
+            if mutation.expected_revision ~= current_revision then
+              database = snapshot
+              return {
+                ok = false,
+                error_kind = "revision_conflict",
+                message = "delete revision conflict",
+                mutation_index = index,
+                key = mutation.key,
+              }
+            end
+            if not current then
+              database = snapshot
+              return {
+                ok = false,
+                error_kind = "store_not_found",
+                message = "missing key",
+                mutation_index = index,
+                key = mutation.key,
+              }
+            end
+            database[mutation.key] = nil
+            results[#results + 1] = { ok = true, key = mutation.key, revision = current_revision }
+          else
+            database = snapshot
+            return {
+              ok = false,
+              error_kind = "invalid_request",
+              message = "unsupported mutation",
+              mutation_index = index,
+              key = mutation.key,
+            }
+          end
+        end
+        return { ok = true, results = results }
       end,
     },
     spawn_targets = {
@@ -515,15 +632,47 @@ assert_eq(rename_obsolete.error.code, "unknown_field", "rename rejects obsolete 
 
 local session_one = "22222222-2222-4222-8222-222222222222"
 local session_two = "33333333-3333-4333-8333-333333333333"
-local before_add = set_calls
+local before_add = batch_calls
+local publish_before_add = #publish_calls
 local added = add_session({ workspace_id = renamed.workspace.id, session_id = session_one })
 assert_eq(added.ok, true, "add existing session succeeds")
-assert_eq(set_calls, before_add + 1, "add persists complete state once")
+assert_eq(batch_calls, before_add + 1, "add persists membership index, state, and seq once")
 assert_eq(added.workspace.session_refs[1], session_one, "add preserves canonical session identity")
+assert_true(database["membership:" .. session_one], "add writes membership index key")
+assert_eq(
+  database["membership:" .. session_one].payload.workspace_id,
+  renamed.workspace.id,
+  "membership index records owner workspace"
+)
+assert_eq(
+  database["membership:" .. session_one].payload.session_uuid,
+  session_one,
+  "membership payload carries only session identity"
+)
+assert_eq(database["membership:" .. session_one].payload.lifecycle, nil, "membership does not copy Hub lifecycle")
+assert_eq(database["membership:" .. session_one].payload.label, nil, "membership does not copy Hub label")
+assert_eq(database["membership_entity_seq"].payload.next_seq, 1, "claim reserves durable next_seq = last+1")
+assert_eq(#publish_calls, publish_before_add + 1, "claim publishes one membership upsert")
+assert_eq(publish_calls[#publish_calls].type, "entity_upsert", "claim frame is entity_upsert")
+assert_eq(publish_calls[#publish_calls].entity_type, "botster-workspaces.membership", "claim frame family")
+assert_eq(publish_calls[#publish_calls].snapshot_seq, 1, "claim uses reserved sequence 1")
+assert_eq(publish_calls[#publish_calls].id, session_one, "claim frame id is session_uuid")
+assert_eq(publish_calls[#publish_calls].entity.workspace_id, renamed.workspace.id, "claim entity owner")
 
+local publish_before_idempotent = #publish_calls
+local batch_before_idempotent = batch_calls
+local idempotent_add = add_session({ workspace_id = renamed.workspace.id, session_id = session_one })
+assert_eq(idempotent_add.ok, true, "same-workspace claim is idempotent success")
+assert_eq(idempotent_add.idempotent, true, "same-workspace claim reports idempotent")
+assert_eq(#idempotent_add.workspace.session_refs, 1, "idempotent claim does not duplicate session_refs")
+assert_eq(batch_calls, batch_before_idempotent, "pure idempotent claim does not batch")
+assert_eq(#publish_calls, publish_before_idempotent, "pure idempotent claim publishes nothing")
+
+local publish_before_conflict = #publish_calls
 local duplicate_add = add_session({ workspace_id = second.workspace.id, session_id = session_one })
 assert_eq(duplicate_add.error.code, "session_already_owned", "add rejects another owner")
 assert_eq(duplicate_add.owner_workspace_id, renamed.workspace.id, "duplicate identifies current owner")
+assert_eq(#publish_calls, publish_before_conflict, "conflict loser publishes no false state")
 local invalid_session = add_session({ workspace_id = second.workspace.id, session_id = "not-a-uuid" })
 assert_eq(invalid_session.error.code, "validation_failed", "membership requires canonical UUID")
 local short_uuid = add_session({ workspace_id = second.workspace.id, session_id = "1-2-3-4-5" })
@@ -531,18 +680,38 @@ assert_eq(short_uuid.error.code, "validation_failed", "membership rejects non-ca
 
 local added_second = add_session({ workspace_id = renamed.workspace.id, session_id = session_two })
 assert_eq(added_second.ok, true, "second reference adds")
-local before_move = set_calls
+assert_eq(database["membership_entity_seq"].payload.next_seq, 2, "second claim advances next_seq to 2")
+assert_eq(publish_calls[#publish_calls].snapshot_seq, 2, "second claim uses sequence 2")
+
+local before_move = batch_calls
+local publish_before_move = #publish_calls
 local moved = move_session({ destination_workspace_id = second.workspace.id, session_id = session_one })
 assert_eq(moved.ok, true, "explicit move succeeds")
-assert_eq(set_calls, before_move + 1, "move persists source and destination once")
+assert_eq(batch_calls, before_move + 1, "move persists source and destination once")
 assert_eq(#moved.source.session_refs, 1, "move removes source membership")
 assert_eq(moved.destination.session_refs[1], session_one, "move inserts destination membership")
+assert_eq(
+  database["membership:" .. session_one].payload.workspace_id,
+  second.workspace.id,
+  "move updates membership index owner"
+)
+assert_eq(#publish_calls, publish_before_move + 1, "move publishes exactly one upsert")
+assert_eq(publish_calls[#publish_calls].type, "entity_upsert", "move frame is single upsert not remove")
+assert_eq(publish_calls[#publish_calls].entity.workspace_id, second.workspace.id, "move upsert destination")
+assert_eq(publish_calls[#publish_calls].snapshot_seq, 3, "move uses next reserved sequence")
+assert_eq(database["membership_entity_seq"].payload.next_seq, 3, "move advances counter by 1")
 
-local before_remove = set_calls
+local before_remove = batch_calls
+local publish_before_remove = #publish_calls
 local removed = remove_session({ workspace_id = renamed.workspace.id, session_id = session_two })
 assert_eq(removed.ok, true, "remove membership succeeds")
-assert_eq(set_calls, before_remove + 1, "remove persists once")
+assert_eq(batch_calls, before_remove + 1, "remove persists once")
 assert_eq(#removed.workspace.session_refs, 0, "remove changes grouping only")
+assert_eq(database["membership:" .. session_two], nil, "remove deletes membership index key")
+assert_eq(#publish_calls, publish_before_remove + 1, "remove publishes one frame")
+assert_eq(publish_calls[#publish_calls].type, "entity_remove", "remove frame is entity_remove")
+assert_eq(publish_calls[#publish_calls].id, session_two, "remove frame id is session_uuid")
+assert_eq(publish_calls[#publish_calls].snapshot_seq, 4, "remove uses next reserved sequence")
 
 local restart_spec = dofile("plugin.lua")
 local restarted = tool(restart_spec, "botster_workspaces.list")({})
@@ -674,7 +843,8 @@ assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, #membersh
 
 spawn_mode = "success"
 next_spawn_uuid = "55555555-5555-4555-8555-555555555555"
-fail_next_set = true
+fail_next_batch = true
+local publish_before_persist_fail = #publish_calls
 local persist_failed_spawn = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
@@ -685,6 +855,7 @@ assert_eq(persist_failed_spawn.error.code, "persist_failed", "post-spawn persist
 assert_eq(persist_failed_spawn.spawned_session_id, next_spawn_uuid, "exception exposes ungrouped spawned session")
 assert_eq(persist_failed_spawn.membership_recorded, false, "exception never claims membership")
 assert_eq(#show({ id = renamed.workspace.id }).workspace.session_refs, #membership_before_reject, "failed persistence does not mutate durable membership")
+assert_eq(#publish_calls, publish_before_persist_fail, "failed batch publishes no membership frames")
 
 local entity_rows = snapshot({})
 assert_eq(entity_rows.entity_family, "botster-workspaces.workspace", "entity family is plugin-namespaced")
@@ -1001,9 +1172,137 @@ local spawn_call_count = #spawn_calls
 local deleted = delete({ id = delete_target.workspace.id })
 assert_eq(deleted.ok, true, "delete removes grouping")
 assert_eq(deleted.workspace.session_refs[1], session_to_preserve, "delete reports preserved membership history")
+assert_eq(database["membership:" .. session_to_preserve], nil, "delete clears membership index keys")
 assert_eq(show({ id = delete_target.workspace.id }).error.code, "workspace_not_found", "grouping record is physically removed")
 assert_eq(#spawn_calls, spawn_call_count, "delete never invokes Hub spawn or lifecycle mutation")
 assert_eq(create({ name = "Disposable grouping" }).ok, true, "delete releases name immediately")
+
+
+-- Membership producer matrix needs a valid workspace_state after action fixtures.
+-- Reset only the workspace record while preserving durable membership seq continuity
+-- where keys still exist; rebuild a clean empty workspace store for these checks.
+database.workspace_state = {
+  schema_version = 1,
+  revision = (database.workspace_state and database.workspace_state.revision) or 1,
+  payload = {
+    next_workspace = 100,
+    next_timestamp = 100,
+    workspaces = {},
+  },
+}
+-- Membership producer matrix: multi-delete range, CAS conflict silence, provider seq,
+-- post-reload first publish, and failed-batch silence.
+local multi_ws = create({ name = "Multi delete source" })
+assert_eq(multi_ws.ok, true, "multi-delete workspace creates")
+local multi_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+local multi_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+assert_eq(add_session({ workspace_id = multi_ws.workspace.id, session_id = multi_b }).ok, true, "multi seed b")
+assert_eq(add_session({ workspace_id = multi_ws.workspace.id, session_id = multi_a }).ok, true, "multi seed a")
+local seq_before_delete = database["membership_entity_seq"].payload.next_seq
+local publish_before_delete = #publish_calls
+local batch_before_delete = batch_calls
+local deleted_multi = delete({ id = multi_ws.workspace.id })
+assert_eq(deleted_multi.ok, true, "multi-membership delete succeeds")
+assert_eq(batch_calls, batch_before_delete + 1, "multi-delete uses one batch")
+assert_eq(database["membership:" .. multi_a], nil, "multi-delete clears membership a")
+assert_eq(database["membership:" .. multi_b], nil, "multi-delete clears membership b")
+assert_eq(
+  database["membership_entity_seq"].payload.next_seq,
+  seq_before_delete + 2,
+  "multi-delete range-reserves N=2 consecutive seqs"
+)
+assert_eq(#publish_calls, publish_before_delete + 2, "multi-delete publishes N remove frames")
+local remove_a = publish_calls[publish_before_delete + 1]
+local remove_b = publish_calls[publish_before_delete + 2]
+assert_eq(remove_a.type, "entity_remove", "first multi-delete frame is remove")
+assert_eq(remove_b.type, "entity_remove", "second multi-delete frame is remove")
+assert_eq(remove_a.id, multi_a, "multi-delete removes in ascending session_uuid order first")
+assert_eq(remove_b.id, multi_b, "multi-delete removes in ascending session_uuid order second")
+assert_eq(remove_a.snapshot_seq, seq_before_delete + 1, "multi-delete first reserved seq")
+assert_eq(remove_b.snapshot_seq, seq_before_delete + 2, "multi-delete second reserved seq")
+
+local silence_ws = create({ name = "Batch silence" })
+assert_eq(add_session({
+  workspace_id = silence_ws.workspace.id,
+  session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+}).ok, true, "silence seed claim")
+local seq_before_fail = database["membership_entity_seq"].payload.next_seq
+local publish_before_fail = #publish_calls
+fail_next_batch = true
+local failed_remove = remove_session({
+  workspace_id = silence_ws.workspace.id,
+  session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+})
+assert_eq(failed_remove.ok, false, "failed batch remove fails closed")
+assert_eq(failed_remove.error.code, "persist_failed", "failed batch is typed persist_failed")
+assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_fail, "failed batch does not advance seq")
+assert_eq(#publish_calls, publish_before_fail, "failed batch publishes no frames")
+assert_true(
+  database["membership:cccccccc-cccc-4ccc-8ccc-cccccccccccc"] ~= nil,
+  "failed batch leaves membership key intact"
+)
+
+local cas_ws_a = create({ name = "CAS owner A" })
+local cas_ws_b = create({ name = "CAS owner B" })
+local cas_session = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+local seq_before_cas = database["membership_entity_seq"].payload.next_seq
+local publish_before_cas = #publish_calls
+batch_conflict_once = true
+local cas_first = add_session({ workspace_id = cas_ws_a.workspace.id, session_id = cas_session })
+assert_eq(cas_first.ok, true, "CAS retry claim eventually succeeds")
+assert_eq(database["membership:" .. cas_session].payload.workspace_id, cas_ws_a.workspace.id, "CAS winner owns session")
+assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_cas + 1, "CAS winner advances seq once")
+assert_eq(#publish_calls, publish_before_cas + 1, "CAS winner publishes exactly once")
+local cas_loser = add_session({ workspace_id = cas_ws_b.workspace.id, session_id = cas_session })
+assert_eq(cas_loser.error.code, "session_already_owned", "CAS loser is session_already_owned")
+assert_eq(#publish_calls, publish_before_cas + 1, "CAS loser publishes nothing")
+
+local membership_provider = registered_handler(spec, "membership_entity_provider")
+assert_eq(membership_provider.kind, "entity_provider", "membership entity_provider is registered")
+assert_eq(membership_provider.descriptor_id, "botster-workspaces.membership", "membership provider family is exact")
+assert_eq(membership_provider.descriptor.entity_type, "botster-workspaces.membership", "membership descriptor entity_type matches")
+assert_eq(membership_provider.descriptor.id_field, "id", "membership provider uses id field")
+local seq_before_provider = database["membership_entity_seq"].payload.next_seq
+local provider_snapshot = membership_provider.call({ subscription_id = "test-sub" })
+assert_eq(provider_snapshot.type, "entity_snapshot", "membership provider returns entity_snapshot")
+assert_eq(provider_snapshot.entity_type, "botster-workspaces.membership", "membership snapshot family matches")
+assert_eq(provider_snapshot.snapshot_seq, seq_before_provider + 1, "provider allocates one durable seq")
+assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_provider + 1, "provider CAS advances next_seq")
+assert_true(#provider_snapshot.items >= 1, "membership snapshot includes durable memberships")
+for _, item in ipairs(provider_snapshot.items) do
+  assert_keys(item, { "id", "session_uuid", "workspace_id" }, "membership row shape is exact")
+  assert_eq(item.id, item.session_uuid, "membership id equals session_uuid")
+  assert_eq(item.lifecycle, nil, "membership snapshot omits Hub lifecycle")
+  assert_eq(item.label, nil, "membership snapshot omits Hub label")
+  assert_eq(item.spawn_point, nil, "membership snapshot omits Hub spawn_point")
+end
+
+-- Simulated package reload: re-dofile keeps durable membership_entity_seq floor.
+local durable_seq_after_provider = database["membership_entity_seq"].payload.next_seq
+local reloaded_spec = dofile("plugin.lua")
+local reloaded_add = tool(reloaded_spec, "botster_workspaces.add_session")
+local reloaded_ws = tool(reloaded_spec, "botster_workspaces.create")({ name = "Post reload" })
+local reload_session = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+local publish_before_reload = #publish_calls
+local reloaded_claim = reloaded_add({
+  workspace_id = reloaded_ws.workspace.id,
+  session_id = reload_session,
+})
+assert_eq(reloaded_claim.ok, true, "first post-reload claim succeeds")
+assert_eq(
+  database["membership_entity_seq"].payload.next_seq,
+  durable_seq_after_provider + 1,
+  "post-reload claim continues durable sequence"
+)
+assert_eq(#publish_calls, publish_before_reload + 1, "post-reload claim publishes once")
+assert_eq(
+  publish_calls[#publish_calls].snapshot_seq,
+  durable_seq_after_provider + 1,
+  "post-reload publish uses next durable seq without stale/duplicate"
+)
+assert_eq(publish_calls[#publish_calls].id, reload_session, "post-reload publish id matches claim")
+
+
 
 database.workspace_state = {
   schema_version = 1,
@@ -1090,5 +1389,6 @@ assert_eq(registered_handler(spec, "spawn_session_action").kind, "ui_action", "p
 if os.getenv("BOTSTER_WORKSPACES_INJECT_FAILURE") == "1" then
   error("deliberate harness failure")
 end
+
 
 print("test/plugin_runtime_test.lua: ok")

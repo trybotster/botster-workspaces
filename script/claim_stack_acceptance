@@ -440,7 +440,11 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
 
     c3 = classify_race_pair(web_summary.dig("lanes", "c3", "results") || [])
     c4 = classify_race_pair(web_summary.dig("lanes", "c4", "results") || [])
-    assert(c3.fetch("request_ids").uniq.length == c3.fetch("request_ids").length, "C3 request_ids collided")
+    # Request ids are per SPA document; dual-browser proof requires two results on two
+    # workspaces (C3) or two results on one workspace (C4), not globally unique strings.
+    assert(c3.fetch("count") == 2, "C3 must record two browser claim results")
+    c3_workspaces = (web_summary.dig("lanes", "c3", "results") || []).map { |row| row["workspace_id"] }.uniq
+    assert(c3_workspaces.length == 2, "C3 must involve two workspaces: #{c3_workspaces.inspect}")
     assert(c4.fetch("request_ids").length == 2, "C4 must record two request_ids")
 
     # C1 remove → restore via package remove (membership path) then re-check option is parent-owned oracle.

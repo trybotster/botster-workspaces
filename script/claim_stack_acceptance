@@ -676,15 +676,19 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
     # Bind the validated tui_binary bytes into the package entrypoint path apps open runs.
     # Hub package command is package_root/target/debug/botster-tui; ancestry alone is not enough.
     validated_tui = artifacts.fetch("tui_binary")
+    validated_tui_path = File.realpath(validated_tui.fetch("path"))
     tui_package_bin = File.join(tui_path, "target", "debug", "botster-tui")
     FileUtils.mkdir_p(File.dirname(tui_package_bin))
-    FileUtils.rm_f(tui_package_bin)
-    begin
-      File.link(validated_tui.fetch("path"), tui_package_bin)
-    rescue Errno::EXDEV, Errno::EPERM, NotImplementedError
-      FileUtils.cp(validated_tui.fetch("path"), tui_package_bin)
+    package_realpath = File.exist?(tui_package_bin) ? File.realpath(tui_package_bin) : nil
+    if package_realpath != validated_tui_path
+      FileUtils.rm_f(tui_package_bin)
+      begin
+        File.link(validated_tui_path, tui_package_bin)
+      rescue Errno::EXDEV, Errno::EPERM, NotImplementedError
+        FileUtils.cp(validated_tui_path, tui_package_bin)
+      end
+      File.chmod(0o755, tui_package_bin)
     end
-    File.chmod(0o755, tui_package_bin)
     package_bin_sha = Digest::SHA256.file(tui_package_bin).hexdigest
     assert(
       package_bin_sha == validated_tui.fetch("sha256"),

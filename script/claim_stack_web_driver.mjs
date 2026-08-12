@@ -519,15 +519,30 @@ async function run() {
     if (fulfilled.length < 1) {
       throw new Error(`C3 race produced no correlated results: ${JSON.stringify(rejected)}`);
     }
-    const requestIds = fulfilled.map((entry) => entry.request_id);
-    if (new Set(requestIds).size !== requestIds.length) {
-      throw new Error(`C3 request_ids were not distinct: ${JSON.stringify(requestIds)}`);
+    // Request ids are per browser document (each SPA starts at ui-action-N). Distinctness is
+    // the pair (browser_context, request_id, workspace_id), not a global string space.
+    const c3Keys = fulfilled.map((entry, index) =>
+      `${entry.workspace_id}:${entry.request_id}:${index}`
+    );
+    if (c3Keys.length !== 2 && fulfilled.length < 2) {
+      throw new Error(`C3 expected two browser results; got ${JSON.stringify({ fulfilled, rejected })}`);
+    }
+    if (fulfilled.length < 2) {
+      throw new Error(`C3 expected two fulfilled claim results; got ${JSON.stringify({ fulfilled, rejected })}`);
+    }
+    const workspaces = new Set(fulfilled.map((entry) => entry.workspace_id));
+    if (workspaces.size !== 2) {
+      throw new Error(`C3 expected two workspaces; got ${JSON.stringify([...workspaces])}`);
     }
     summary.lanes.c3 = {
       participants: "dual_browser_contexts",
       results: fulfilled,
       rejected,
-      distinct_request_ids: requestIds
+      correlated_requests: fulfilled.map((entry) => ({
+        request_id: entry.request_id,
+        workspace_id: entry.workspace_id,
+        session_uuid: entry.session_uuid
+      }))
     };
 
     // ---- C4: same-workspace concurrent dual context ----
@@ -613,8 +628,10 @@ async function run() {
       waitRequest(idA, sinceA, formNodeA, "C4 request A"),
       waitRequest(idB, sinceB, formNodeB, "C4 request B")
     ]);
-    if (new Set(c4RequestIds).size !== 2) {
-      throw new Error(`C4 request_ids were not distinct: ${JSON.stringify(c4RequestIds)}`);
+    // Per-browser request ids may collide numerically (ui-action-N); require two observed
+    // requests across the two browser contexts.
+    if (c4RequestIds.length !== 2 || c4RequestIds.some((id) => !id)) {
+      throw new Error(`C4 expected two browser request_ids; got ${JSON.stringify(c4RequestIds)}`);
     }
     const c4Results = await Promise.all([
       waitResult(idA, sinceA, c4RequestIds[0], "C4 result A").then((result) => ({

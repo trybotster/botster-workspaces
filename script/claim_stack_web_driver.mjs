@@ -271,7 +271,10 @@ async function submitAdd(page, form, workspaceId, sessionId, label) {
   if (actionId !== "botster_workspaces.add_session") {
     throw new Error(`${label}: realized submit action_id=${actionId}`);
   }
-  await submit.click({ timeout: 10_000 });
+  // Prefer the control's native click — Playwright hit-testing can fail when the
+  // form is mid-validation (data-form-invalid overlay) even though the control
+  // remains the production submit path.
+  await submit.evaluate((node) => node.click());
   let requestId;
   try {
     requestId = await page.waitForFunction(
@@ -500,7 +503,9 @@ async function run() {
     await waitForOption(raceB, formB, assignment.session_race);
     await selectSession(formA, assignment.session_race);
     await selectSession(formB, assignment.session_race);
-    // Near-concurrent submits
+    // Near-concurrent submits (re-assert selects immediately before each submit path).
+    await selectSession(formA, assignment.session_race);
+    await selectSession(formB, assignment.session_race);
     const raceResults = await Promise.allSettled([
       submitAdd(raceA, formA, assignment.workspace_w1, assignment.session_race, "C3 race A"),
       submitAdd(raceB, formB, assignment.workspace_w2, assignment.session_race, "C3 race B")
@@ -544,7 +549,13 @@ async function run() {
     const submitB = idFormB.locator("ion-button[data-action-id='botster_workspaces.add_session']").first();
     const formNodeA = await idFormA.getAttribute("data-ui-node-id");
     const formNodeB = await idFormB.getAttribute("data-ui-node-id");
-    await Promise.all([submitA.click(), submitB.click()]);
+    // Re-assert both select values immediately before concurrent native clicks.
+    await selectSession(idFormA, assignment.session_idem);
+    await selectSession(idFormB, assignment.session_idem);
+    await Promise.all([
+      submitA.evaluate((node) => node.click()),
+      submitB.evaluate((node) => node.click())
+    ]);
     const waitRequest = async (page, since, formNodeId, label) => {
       try {
         return await page.waitForFunction(

@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "fileutils"
 require "json"
 require "tmpdir"
 
@@ -33,11 +34,28 @@ assert(!manifest.key?("configuration"), "manifest must not retain workspace sett
 
 assert(hub_flow.include?("shared-stack validate-inputs"), "Hub flow must expose the shared-stack input profile")
 assert(hub_flow.include?("shared-stack run"), "Hub flow must expose the final shared-stack acceptance profile")
-%w[script/test-hub-flow script/validate_shared_stack_inputs script/shared_stack_acceptance].each do |path|
+assert(hub_flow.include?("claim-stack validate-inputs"), "Hub flow must expose the claim-stack input profile")
+assert(hub_flow.include?("claim-stack run"), "Hub flow must expose the claim-stack acceptance profile")
+%w[script/test-hub-flow script/validate_shared_stack_inputs script/shared_stack_acceptance script/validate_claim_stack_inputs script/claim_stack_acceptance].each do |path|
   assert(
     system("ruby", "-c", File.join(ROOT, path), out: File::NULL, err: File::NULL),
     "#{path} must pass Ruby syntax validation"
   )
+end
+claim_web_driver = read("script/claim_stack_web_driver.mjs")
+%w[
+  armDropNextInboundEntityFrame
+  closeDataChannel
+  botster_workspaces.add_session
+  claim-stack-web-summary
+  dual_browser_contexts
+  entity_options
+].each do |token|
+  assert(claim_web_driver.include?(token), "claim web driver must wire #{token}")
+end
+# Force interaction is forbidden on claim UI paths.
+["force: true", "force:true", "force: true,"].each do |token|
+  assert(!claim_web_driver.include?(token), "claim web driver must not use #{token}")
 end
 
 surfaces = manifest.fetch("surfaces")
@@ -214,6 +232,9 @@ assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", 
     "session_type_id",
     "fresh Hub data directory",
     "script/hub_acceptance_smoke",
+    "Claim-stack acceptance",
+    "claim-stack validate-inputs",
+    "armDropNextInboundEntityFrame",
   ],
   "docs/workspace-domain.md" => [
     "Exact Record",
@@ -280,6 +301,9 @@ scanned_files = %w[
   script/hub_acceptance_smoke
   script/shared_stack_acceptance
   script/validate_shared_stack_inputs
+  script/claim_stack_acceptance
+  script/validate_claim_stack_inputs
+  script/claim_stack_web_driver.mjs
   script/validate_ui_node_contract
   test/fixtures/legacy-session-template-manifest/botster-package.json
   test/fixtures/legacy-session-template-manifest/plugin.lua
@@ -416,6 +440,19 @@ Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
   File.write(manifest_path, JSON.pretty_generate(valid_manifest))
   File.write(File.join(source_checkout, "untracked"), "dirty\n")
   assert(!system(validator, manifest_path, out: File::NULL, err: File::NULL), "shared-stack validator accepted a dirty checkout")
+
+  # Claim-stack reuses the same immutable pin schema.
+  FileUtils.rm_f(File.join(source_checkout, "untracked"))
+  File.write(manifest_path, JSON.pretty_generate(valid_manifest))
+  claim_validator = File.join(ROOT, "script", "validate_claim_stack_inputs")
+  assert(
+    system(hub_flow_command, "claim-stack", "validate-inputs", manifest_path, out: File::NULL),
+    "valid claim-stack provenance was rejected"
+  )
+  invalid_claim = JSON.parse(File.read(manifest_path))
+  invalid_claim["artifacts"]["hub_binary"]["sha256"] = "0" * 64
+  File.write(manifest_path, JSON.pretty_generate(invalid_claim))
+  assert(!system(claim_validator, manifest_path, out: File::NULL, err: File::NULL), "claim-stack validator accepted a false binary digest")
 end
 
 lua = ENV.fetch("LUA", "lua")

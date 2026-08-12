@@ -53,10 +53,15 @@ claim_web_driver = read("script/claim_stack_web_driver.mjs")
 ].each do |token|
   assert(claim_web_driver.include?(token), "claim web driver must wire #{token}")
 end
-# Force interaction is forbidden on claim UI paths.
-["force: true", "force:true", "force: true,"].each do |token|
+# Force interaction and synthetic select assignment are forbidden on claim UI paths.
+["force: true", "force:true", "force: true,", "evaluate((node) => node.click())", 'dispatchEvent(new CustomEvent("ionChange"'].each do |token|
   assert(!claim_web_driver.include?(token), "claim web driver must not use #{token}")
 end
+assert(claim_web_driver.include?("select.click"), "claim web driver must open ion-select with a real click")
+claim_stack = read("script/claim_stack_acceptance")
+assert(claim_stack.include?("merge-base"), "claim-stack must enforce pin ancestry via merge-base")
+assert(claim_stack.include?("session_already_owned"), "claim-stack must assert typed race conflict")
+assert(claim_stack.include?("idempotent"), "claim-stack must assert same-workspace idempotent outcomes")
 
 surfaces = manifest.fetch("surfaces")
 assert(surfaces.length == 1, "manifest must declare one surface")

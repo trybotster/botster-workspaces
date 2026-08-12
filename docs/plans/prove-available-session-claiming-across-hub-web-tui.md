@@ -463,8 +463,8 @@ Document: Workspaces app surface → Add existing session → Available sessions
 ## Implementation sequence
 
 1. **Plan Review approves this plan.** No Implement agent work before step 2–3 complete.
-2. **Mandatory formal dependency re-registration (first post-approval action):**  
-   `project_pipelines_add_ticket_dependency(ticket_1786474783_285888 → ticket_1786518263_839128)`.  
+2. **Mandatory formal dependency re-registration (first post-approval action):**
+   `project_pipelines_add_ticket_dependency(ticket_1786474783_285888 → ticket_1786518263_839128)`.
    Record `dependency_id` in run evidence. If re-registration fails, stop and escalate — do not Implement without the formal edge.
 3. **Wait until `ticket_1786518263_839128` is closed** and a consumable Web pin exists with the documented real-frame-drop control. **No claim-stack code, harness skeleton, non-gap lanes, docs-only “prep”, or partial Implement while open.**
 4. Sync worktree to Workspaces `origin/main` (≥ Available sessions tip). Re-read product pins including the Web frame-drop pin.

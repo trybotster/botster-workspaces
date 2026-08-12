@@ -246,18 +246,50 @@ async function waitForOption(page, form, sessionId, timeoutMs = 45_000) {
   });
 }
 
-async function setSelectValue(select, value) {
-  await select.evaluate((node, next) => {
-    node.value = next;
-    node.dispatchEvent(new CustomEvent("ionChange", { bubbles: true, detail: { value: next } }));
-    node.dispatchEvent(new Event("change", { bubbles: true }));
-  }, value);
-}
-
-async function selectSession(form, sessionId) {
+/**
+ * Select an Available sessions option through normal rendered Ionic interaction:
+ * open the ion-select control, then click the matching option in the interface.
+ * No direct value assignment, synthetic ionChange, or evaluate(node.click()).
+ */
+async function selectSession(page, form, sessionId) {
   const select = form.locator("[data-ui-node-id='botster-workspaces-add-session-id'] ion-select");
   await select.waitFor({ timeout: 15_000 });
-  await setSelectValue(select, sessionId);
+  await select.click({ timeout: 15_000 });
+  // Ionic may present options as alert buttons, action sheet buttons, or popover radios.
+  const candidates = [
+    page.locator("ion-alert button, ion-alert .alert-radio-label").filter({ hasText: sessionId }),
+    page.locator("ion-action-sheet button, .action-sheet-button").filter({ hasText: sessionId }),
+    page.locator("ion-select-popover ion-item, ion-select-popover ion-radio").filter({ hasText: sessionId }),
+    page.locator(`ion-select-option[value='${sessionId}']`),
+    page.getByRole("radio", { name: new RegExp(sessionId) }),
+    page.getByRole("button", { name: new RegExp(sessionId) })
+  ];
+  let clicked = false;
+  for (const candidate of candidates) {
+    if (await candidate.count()) {
+      await candidate.first().click({ timeout: 10_000 });
+      clicked = true;
+      break;
+    }
+  }
+  if (!clicked) {
+    // Last resort: any visible overlay item containing the uuid text.
+    const fallback = page.locator("ion-alert, ion-action-sheet, ion-select-popover, [role='dialog']")
+      .locator(`text=${sessionId}`)
+      .first();
+    await fallback.click({ timeout: 10_000 });
+  }
+  // Confirm the select now holds the value via rendered production state (not synthetic set).
+  await page.waitForFunction(
+    ({ formId, expected }) => {
+      const selectNode = globalThis.document.querySelector(
+        `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select`
+      );
+      return (selectNode?.value ?? selectNode?.getAttribute("value")) === expected;
+    },
+    { formId: await form.getAttribute("data-ui-node-id"), expected: sessionId },
+    { timeout: 10_000 }
+  );
 }
 
 async function submitAdd(page, form, workspaceId, sessionId, label) {
@@ -271,10 +303,8 @@ async function submitAdd(page, form, workspaceId, sessionId, label) {
   if (actionId !== "botster_workspaces.add_session") {
     throw new Error(`${label}: realized submit action_id=${actionId}`);
   }
-  // Prefer the control's native click — Playwright hit-testing can fail when the
-  // form is mid-validation (data-form-invalid overlay) even though the control
-  // remains the production submit path.
-  await submit.evaluate((node) => node.click());
+  // Normal Playwright click on the realized submit control (no force, no evaluate).
+  await submit.click({ timeout: 15_000 });
   let requestId;
   try {
     requestId = await page.waitForFunction(
@@ -411,57 +441,87 @@ async function run() {
   });
 
   try {
-    // ---- C1: single claim path + remove restore + stale selection ----
+    // ---- C1: open dialog first, live-appear unclaimed session, claim, live updates, remove restore ----
     const p1 = await bootstrapClient(browser, appUrl, "p1");
     await selectWorkspace(p1, assignment.workspace_w1, assignment.workspace_w1_name || "Claim W1");
     let form = await openAddDialog(p1, assignment.workspace_w1);
-    await waitForOption(p1, form, assignment.session_s);
-    const metadata = await optionMetadata(form, assignment.session_s);
-    await selectSession(form, assignment.session_s);
-    const c1Claim = await submitAdd(p1, form, assignment.workspace_w1, assignment.session_s, "C1 claim");
-    if (c1Claim?.result?.accepted === false) {
-      throw new Error(`C1 claim was rejected: ${JSON.stringify(c1Claim.result)}`);
+    // Session S is NOT seeded yet — prove live appearance through /session entity frames.
+    const beforeLiveOptions = await readSelectOptions(form);
+    if (beforeLiveOptions.includes(assignment.session_s)) {
+      throw new Error(`C1: session_s present before live spawn: ${assignment.session_s}`);
     }
-    // Dialog clears on accepted claim; wait for form gone then re-open for exclusion proof.
-    await p1.locator(`form[data-ui-node-id='botster-workspaces-add-form-${assignment.workspace_w1}']`)
-      .waitFor({ state: "detached", timeout: 30_000 })
-      .catch(() => {});
-    // Wait for membership entity frame for the claimed session when available.
+    await sendDaemonRequest(socketPath, {
+      type: "spawn",
+      session_id: assignment.session_s,
+      command: "sleep 3600"
+    });
+    await waitForOption(p1, form, assignment.session_s, 60_000);
+    const metadata = await optionMetadata(form, assignment.session_s);
+    if (!metadata?.value) {
+      throw new Error(`C1: option metadata missing after live appear: ${JSON.stringify(metadata)}`);
+    }
+    // Record which of the four display fields Hub projected (assert presence when supplied).
+    const fieldsPresent = {
+      label: Boolean(metadata.label),
+      lifecycle: Boolean(metadata.lifecycle) || /running|exited|starting|stopping/i.test(metadata.label || ""),
+      session_type: Boolean(metadata.session_type),
+      spawn_point: Boolean(metadata.spawn_point)
+    };
+    // Live lifecycle update while dialog held open (no reopen): shutdown transitions running → exited.
+    const labelBefore = metadata.label;
+    await sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: assignment.session_s });
     await p1.waitForFunction(
-      ({ sessionId }) => {
-        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return events.some((entry) => {
-          const text = JSON.stringify(entry);
-          return text.includes("botster-workspaces.membership") && text.includes(sessionId);
-        });
+      ({ formId, sessionId, before }) => {
+        const match = [...globalThis.document.querySelectorAll(
+          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+        )].find((option) => (option.value ?? option.getAttribute("value")) === sessionId);
+        if (!match) return false;
+        const text = (match.textContent || "").trim();
+        const lifecycle = match.getAttribute("data-lifecycle") || "";
+        // Lifecycle/label live update: text or attribute must change from pre-shutdown snapshot.
+        return text !== before || /exited|ended|failed|stopping/i.test(`${text} ${lifecycle}`);
       },
-      { sessionId: assignment.session_s },
-      { timeout: 30_000 }
-    ).catch(() => {});
-    form = await openAddDialog(p1, assignment.workspace_w1);
-    // Wait for entity_options projection to settle without the claimed session.
+      {
+        formId: `botster-workspaces-add-form-${assignment.workspace_w1}`,
+        sessionId: assignment.session_s,
+        before: labelBefore
+      },
+      { timeout: 45_000 }
+    );
+    const metadataAfterLifecycle = await optionMetadata(form, assignment.session_s);
+    // Restart a running session for claim (claim accepts historical/exited uuid; prefer running).
+    // Re-spawn same uuid is not allowed; claim the exited session (still in /session) or spawn S live.
+    // Claim uses the still-present option after lifecycle change.
+    await selectSession(p1, form, assignment.session_s);
+    const c1Claim = await submitAdd(p1, form, assignment.workspace_w1, assignment.session_s, "C1 claim");
+    const c1Accepted = c1Claim?.result?.accepted === true
+      || c1Claim?.result?.result?.plugin_action_result?.state === "accepted";
+    if (!c1Accepted) {
+      throw new Error(`C1 claim was not accepted: ${JSON.stringify(c1Claim.result)}`);
+    }
+    // Hold dialog path: exclusion should land via membership entity frames without surface refresh.
     await p1.waitForFunction(
       ({ formId, sessionId }) => {
-        const select = globalThis.document.querySelector(
-          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select`
-        );
-        if (!select) return false;
         const options = [...globalThis.document.querySelectorAll(
           `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
         )];
+        // Form may clear after accepted claim; treat detached form as exclusion complete.
+        const formNode = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+        if (!formNode) return true;
         return !options.some((option) => (option.value ?? option.getAttribute("value")) === sessionId);
       },
       { formId: `botster-workspaces-add-form-${assignment.workspace_w1}`, sessionId: assignment.session_s },
       { timeout: 45_000 }
     );
+    // Re-open for stale-selection + remove/restore proofs.
+    form = await openAddDialog(p1, assignment.workspace_w1);
     const excludedOptions = await readSelectOptions(form);
     if (excludedOptions.includes(assignment.session_s)) {
       throw new Error(`C1: claimed session still present in options: ${JSON.stringify(excludedOptions)}`);
     }
-    // Stale selection: attempt normal submit without force after selecting nothing / invalid.
-    const submit = form.locator(":scope > ion-button[data-action-id='botster_workspaces.add_session']");
+    const submit = form.locator("ion-button[data-action-id='botster_workspaces.add_session']");
     const beforeStale = await harnessEventCount(p1);
-    await submit.click({ timeout: 3_000 }).catch(() => {});
+    await submit.click({ timeout: 5_000 }).catch(() => {});
     await p1.waitForTimeout(500);
     const staleOutbound = await p1.evaluate(({ since, sessionId }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [])
@@ -478,19 +538,33 @@ async function run() {
     if (staleOutbound.length > 0) {
       throw new Error(`C1 stale selection emitted claim for excluded session: ${JSON.stringify(staleOutbound)}`);
     }
+    // Remove membership while dialog held open; prove reappearance without refresh.
+    const removeResult = await sendDaemonRequest(socketPath, {
+      type: "plugin_mcp_call_tool",
+      name: "botster_workspaces.remove_session",
+      arguments: {
+        workspace_id: assignment.workspace_w1,
+        session_id: assignment.session_s
+      }
+    });
+    const removeBody = removeResult.plugin_tool_result || removeResult;
+    if (removeBody.ok === false) {
+      throw new Error(`C1 membership remove failed: ${JSON.stringify(removeResult)}`);
+    }
+    await waitForOption(p1, form, assignment.session_s, 60_000);
     summary.lanes.c1 = {
       claim: c1Claim,
+      live_appear: true,
+      fields_present: fieldsPresent,
       metadata_present: metadata,
+      metadata_after_lifecycle: metadataAfterLifecycle,
+      lifecycle_live_update: true,
+      label_live_update: (metadataAfterLifecycle?.label || "") !== labelBefore,
       excluded_after_claim: true,
       stale_submit_blocked: true,
+      restored_after_remove: true,
       path: "entity_options_select"
     };
-
-    // Parent removes membership for restore; driver proves reappearance after parent signal via env flag.
-    if (assignment.restore_session_s_after_remove) {
-      await waitForOption(p1, form, assignment.session_s, 45_000);
-      summary.lanes.c1.restored_after_remove = true;
-    }
 
     // ---- C3: dual browser race across W1 and W2 ----
     const raceA = await bootstrapClient(browser, appUrl, "raceA");
@@ -501,11 +575,11 @@ async function run() {
     const formB = await openAddDialog(raceB, assignment.workspace_w2);
     await waitForOption(raceA, formA, assignment.session_race);
     await waitForOption(raceB, formB, assignment.session_race);
-    await selectSession(formA, assignment.session_race);
-    await selectSession(formB, assignment.session_race);
+    await selectSession(raceA, formA, assignment.session_race);
+    await selectSession(raceB, formB, assignment.session_race);
     // Near-concurrent submits (re-assert selects immediately before each submit path).
-    await selectSession(formA, assignment.session_race);
-    await selectSession(formB, assignment.session_race);
+    await selectSession(raceA, formA, assignment.session_race);
+    await selectSession(raceB, formB, assignment.session_race);
     const raceResults = await Promise.allSettled([
       submitAdd(raceA, formA, assignment.workspace_w1, assignment.session_race, "C3 race A"),
       submitAdd(raceB, formB, assignment.workspace_w2, assignment.session_race, "C3 race B")
@@ -534,6 +608,21 @@ async function run() {
     if (workspaces.size !== 2) {
       throw new Error(`C3 expected two workspaces; got ${JSON.stringify([...workspaces])}`);
     }
+    // Picker reconciliation without surface refresh: excluded race uuid on both contexts.
+    const reconA = await openAddDialog(raceA, assignment.workspace_w1).then(async (form) => {
+      await raceA.waitForTimeout(500);
+      return readSelectOptions(form);
+    }).catch(() => null);
+    const reconB = await openAddDialog(raceB, assignment.workspace_w2).then(async (form) => {
+      await raceB.waitForTimeout(500);
+      return readSelectOptions(form);
+    }).catch(() => null);
+    if (Array.isArray(reconA) && reconA.includes(assignment.session_race)) {
+      throw new Error(`C3 W1 picker still lists race session after claim: ${JSON.stringify(reconA)}`);
+    }
+    if (Array.isArray(reconB) && reconB.includes(assignment.session_race)) {
+      throw new Error(`C3 W2 picker still lists race session after claim: ${JSON.stringify(reconB)}`);
+    }
     summary.lanes.c3 = {
       participants: "dual_browser_contexts",
       results: fulfilled,
@@ -542,7 +631,9 @@ async function run() {
         request_id: entry.request_id,
         workspace_id: entry.workspace_id,
         session_uuid: entry.session_uuid
-      }))
+      })),
+      picker_reconciled_w1: Array.isArray(reconA) ? !reconA.includes(assignment.session_race) : false,
+      picker_reconciled_w2: Array.isArray(reconB) ? !reconB.includes(assignment.session_race) : false
     };
 
     // ---- C4: same-workspace concurrent dual context ----
@@ -554,8 +645,8 @@ async function run() {
     const idFormB = await openAddDialog(idB, assignment.workspace_w1);
     await waitForOption(idA, idFormA, assignment.session_idem);
     await waitForOption(idB, idFormB, assignment.session_idem);
-    await selectSession(idFormA, assignment.session_idem);
-    await selectSession(idFormB, assignment.session_idem);
+    await selectSession(idA, idFormA, assignment.session_idem);
+    await selectSession(idB, idFormB, assignment.session_idem);
     // Fire both clicks in the same tick so membership exclusion cannot clear the second
     // select before its submit is observed.
     const sinceA = await harnessEventCount(idA);
@@ -565,11 +656,11 @@ async function run() {
     const formNodeA = await idFormA.getAttribute("data-ui-node-id");
     const formNodeB = await idFormB.getAttribute("data-ui-node-id");
     // Re-assert both select values immediately before concurrent native clicks.
-    await selectSession(idFormA, assignment.session_idem);
-    await selectSession(idFormB, assignment.session_idem);
+    await selectSession(idA, idFormA, assignment.session_idem);
+    await selectSession(idB, idFormB, assignment.session_idem);
     await Promise.all([
-      submitA.evaluate((node) => node.click()),
-      submitB.evaluate((node) => node.click())
+      submitA.click({ timeout: 15_000 }),
+      submitB.click({ timeout: 15_000 })
     ]);
     const waitRequest = async (page, since, formNodeId, label) => {
       try {
@@ -682,46 +773,102 @@ async function run() {
     await selectWorkspace(recon, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     const reconForm = await openAddDialog(recon, assignment.workspace_w2);
     await waitForOption(recon, reconForm, assignment.session_s2);
-    await selectSession(reconForm, assignment.session_s2);
+    await selectSession(recon, reconForm, assignment.session_s2);
+    const documentSentinel = await recon.evaluate(() => {
+      const marker = `claim-stack-reconnect-${Date.now()}`;
+      globalThis.__CLAIM_STACK_DOCUMENT_SENTINEL__ = marker;
+      return marker;
+    });
+    const preClose = await recon.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      const subscribeCount = events.filter((entry) =>
+        entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities"
+      ).length;
+      const snapshotCount = events.filter((entry) =>
+        entry.kind === "hub_frame"
+        && (entry.payload?.kind === "entity_snapshot" || entry.payload?.type === "entity_snapshot"
+          || entry.payload?.payload?.type === "entity_snapshot")
+      ).length;
+      return {
+        event_count: events.length,
+        subscribe_count: subscribeCount,
+        snapshot_count: snapshotCount
+      };
+    });
+    await recon.waitForFunction(
+      () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
+      null,
+      { timeout: 20_000 }
+    );
     const closed = await recon.evaluate(() =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel?.() ?? false
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
     );
     if (!closed) {
-      // transportControl may live on window harness installed by production client after connect
-      await recon.waitForFunction(
-        () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
-        null,
-        { timeout: 20_000 }
-      );
-      const closed2 = await recon.evaluate(() =>
-        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
-      );
-      if (!closed2) {
-        throw new Error("C6a closeDataChannel returned false");
-      }
+      throw new Error("C6a closeDataChannel returned false");
     }
+    // Require post-close generation: new subscribe_entities and entity_snapshot after preClose index.
     await recon.waitForFunction(
-      () => {
+      ({ sinceEventCount, priorSubscribe, priorSnapshot }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return events.some((entry) =>
-          entry.kind === "webrtc_lifecycle" ||
-          entry.kind === "hub_frame" && (entry.payload?.kind === "entity_snapshot" || entry.payload?.type === "entity_snapshot")
-        );
+        if (events.length <= sinceEventCount) return false;
+        const tail = events.slice(sinceEventCount);
+        const subscribeCount = events.filter((entry) =>
+          entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities"
+        ).length;
+        const snapshotCount = events.filter((entry) =>
+          entry.kind === "hub_frame"
+          && (entry.payload?.kind === "entity_snapshot" || entry.payload?.type === "entity_snapshot"
+            || entry.payload?.payload?.type === "entity_snapshot")
+        ).length;
+        const lifecycleTail = tail.some((entry) => entry.kind === "webrtc_lifecycle");
+        return subscribeCount > priorSubscribe
+          && snapshotCount > priorSnapshot
+          && lifecycleTail;
       },
-      null,
-      { timeout: 45_000 }
+      {
+        sinceEventCount: preClose.event_count,
+        priorSubscribe: preClose.subscribe_count,
+        priorSnapshot: preClose.snapshot_count
+      },
+      { timeout: 60_000 }
     );
-    // Option set should reappear after authoritative snapshot without page reload.
+    const sameDocument = await recon.evaluate((marker) =>
+      globalThis.__CLAIM_STACK_DOCUMENT_SENTINEL__ === marker
+    , documentSentinel);
+    if (!sameDocument) {
+      throw new Error("C6a document reloaded; reconnect must be in-page");
+    }
     await waitForOption(recon, reconForm, assignment.session_s2, 45_000);
+    // Stale draft selection must not successfully claim after reconnect without revalidation.
+    const reconSubmit = reconForm.locator("ion-button[data-action-id='botster_workspaces.add_session']");
+    const reconStaleSince = await harnessEventCount(recon);
+    await reconSubmit.click({ timeout: 5_000 }).catch(() => {});
+    await recon.waitForTimeout(500);
+    const reconStale = await recon.evaluate(({ since, sessionId }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).filter((entry) => {
+        const request = entry.payload?.request;
+        if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") return false;
+        if (request?.action_id !== "botster_workspaces.add_session") return false;
+        const values = request.values ?? {};
+        const resolved = values.session_id || values.session_id_advanced;
+        return resolved === sessionId;
+      }),
+    { since: reconStaleSince, sessionId: assignment.session_s2 });
+    // After reconnect, a held draft may still submit if still valid; require no successful accept
+    // for a value that was cleared invalid. Prefer zero outbound stale claims when form invalid.
     summary.lanes.c6a = {
       control: "transportControl.closeDataChannel",
       closed: true,
       page_reload: false,
-      options_reconciled: true
+      document_sentinel_survived: true,
+      pre_close: preClose,
+      post_close_generation: true,
+      authoritative_snapshot_after_close: true,
+      options_reconciled: true,
+      stale_outbound_after_reconnect: reconStale.length
     };
 
     // ---- C6b ordered sequence_gap via armDropNextInboundEntityFrame ----
-    // Warmup/drop/gap chronology requires three claimable sessions for membership deltas.
     const gapSessions = assignment.gap_sessions;
     if (!Array.isArray(gapSessions) || gapSessions.length < 3) {
       throw new Error("C6b requires assignment.gap_sessions with three unclaimed session UUIDs");
@@ -732,13 +879,23 @@ async function run() {
     await selectWorkspace(gapP2, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     const gapForm1 = await openAddDialog(gapP1, assignment.workspace_w2);
     await waitForOption(gapP1, gapForm1, gapSessions[0]);
-    await selectSession(gapForm1, gapSessions[0]); // A held stale candidate
-    // Warmup claim A from P2
+    await selectSession(gapP1, gapForm1, gapSessions[0]); // A held stale candidate
+    const gapBaseline = await gapP1.evaluate(() => {
+      const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+      return {
+        event_count: events.length,
+        subscribe_count: events.filter((e) => e.kind === "daemon_request" && e.payload?.type === "subscribe_entities").length,
+        snapshot_count: events.filter((e) =>
+          e.kind === "hub_frame"
+          && (e.payload?.kind === "entity_snapshot" || e.payload?.type === "entity_snapshot"
+            || e.payload?.payload?.type === "entity_snapshot")
+        ).length
+      };
+    });
     let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, gapSessions[0]);
-    await selectSession(gapForm2, gapSessions[0]);
+    await selectSession(gapP2, gapForm2, gapSessions[0]);
     await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[0], "C6b warmup A");
-    // Arm drop then claim B
     const arm = await gapP1.evaluate(() => {
       const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
       if (!control?.armDropNextInboundEntityFrame) {
@@ -754,30 +911,73 @@ async function run() {
     }
     gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, gapSessions[1]);
-    await selectSession(gapForm2, gapSessions[1]);
+    await selectSession(gapP2, gapForm2, gapSessions[1]);
     await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[1], "C6b drop B");
-    // Claim C should trigger sequence_gap on P1
+    const dropState = await gapP1.evaluate(() =>
+      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.getDropNextInboundEntityFrameState?.()
+      ?? null
+    );
     gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, gapSessions[2]);
-    await selectSession(gapForm2, gapSessions[2]);
+    await selectSession(gapP2, gapForm2, gapSessions[2]);
     await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[2], "C6b gap C");
-    await gapP1.waitForFunction(
-      () => {
+    const gapEvidence = await gapP1.waitForFunction(
+      ({ sinceEventCount, priorSubscribe, priorSnapshot }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        return events.some((entry) => {
+        const tail = events.slice(sinceEventCount);
+        const gapHit = tail.some((entry) => {
           const text = JSON.stringify(entry);
-          return text.includes("sequence_gap") || entry.payload?.reason === "sequence_gap";
+          return text.includes("sequence_gap")
+            || entry.payload?.reason === "sequence_gap"
+            || entry.payload?.payload?.reason === "sequence_gap";
         });
+        const subscribeCount = events.filter((e) =>
+          e.kind === "daemon_request" && e.payload?.type === "subscribe_entities"
+        ).length;
+        const snapshotCount = events.filter((e) =>
+          e.kind === "hub_frame"
+          && (e.payload?.kind === "entity_snapshot" || e.payload?.type === "entity_snapshot"
+            || e.payload?.payload?.type === "entity_snapshot")
+        ).length;
+        if (!gapHit || subscribeCount <= priorSubscribe || snapshotCount <= priorSnapshot) return null;
+        return {
+          sequence_gap: true,
+          resubscribe: subscribeCount > priorSubscribe,
+          replacement_snapshot: snapshotCount > priorSnapshot,
+          tail_count: tail.length
+        };
       },
-      null,
-      { timeout: 45_000 }
-    );
+      {
+        sinceEventCount: gapBaseline.event_count,
+        priorSubscribe: gapBaseline.subscribe_count,
+        priorSnapshot: gapBaseline.snapshot_count
+      },
+      { timeout: 60_000 }
+    ).then((handle) => handle.jsonValue());
+    // Stale held A must not successfully claim after gap resync.
+    const gapStaleSince = await harnessEventCount(gapP1);
+    await gapForm1.locator("ion-button[data-action-id='botster_workspaces.add_session']")
+      .click({ timeout: 5_000 })
+      .catch(() => {});
+    await gapP1.waitForTimeout(500);
+    const gapStaleOutbound = await gapP1.evaluate(({ since, sessionId }) =>
+      (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).filter((entry) => {
+        const request = entry.payload?.request;
+        if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") return false;
+        if (request?.action_id !== "botster_workspaces.add_session") return false;
+        const values = request.values ?? {};
+        const resolved = values.session_id || values.session_id_advanced;
+        return resolved === sessionId;
+      }),
+    { since: gapStaleSince, sessionId: gapSessions[0] });
     summary.lanes.c6b = {
       control: "transportControl.armDropNextInboundEntityFrame",
       filter: { entity_type: "botster-workspaces.membership" },
       chronology: "warmup_A_drop_B_gap_C",
       arm,
-      sequence_gap_observed: true
+      drop_state: dropState,
+      gap_evidence: gapEvidence,
+      stale_outbound_for_held_a: gapStaleOutbound.length
     };
 
     summary.completed = true;

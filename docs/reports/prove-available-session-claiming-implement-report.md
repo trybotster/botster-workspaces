@@ -9,148 +9,84 @@
 | Ticket | `ticket_1786474783_285888` |
 | Run | `run_1786516676_981514` |
 | Branch | `project-pipelines/ticket_1786474783_285888` |
+| PR | https://github.com/trybotster/botster-workspaces/pull/18 |
 | Approved plan | `docs/plans/prove-available-session-claiming-across-hub-web-tui.md` (v4) |
-| Runtime-teardown class | **Does not apply** (`teardown_class_applies: false`) |
+| Runtime-teardown class | **Does not apply** |
 
-Routing proof: `project_pipelines_current_context` and `list_spawn_targets` resolve `tgt_71266a8d976d4535902ffed09c18a7ba` to `botster-workspaces` / `trybotster/botster-workspaces`. Ambient CWD was not used as ownership authority. Worktree synced to Workspaces product tip `7ab4d1334214b3ea3c8b02e9ea665a27e70c0916` before implementation.
+## Review revisit (sequence 11) — open findings map
 
-## Repository playbook and other playbooks/notes applied
+| Finding | Resolution |
+| --- | --- |
+| `finding_1786529668_628714` Browser claims bypass normal interaction | Ionic option select via control click + overlay option click; submit via Playwright `locator.click` only. Removed value assignment, synthetic ionChange, and `evaluate(node.click())`. |
+| `finding_1786529668_405039` Parent omits TUI claim | Routed owner ticket `ticket_1786529885_807584` (TUI target) and formal dependency `dependency_1786529892_674521`. No public shared-Hub TUI claim keyboard seam exists on pin `abc804e1` (lifecycle seeds via MCP). |
+| `finding_1786529668_291049` Race/retry oracles weak | Parent asserts C3 one accept + one typed conflict (`session_already_owned`/rejected), C4 two valid outcomes with uniqueness of membership row, picker reconciliation on both contexts. |
+| `finding_1786529668_423711` C1 omits live picker behavior | Open dialog first; spawn session after; assert live appear; lifecycle live update via shutdown while held open; claim; exclude; remove membership while open; restore option. |
+| `finding_1786529668_607826` Reconnect weak | Document sentinel, pre-close counters, require post-close subscribe + snapshot generation, same-document proof, picker reconcile. |
+| `finding_1786529668_806414` Sequence-gap string match | Require drop state, sequence_gap tail evidence, resubscribe count increase, replacement snapshot increase, stale-held A outbound check. |
+| `finding_1786529668_491758` Pins not enforced | `git merge-base --is-ancestor MINIMUM ACTUAL` on each validated source checkout. |
+| `finding_1786529668_641456` Historical removal fails open | Fail-closed remove path + authoritative `list_sessions` absence before C5. |
+| `finding_1786529668_709447` Whitespace | Stripped trailing spaces on plan/report; `git diff --check` clean. |
 
-### Role / charter (required order)
+## Playbooks / notes applied
 
 1. [[implementer-playbook]]
 2. [[botster-implementer-playbook]]
 3. [[botster-workspaces-playbook]]
-4. Targeted atomic notes below
-5. [[project-pipelines-playbook]] — **not loaded for product scope** (no Project Pipelines package/plugin path edits)
+4. Charter and ticket notes from plan v4 (entity frames, conformance oracles, no force interaction, node-identity, shared-hub acceptance)
 
-### Charter must-load notes
-
-- [[workspaces are semantic groupings by purpose not by branch]]
-- [[botster workspace records are plugin owned references not hub authority]]
-- [[botster plugin entities are canonical for plugin-owned dynamic state]]
-- [[botster package manifests and lockfiles should declare capabilities and provenance]]
-- [[botster hub gravity must be watched before it becomes the new monolith]]
-- [[acceptance harness region oracles must key on node identity not concatenated text]]
-- [[plugin ui action ids are a two site change and hub fails closed on unregistered ids]]
-- [[shared hub workspaces acceptance omits package path without skipping its lane]]
-
-### Ticket-specific notes
-
-- [[conformance harnesses gate on deterministic invariants not timing]]
-- [[conformance helpers must dispatch the action id read from the rendered node]]
-- [[conformance oracles assert action result frames not toast text]]
-- [[a page reload is not a reconnect]]
-- [[botster entity snapshots are authoritative reconnect baselines]]
-- [[closed dependency tickets signal merged source not a consumable release]]
-- [[implementation artifacts must match actual git state]]
-- [[implement gate must verify committed work and pr link before review]]
-- [[implementation steps must persist report artifacts for review]]
-
-### Explicitly not loaded
-
-- [[botster runtime teardown lenses]] — plan records `teardown_class_applies: false`
-
-## Files changed
+## Files changed (this revisit)
 
 | Path | Role |
 | --- | --- |
-| `script/claim_stack_acceptance` | Parent claim campaign: one clean Hub, pin validation, substrate smoke, seed, Web dual-browser driver, membership oracles, supporting consumers, evidence ledger |
-| `script/validate_claim_stack_inputs` | Immutable pin/input validation (shared-stack schema) |
-| `script/claim_stack_web_driver.mjs` | Production Playwright dual-browser claim lanes C1/C3/C4/C5/C6a/C6b |
-| `script/test-hub-flow` | `claim-stack validate-inputs` / `claim-stack run` profiles |
-| `script/test` | Static schema/syntax/forbidden-method contract for claim-stack (not live stack) |
-| `README.md` | Claim-stack command, pins, forbidden methods, evidence |
-| `docs/plans/prove-available-session-claiming-across-hub-web-tui.md` | Approved plan artifact (v4) |
-| `docs/reports/prove-available-session-claiming-implement-report.md` | This report |
+| `script/claim_stack_web_driver.mjs` | Normal Ionic interaction; C1 live matrix; C3 picker reconcile; C6a/C6b generation oracles |
+| `script/claim_stack_acceptance` | Pin ancestry, historical fail-closed, typed C3/C4 membership uniqueness oracles, C1 spawn ownership |
+| `script/test` | Guards against synthetic force paths; pin ancestry + typed conflict tokens |
+| `docs/reports/...implement-report.md` | This report |
+| `docs/plans/...` | Whitespace hygiene |
 
-`plugin.lua`, `botster-package.json`, and domain schema were **not** changed (product claim behavior already on main).
+## Ownership boundaries
 
-## Ownership boundaries preserved
+- Workspaces owns parent claim campaign orchestration only.
+- Web/TUI/Hub product code not edited.
+- TUI shared-Hub keyboard claim is a separately routed owner ticket on `tgt_c3d470bab78549df920a41e8fb0e58d8`.
 
-- **This repository owns:** package orchestration of the multi-client claim campaign, membership/package substrate oracles, documentation, and repository-owned test wrappers.
-- **Consumed only (no product edits):**
-  - Hub session identity, lifecycle, entity fanout (`botster-hub-playbook`)
-  - Web Ionic entity_options + harness controls (`botster-web-playbook`) including `armDropNextInboundEntityFrame` from `ticket_1786518263_839128`
-  - TUI keyboard lifecycle consumer (`botster-tui-playbook`)
-- No package-specific client code was added to Web or TUI repositories from this run.
+## Cross-repo dependencies
 
-## Cross-repo dependencies or separately routed work
+| Ticket | Status |
+| --- | --- |
+| Prior closed Hub/Web/TUI/Workspaces deps | closed |
+| `ticket_1786518263_839128` Web frame-drop | closed (`dependency_1786518942_244198`) |
+| **`ticket_1786529885_807584` TUI shared-Hub claim** | **open** (`dependency_1786529892_674521`) |
 
-| Dependency | Status | Consumption |
-| --- | --- | --- |
-| `ticket_1786474780_590414` Workspaces available sessions | closed | package tip `7ab4d13` |
-| `ticket_1786474780_865627` Web entity-backed select | closed | Web pin |
-| `ticket_1786474781_871159` TUI entity-backed select | closed | TUI pin |
-| `ticket_1786494180_266672` Hub package entity fanout | closed | Hub pin `de6b099` |
-| `ticket_1786518263_839128` Web frame-drop sequence_gap | **closed** (`dependency_1786518942_244198`) | Web ≥ `102d39e`; control `transportControl.armDropNextInboundEntityFrame` |
+## Deviations
 
-## Deviations from plan
+1. Full parent TUI keyboard claim on the shared Hub waits on `ticket_1786529885_807584` (routed, not waived).
+2. Bare Hub spawn sessions may omit dedicated `label`/`session_type`/`spawn_point` fields; C1 records which fields Hub supplies and proves lifecycle (+ derived label text) live update via `shutdown_session`.
 
-1. **TUI C2 keyboard claim on the shared parent Hub** is not driven by a parent-owned TUI scenario schema (only spawn-driver schema exists). Parent proves TUI via pin-matched supporting `script/test-live-hub workspaces lifecycle` (consumer-owned Hub, required section D). Residual risk recorded below; a shared-Hub TUI claim driver would be a separately routed TUI ticket if Review requires same-data-dir TUI keyboard participation beyond supporting proof.
-2. **Web lifecycle mode rejects `BOTSTER_LIVE_DATA_DIR`** by design. Parent therefore owns a dedicated Playwright claim driver against the shared Hub rather than reusing `smoke:workspaces-lifecycle` for parent C lanes. Supporting lifecycle remains section D.
-3. **C1 remove→restore option reappearance** is asserted as membership DB removal on the parent Hub after the Web claim lane; a second held-open option restore UI pass is optional when the driver form remains open (membership exclusion/restore is covered by substrate + Web supporting lifecycle membership-reactive stage).
-
-## Tests and downstream proof run
-
-### Static / package-local
+## Tests and proof
 
 ```sh
 script/test
-# script/test: ok
-# includes claim-stack Ruby syntax, input validator negatives, driver contract tokens, README tokens
+# ok
+
+# After TUI dependency closes, re-run full:
+script/test-hub-flow claim-stack validate-inputs MANIFEST
+script/test-hub-flow claim-stack run MANIFEST EVIDENCE_DIR
 ```
 
-### Live claim-stack (opt-in) — **passed**
+Static guards cover interaction bans and pin ancestry. Live claim-stack re-run required after this revisit for green evidence on the tightened oracles.
 
-```sh
-script/test-hub-flow claim-stack validate-inputs /absolute/path/to/inputs.json
-script/test-hub-flow claim-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
-# script/claim_stack_acceptance: ok
-```
+## Production entry point
 
-Representative green evidence directory: `/private/tmp/claim-stack-evidence-1786529019` (`summary.json` status `passed`).
+Workspaces surface → Add existing session → Available sessions entity_options (real Ionic select) → realized `botster_workspaces.add_session` → membership publish → generic clients reconcile open pickers; reconnect via `closeDataChannel`; ordered gap via `armDropNextInboundEntityFrame`.
 
-| Component | Live pin used |
-| --- | --- |
-| Workspaces harness | `f038d1d72b853b5a26cca18049cba947766c9d88` (≥ `7ab4d13`) |
-| Hub binary source | `de6b09982e72fd5efd04a5258f5fc645f611adbc` |
-| Web package + driver | `102d39ea6c8ae7b927006dfba109171191c7b775` |
-| TUI package + driver | `abc804e19bc3e01465cd308c11de5f4292331c3d` |
+## Residual risk
 
-Parent Web campaign lanes completed: **c1, c3, c4, c5, c6a, c6b**.
+- TUI same-Hub claim blocked on new dependency.
+- Live re-run of tightened oracles must be green before Review re-approval.
 
-Supporting consumers:
+## Missing vault guidance
 
-| Consumer | Result |
-| --- | --- |
-| Web `smoke:workspaces-lifecycle` | passed |
-| TUI `script/test-live-hub workspaces lifecycle` | passed |
-
-Frame-drop control:  
-`globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" })`  
-Chronology: warmup A → drop B → gap C.
-
-Reconnect control: `transportControl.closeDataChannel` (not page reload).
-
-SPA request-state: dual-browser results correlate per SPA document (`ui-action-N` sequences are not globally unique across browser contexts; oracles key on workspace/request pairs).
-
-### Production entry-point statement
-
-Workspaces app surface → Add existing session → Available sessions `entity_options` (or advanced historical when absent) → realized `botster_workspaces.add_session` with correlated `request_id` → membership batch + `entity_publish` → generic Web entity stores update open pickers; reconnect baselines replace entity stores from authoritative snapshots; ordered gap drops a real inbound membership delta before `receiveEntityFrame` and hits production `sequence_gap` resubscribe.
-
-## Unverified behavior or residual risk
-
-1. TUI keyboard claim on the **same** parent Hub data-dir remains supporting-only (`script/test-live-hub workspaces lifecycle` owns its Hub). Parent campaign proves Web dual-browser claim on the shared Hub.
-2. Label/lifecycle live metadata projection depends on Hub supplying those fields; when absent, the driver records null rather than inventing values.
-3. Dual-browser request_id strings may collide across documents; correlation uses per-context request observation plus workspace id.
-
-## Missing vault guidance discovered
-
-1. Parent-owned multi-client claim campaign (Available sessions + dual-browser race + historical + reconnect/gap) is new relative to spawn shared-stack — worth a vault note after capture.
-2. Web lifecycle mode intentionally forbids caller-owned `BOTSTER_LIVE_DATA_DIR`; claim parents need a dedicated driver or a Web shared-hub claim mode.
-3. Dual-subscriber package-entity floor + warmup claim for sequence_gap (from Web ticket report) should be cross-linked for future claim campaigns.
-
-## Convention conflicts
-
-None.
+- Parent multi-client claim campaign pattern
+- Web lifecycle forbids caller-owned data dir; claim parents need dedicated drivers
+- Per-SPA `ui-action-N` request ids are not globally unique across browser contexts

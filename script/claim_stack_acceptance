@@ -141,11 +141,16 @@ def clean_git_provenance(path)
   { "kind" => "git_checkout", "revision" => git_revision(path), "clean" => true }
 end
 
-def assert_min_pin!(label, actual, minimum)
+def assert_min_pin!(label, actual, minimum, source_checkout: nil)
   assert(actual.is_a?(String) && actual.match?(/\A[0-9a-f]{40}\z/), "#{label} revision must be full sha")
-  # Exact-or-newer is enforced by the operator-supplied clean checkout + Web source control presence checks.
-  # Record the floor; do not invent cross-repo ancestry without the artifact checkout path.
   assert(minimum.match?(/\A[0-9a-f]{40}\z/), "#{label} minimum pin must be full sha")
+  return if actual == minimum
+  repo = source_checkout || ROOT
+  ok = system(
+    "git", "-C", repo, "merge-base", "--is-ancestor", minimum, actual,
+    out: File::NULL, err: File::NULL
+  )
+  assert(ok, "#{label} pin #{actual} is not a descendant of required minimum #{minimum} in #{repo}")
 end
 
 def directory_digest(path)
@@ -223,23 +228,39 @@ def parse_web_summary(output)
   JSON.parse(line.delete_prefix("claim-stack-web-summary "))
 end
 
-def action_accepted?(entry)
+def action_classification(entry)
   result = entry["result"] || {}
-  state = result["state"] || result.dig("plugin_action_result", "state") || result["status"]
-  ok = result["ok"]
-  idempotent = result["idempotent"] || result.dig("result", "idempotent")
-  code = result.dig("error", "code") || result["code"]
+  plugin = result.dig("result", "plugin_action_result") || result["plugin_action_result"] || {}
+  payload = result.dig("result", "payload") || plugin["payload"] || result["payload"] || {}
+  accepted = result["accepted"] == true || plugin["state"] == "accepted"
+  state = plugin["state"] || result["state"] || result["status"]
+  idempotent = payload["idempotent"] == true || plugin["idempotent"] == true || result["idempotent"] == true
+  error_code = result.dig("error", "code") ||
+    plugin.dig("error", "code") ||
+    payload.dig("error", "code") ||
+    result["code"] ||
+    plugin["error"]
+  error_code = error_code["code"] if error_code.is_a?(Hash)
+  # Typed conflict and package error strings may land in plugin.error string/form_errors.
+  error_text = [
+    plugin["error"],
+    Array(plugin["form_errors"]).join(" "),
+    result["reason"],
+  ].compact.join(" ")
+  if error_code.nil? && error_text.include?("session_already_owned")
+    error_code = "session_already_owned"
+  end
   {
+    "accepted" => accepted,
     "state" => state,
-    "ok" => ok,
     "idempotent" => idempotent,
-    "error_code" => code,
-    "raw_keys" => result.is_a?(Hash) ? result.keys : [],
+    "error_code" => error_code,
+    "error_text" => error_text,
   }
 end
 
 def classify_race_pair(results)
-  classifications = results.map { |entry| action_accepted?(entry) }
+  classifications = results.map { |entry| action_classification(entry) }
   {
     "count" => results.length,
     "request_ids" => results.map { |entry| entry["request_id"] },
@@ -247,22 +268,47 @@ def classify_race_pair(results)
   }
 end
 
+def session_present_in_hub?(daemon, session_id)
+  sessions = daemon.request(type: "list_sessions").fetch("sessions")
+  sessions.any? { |row| (row["session_id"] || row["session_uuid"]) == session_id }
+end
+
 def end_and_remove_session!(daemon, hub_binary, data_dir, session_id)
   begin
     daemon.request(type: "shutdown_session", session_id: session_id)
-  rescue StandardError
-    nil
+  rescue StandardError => error
+    # Already terminal is acceptable; other errors fail closed below via presence check.
+    warn "claim-stack shutdown_session note for #{session_id}: #{error.message}"
   end
-  begin
-    daemon.request(type: "remove_session", session_id: session_id)
-  rescue StandardError
-    # Older hubs may use delete_session
+  removed = false
+  %i[remove_session delete_session].each do |type|
     begin
-      daemon.request(type: "delete_session", session_id: session_id)
+      daemon.request(type: type, session_id: session_id)
+      removed = true
+      break
     rescue StandardError
-      run!(hub_binary, "sessions", "remove", "--data-dir", data_dir, session_id) rescue nil
+      next
     end
   end
+  unless removed
+    stdout, stderr, status = Open3.capture3(hub_binary, "sessions", "remove", "--data-dir", data_dir, session_id)
+    assert(status.success?, "historical session remove CLI failed for #{session_id}: #{stdout}#{stderr}")
+  end
+  # Authoritative absence required before C5 advanced path.
+  Timeout.timeout(20) do
+    loop do
+      break unless session_present_in_hub?(daemon, session_id)
+
+      sleep 0.1
+    end
+  end
+  assert(!session_present_in_hub?(daemon, session_id), "historical session still present in Hub state: #{session_id}")
+end
+
+def unique_session_refs!(refs, label)
+  assert(refs.is_a?(Array), "#{label} session_refs must be an array")
+  assert(refs.length == refs.uniq.length, "#{label} has duplicate session refs: #{refs.inspect}")
+  refs
 end
 
 manifest_path, evidence_argument = ARGV
@@ -285,10 +331,15 @@ web_revision = artifacts.fetch("web_package").fetch("revision")
 tui_revision = artifacts.fetch("tui_package").fetch("revision")
 workspaces_revision = artifacts.fetch("workspaces_package").fetch("revision")
 hub_revision = artifacts.fetch("hub_binary").fetch("revision")
-assert_min_pin!("web", web_revision, WEB_MIN_PIN)
-assert_min_pin!("tui", tui_revision, TUI_MIN_PIN)
-assert_min_pin!("workspaces", workspaces_revision, WORKSPACES_MIN_PIN)
-assert_min_pin!("hub", hub_revision, HUB_MIN_PIN)
+assert_min_pin!("web", web_revision, WEB_MIN_PIN, source_checkout: web_path)
+assert_min_pin!("tui", tui_revision, TUI_MIN_PIN, source_checkout: tui_path)
+assert_min_pin!("workspaces", workspaces_revision, WORKSPACES_MIN_PIN, source_checkout: workspaces_path)
+assert_min_pin!(
+  "hub",
+  hub_revision,
+  HUB_MIN_PIN,
+  source_checkout: artifacts.fetch("hub_binary").fetch("source_checkout")
+)
 
 # Frame-drop control must exist on the Web pin (ticket_1786518263_839128).
 webrtc_source = File.read(File.join(web_path, "src/botster/webrtcDaemonClient.ts"))
@@ -368,8 +419,8 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       timeout: 300
     )
 
-    # Seed unclaimed running sessions for claim lanes (not membership claims).
-    # Package add_session requires a canonical session UUID.
+    # Session S is spawned by the Web driver after the Add dialog is open (C1 live appear).
+    # Other campaign sessions are seeded here; historical is removed authoritatively before C5.
     session_s = SecureRandom.uuid
     session_s2 = SecureRandom.uuid
     session_race = SecureRandom.uuid
@@ -378,21 +429,26 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
     gap_a = SecureRandom.uuid
     gap_b = SecureRandom.uuid
     gap_c = SecureRandom.uuid
-    [session_s, session_s2, session_race, session_idem, session_historical, gap_a, gap_b, gap_c].each do |session_id|
+    [session_s2, session_race, session_idem, session_historical, gap_a, gap_b, gap_c].each do |session_id|
       spawn_unclaimed_session!(daemon, session_id)
     end
-    # Historical session must be absent from current Hub entity state at C5 time.
     end_and_remove_session!(daemon, hub_binary, data_dir, session_historical)
+    assert(
+      !session_present_in_hub?(daemon, session_historical),
+      "C5 precondition failed: historical session still in Hub state"
+    )
 
     w1 = create_workspace!(daemon, "Claim W1")
     w2 = create_workspace!(daemon, "Claim W2")
     File.write(File.join(evidence_dir, "seed.json"), JSON.pretty_generate({
       "sessions" => {
         "s" => session_s,
+        "s_spawned_by" => "web_driver_after_dialog_open",
         "s2" => session_s2,
         "race" => session_race,
         "idem" => session_idem,
         "historical" => session_historical,
+        "historical_absent" => true,
         "gap" => [gap_a, gap_b, gap_c],
       },
       "workspaces" => { "w1" => w1, "w2" => w2 },
@@ -411,7 +467,6 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       "session_idem" => session_idem,
       "session_historical" => session_historical,
       "gap_sessions" => [gap_a, gap_b, gap_c],
-      "restore_session_s_after_remove" => false,
     }
     web_output = run_process!(
       ["node", File.join(ROOT, "script", "claim_stack_web_driver.mjs")],
@@ -429,29 +484,58 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
     assert(web_summary["completed"] == true, "web claim campaign did not complete: #{web_summary['error']}")
 
     # Parent membership oracles for C3/C4 (DB truth, not picker-only).
-    race_refs_w1 = workspace_session_refs(daemon, w1.fetch("id"))
-    race_refs_w2 = workspace_session_refs(daemon, w2.fetch("id"))
+    race_refs_w1 = unique_session_refs!(workspace_session_refs(daemon, w1.fetch("id")), "W1 after race")
+    race_refs_w2 = unique_session_refs!(workspace_session_refs(daemon, w2.fetch("id")), "W2 after race")
     race_owners = [race_refs_w1, race_refs_w2].count { |refs| refs.include?(session_race) }
     assert(race_owners == 1, "C3 race must leave exactly one owner for session_race; w1=#{race_refs_w1} w2=#{race_refs_w2}")
-    idem_refs = workspace_session_refs(daemon, w1.fetch("id"))
-    assert(idem_refs.include?(session_idem), "C4 same-workspace claim missing membership for session_idem")
-    # Ensure no duplicate membership across workspaces for idem session.
+    race_count_w1 = race_refs_w1.count { |ref| ref == session_race }
+    race_count_w2 = race_refs_w2.count { |ref| ref == session_race }
+    assert(race_count_w1 + race_count_w2 == 1, "C3 must have exactly one membership row for race session")
+
+    idem_refs = unique_session_refs!(workspace_session_refs(daemon, w1.fetch("id")), "W1 after idem")
+    assert(idem_refs.count { |ref| ref == session_idem } == 1, "C4 must have exactly one membership row for session_idem")
     assert(!race_refs_w2.include?(session_idem), "C4 session_idem must not appear on W2")
 
     c3 = classify_race_pair(web_summary.dig("lanes", "c3", "results") || [])
     c4 = classify_race_pair(web_summary.dig("lanes", "c4", "results") || [])
-    # Request ids are per SPA document; dual-browser proof requires two results on two
-    # workspaces (C3) or two results on one workspace (C4), not globally unique strings.
     assert(c3.fetch("count") == 2, "C3 must record two browser claim results")
     c3_workspaces = (web_summary.dig("lanes", "c3", "results") || []).map { |row| row["workspace_id"] }.uniq
     assert(c3_workspaces.length == 2, "C3 must involve two workspaces: #{c3_workspaces.inspect}")
-    assert(c4.fetch("request_ids").length == 2, "C4 must record two request_ids")
-
-    # C1 remove → restore via package remove (membership path) then re-check option is parent-owned oracle.
-    if workspace_session_refs(daemon, w1.fetch("id")).include?(session_s)
-      remove_membership!(daemon, w1.fetch("id"), session_s)
+    c3_classes = c3.fetch("classifications")
+    c3_successes = c3_classes.count { |row| row["accepted"] }
+    c3_conflicts = c3_classes.count do |row|
+      !row["accepted"] && (
+        row["error_code"].to_s == "session_already_owned" ||
+        row["error_text"].to_s.include?("session_already_owned") ||
+        row["state"].to_s == "rejected" ||
+        row["state"].to_s == "error"
+      )
     end
-    assert(!workspace_session_refs(daemon, w1.fetch("id")).include?(session_s), "C1 remove did not clear membership")
+    assert(c3_successes == 1, "C3 must have exactly one accepted claim: #{c3_classes.inspect}")
+    assert(c3_conflicts == 1, "C3 must have exactly one typed conflict: #{c3_classes.inspect}")
+
+    assert(c4.fetch("request_ids").length == 2, "C4 must record two request_ids")
+    c4_classes = c4.fetch("classifications")
+    c4_valid = c4_classes.count { |row| row["accepted"] || row["idempotent"] }
+    assert(c4_valid == 2, "C4 must have two valid same-workspace outcomes (accept/idempotent): #{c4_classes.inspect}")
+    assert(
+      c4_classes.any? { |row| row["idempotent"] || row["accepted"] },
+      "C4 must include an idempotent or dual-accept same-workspace outcome: #{c4_classes.inspect}"
+    )
+
+    # C1 driver removes membership while the dialog is held open; parent only verifies absence.
+    assert(
+      web_summary.dig("lanes", "c1", "restored_after_remove") == true,
+      "C1 must prove remove→restore on the held-open picker"
+    )
+    assert(
+      web_summary.dig("lanes", "c1", "live_appear") == true,
+      "C1 must prove live appearance after dialog open"
+    )
+    assert(
+      web_summary.dig("lanes", "c1", "lifecycle_live_update") == true,
+      "C1 must prove lifecycle live update while dialog held open"
+    )
 
     # Supporting consumer re-checks (section D) — separate clean Hubs by consumer design.
     # Web lifecycle rejects BOTSTER_LIVE_DATA_DIR; TUI lifecycle owns its hub.

@@ -598,24 +598,24 @@ async function run() {
     ).then((handle) => handle.jsonValue()).catch((error) => {
       throw new Error(`${label}: ${error.message}`);
     });
-    const requestIds = await Promise.all([
+    const c4RequestIds = await Promise.all([
       waitRequest(idA, sinceA, formNodeA, "C4 request A"),
       waitRequest(idB, sinceB, formNodeB, "C4 request B")
     ]);
-    if (new Set(requestIds).size !== 2) {
-      throw new Error(`C4 request_ids were not distinct: ${JSON.stringify(requestIds)}`);
+    if (new Set(c4RequestIds).size !== 2) {
+      throw new Error(`C4 request_ids were not distinct: ${JSON.stringify(c4RequestIds)}`);
     }
-    const results = await Promise.all([
-      waitResult(idA, sinceA, requestIds[0], "C4 result A").then((result) => ({
-        request_id: requestIds[0],
+    const c4Results = await Promise.all([
+      waitResult(idA, sinceA, c4RequestIds[0], "C4 result A").then((result) => ({
+        request_id: c4RequestIds[0],
         workspace_id: assignment.workspace_w1,
         session_uuid: assignment.session_idem,
         node_id: formNodeA,
         action_id: "botster_workspaces.add_session",
         result
       })),
-      waitResult(idB, sinceB, requestIds[1], "C4 result B").then((result) => ({
-        request_id: requestIds[1],
+      waitResult(idB, sinceB, c4RequestIds[1], "C4 result B").then((result) => ({
+        request_id: c4RequestIds[1],
         workspace_id: assignment.workspace_w1,
         session_uuid: assignment.session_idem,
         node_id: formNodeB,
@@ -625,7 +625,7 @@ async function run() {
     ]);
     summary.lanes.c4 = {
       participants: "dual_browser_same_workspace_select_before_reconcile",
-      results
+      results: c4Results
     };
 
     // ---- C5: historical advanced path for intentionally absent session ----

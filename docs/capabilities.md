@@ -7,7 +7,8 @@ The package requests:
 - `mcp`
 - `plugin_db` scoped to `botster-workspaces`
 - `surfaces`
-- `session_actions` scoped to `session_type_managed_git_spawn`
+- `session_actions` scoped to `session_type_spawn` (general session-type spawn)
+- `session_actions` scoped to `session_type_managed_git_spawn` (Git managed worktree + spawn)
 
 It requests no filesystem, shell, raw process, terminal, or lifecycle
 authority.
@@ -30,22 +31,27 @@ The Hub owns admitted spawn points, target-filtered effective session types,
 their package/device/repo source precedence and editability, their role,
 interaction, trait, and lifecycle taxonomy, the fully qualified
 `session_type_id`, repositories, branches, managed worktrees, locks, rollback,
-canonical session UUIDs, process and PTY lifecycle, terminals, and lifecycle
+canonical session IDs, process and PTY lifecycle, terminals, and lifecycle
 truth.
 
 The plugin may read `spawn_targets.list` and target-filtered
-`session_types.list`. The only privileged mutation it invokes is
-`session_types.ensure_worktree_and_spawn`, keyed by the `session_type_id` the
-Hub returned. The plugin displays Hub-provided session-type presentation and
-never derives or overrides that semantic truth.
+`session_types.list`. Privileged spawn mutations are Hub-owned and target-kind
+selected:
+
+- non-Git enabled spawn points call `session_types.spawn`
+- Git spawn points call `session_types.ensure_worktree_and_spawn` with a branch
+
+Both paths are keyed by the fully qualified `session_type_id` the Hub returned.
+The plugin displays Hub-provided session-type presentation and never derives or
+overrides that semantic truth.
 
 ## Failure Atomicity
 
 Membership changes use one complete `plugin_db.batch` for membership keys,
 workspace state, and sequence reservation. Hub spawn rejection or worker failure
-records nothing. Successful spawn records only the returned canonical UUID,
+records nothing. Successful spawn records only the returned canonical session ID,
 after success, through the same claim batch path. A later persistence failure
-reports that UUID as ungrouped and never claims a durable membership or attempts
+reports that session ID as ungrouped and never claims a durable membership or attempts
 session cleanup.
 
 Workspace deletion and membership removal do not call Hub lifecycle or Git
@@ -58,8 +64,8 @@ The owner-authored surface is validated against the exact Hub
 and replacement effects. The client owns scoped presentation storage and
 generic rendering; this package owns the actions and trees.
 
-The tree binds referenced UUIDs to the Hub-owned `/session` family. The
+The tree binds referenced session IDs to the Hub-owned `/session` family. The
 ordinary `surfaces` capability admits this read-model dependency; the package
 does not request a lifecycle capability or publish a duplicate session entity.
-Exact lifecycle filters author Current, Ended, and Unavailable / uncertain
+Exact lifecycle filters author Current, Ended, and Unavailable
 presentation while Hub entity frames remain the only reconciliation channel.

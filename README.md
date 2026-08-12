@@ -13,7 +13,7 @@ record is exactly:
 
 The package owns names, grouping membership, and the workspace workflow. The
 Hub remains authoritative for spawn points, effective session types, managed
-Git worktrees, session UUIDs, processes, terminals, and lifecycle.
+Git worktrees, session IDs, processes, terminals, and lifecycle.
 
 The public plugin tools are:
 
@@ -28,8 +28,8 @@ The public plugin tools are:
 - `botster_workspaces.spawn`
 - `botster_workspaces.entity_snapshot`
 
-One session UUID belongs to at most one workspace, enforced by durable
-`membership:<session_uuid>` keys and published through the
+One session ID belongs to at most one workspace, enforced by durable
+`membership:<session_id>` keys and published through the
 `botster-workspaces.membership` entity family after committed claims and
 removals. Add rejects an existing owner; move removes the source membership and adds the destination membership
 in one `plugin_db` write; remove changes only grouping. Deleting a workspace
@@ -47,7 +47,7 @@ rows, and an empty state. Forms are materialized only after an accepted plugin
 action sets scoped client-local presentation state. Selecting a row reveals the
 detail presentation on the same route and remains stable across rerenders.
 
-Detail preserves every referenced session UUID and exposes:
+Detail preserves every referenced session ID and exposes:
 
 - Spawn
 - rename
@@ -56,35 +56,45 @@ Detail preserves every referenced session UUID and exposes:
 - remove membership
 
 **Add existing session** authors an Available sessions picker bound to Hub
-`/session` through `entity_options`, excluding every UUID present in
+`/session` through `entity_options`, excluding every session ID present in
 `/botster-workspaces.membership`. Option labels prefer Hub `label` when present
 and fall back to `session_uuid`; optional `lifecycle`, `lifecycle_class`,
 `session_type_id`, and `spawn_point` fields are projected when present and never
-copied into `plugin.db`. An always-visible advanced **Historical session UUID**
+copied into `plugin.db`. An always-visible advanced **Historical session ID**
 field remains for sessions absent from current Hub entity state; when both
 fields are set, the advanced value wins. Membership claim and remove still
 publish live membership entity frames for open pickers.
 
 Detail groups each stored reference as **Current**, **Ended**, or
-**Unavailable / uncertain** by binding the stable surface tree directly to the
-Hub-owned `/session` entity family. Snapshot, upsert, patch, and remove frames
-therefore move rows without polling, an imperative session-list refresh, or a
-surface rerender. Ended, indeterminate, and absent UUIDs remain deliberate
+**Unavailable** by binding the stable surface tree directly to the Hub-owned
+`/session` entity family. Snapshot, upsert, patch, and remove frames therefore
+move rows without polling, an imperative session-list refresh, or a surface
+rerender. Ended, indeterminate, and absent session ids remain deliberate
 workspace history until the user explicitly moves or removes them. The package
 does not persist, compute, or guess lifecycle truth.
 
-Spawn is target-first. The package lists enabled Git spawn points, then asks
-the Hub for effective session types for the selected target through
-`session_types.list`. It submits the fully qualified `session_type_id` the Hub
-returned, unchanged, and calls only
-`session_types.ensure_worktree_and_spawn`. After success it records exactly
-the returned `result.session_id`; a rejection or worker error records nothing.
-If the Hub spawn succeeds but the following grouping write fails, the action
-reports the returned ungrouped UUID and does not claim membership.
+Spawn is target-first and stays thin for the common case:
 
-Session-type presentation is Hub-owned. The package renders the label and id it
-receives; it does not own the role, interaction, trait, or lifecycle taxonomy,
-session-type source precedence, or source editability.
+1. Choose a **Spawn point** (any enabled Hub target).
+2. Choose a **Session type** (Hub-provided labels such as Agent, Shell, Custom,
+   or package types).
+3. For **Git** spawn points only, enter a **Branch** so Hub can create or reuse
+   a managed worktree.
+4. Optionally open **Optional context** for prompt and ticket.
+
+The package lists every enabled spawn point, then asks the Hub for effective
+session types for the selected target through `session_types.list`. It submits
+the fully qualified `session_type_id` the Hub returned, unchanged. Non-Git
+targets call `session_types.spawn`. Git targets call
+`session_types.ensure_worktree_and_spawn` with the branch. After success it
+records exactly the returned session ID; a rejection or worker error records
+nothing. If the Hub spawn succeeds but the following grouping write fails, the
+action reports the returned ungrouped session ID and does not claim membership.
+
+Empty states cover missing spawn points and missing session types without
+protocol jargon. Session-type presentation is Hub-owned: the package renders the
+label and id it receives and does not own role, interaction, trait, lifecycle
+taxonomy, source precedence, or editability.
 
 The detail Spawn opener exposes `botster_workspaces.open_spawn` as its stable,
 renderer-neutral consumer identity. Clients locate it from realized action

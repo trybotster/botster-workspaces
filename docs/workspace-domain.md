@@ -13,14 +13,15 @@ updated_at
 ```
 
 `name` is trimmed, non-empty, and unique across records that exist.
-`session_refs` is an ordered, duplicate-free array of canonical Hub session
-UUIDs. Old or additional record fields fail closed with
-`legacy_workspace_schema`; there is no compatibility reader.
+`session_refs` is an ordered, duplicate-free array of non-empty Hub session
+IDs. Session IDs are opaque and do not require UUID syntax. Old or additional
+record fields fail closed with `legacy_workspace_schema`. There is no
+compatibility reader.
 
 ## Membership Invariant
 
-A session UUID belongs to at most one workspace. Membership is enforced through
-create-only `membership:<session_uuid>` keys in `plugin.db` alongside
+A session ID belongs to at most one workspace. Membership is enforced through
+create-only `membership:<session_id>` keys in `plugin.db` alongside
 `workspace_state.session_refs`. Add rejects an existing owner and identifies it.
 Same-workspace reclaims are idempotent pure no-ops when the membership key
 already exists. Move computes the complete source and destination state and
@@ -67,9 +68,9 @@ Add existing session authors one `ui.select` with
 - `exclude.source = "/botster-workspaces.membership"`
 
 There are no static `select_option` children on that control. An always-visible
-advanced historical UUID field (`session_id_advanced`) sits below the picker
+advanced historical session ID field (`session_id_advanced`) sits below the picker
 for sessions absent from current Hub entity state. Action extraction prefers a
-non-empty advanced value, then the picker value, and validates a canonical UUID.
+non-empty advanced value, then the picker value, and validates a non-empty Hub session ID.
 
 ## Rename and Delete
 
@@ -82,26 +83,32 @@ repositories.
 
 ## Atomic Spawn
 
-The workflow projects enabled Git spawn points from the Hub. Once the user
-selects a target, effective session types come only from
-`session_types.list({ target_id = ... })`. Each row is consumed through its
-fully qualified `session_type_id`; the package neither reconstructs that
-identity from source and id nor accepts a row without it.
+The workflow projects every enabled Hub spawn point. Workspaces group sessions;
+they do not own Git. Once the user selects a target, effective session types
+come only from `session_types.list({ target_id = ... })`. Each row is consumed
+through its fully qualified `session_type_id`; the package neither reconstructs
+that identity from source and id nor accepts a row without it.
 
-The package calls only:
+Spawn path follows Hub target kind:
 
 ```text
-session_types.ensure_worktree_and_spawn
+# non-Git (typical directory spawn points)
+session_types.spawn({ session_type_id, target_id, context })
+
+# Git targets with a branch (managed worktree + spawn)
+session_types.ensure_worktree_and_spawn({
+  target_id, branch, session_type_id, context
+})
 ```
 
-The request carries semantic target, branch, `session_type_id`, and safe
-workspace context. It never supplies a session id, cwd, repository path,
-worktree path, base fact, or Git command. Only an `ok=true` response may append the canonical
-`result.session_id`, and it is appended exactly once. Rejection or worker error
-leaves membership unchanged.
+Requests carry semantic target, `session_type_id`, optional safe workspace
+context, and branch only when the Hub target is Git. The package never supplies
+a session id, cwd, repository path, worktree path, base fact, or Git command.
+Only a successful Hub response may append the returned canonical session id,
+exactly once. Rejection or worker error leaves membership unchanged.
 
 A successful Hub spawn followed by a failed `plugin_db` write is reported as a
-typed persistence error containing the ungrouped returned UUID. The package
+typed persistence error containing the ungrouped returned session ID. The package
 does not attempt forbidden session rollback.
 
 ## Contextual Surface
@@ -120,23 +127,22 @@ effects. Accepted mutations clear their dialog and provide an owner-authored
 replacement tree. Shared clients apply these generic contracts without
 workspace-specific code.
 
-Detail preserves referenced UUIDs and exposes Spawn, rename, delete,
+Detail preserves referenced session IDs and exposes Spawn, rename, delete,
 Add/Move existing session, and remove membership.
 
 ## Lifecycle Projection
 
-The detail tree projects each stored UUID against the canonical Hub `/session`
+The detail tree projects each stored session ID against the canonical Hub `/session`
 entity family with exact `session_uuid` and `lifecycle_class` filters:
 
 - `current` renders under Current.
 - `ended` renders under Ended.
-- `indeterminate`, or an absent canonical row, renders under Unavailable /
-  uncertain.
+- `indeterminate`, or an absent canonical row, renders under Unavailable.
 
 The structural tree is rendered once. Authoritative entity snapshots and
 ordered upsert, patch, and remove frames reconcile membership presentation in
 generic clients without polling, `list_sessions`, or a surface refresh. The
-Current, Ended, and Unavailable / uncertain headings therefore remain present
+Current, Ended, and Unavailable headings therefore remain present
 for every non-empty workspace even when a group currently realizes no rows;
 an empty group is expected structural presentation rather than a refresh fault.
 The workspace record remains the exact five-field reference record; lifecycle

@@ -9,6 +9,7 @@
     { "surface": "mcp" },
     { "surface": "plugin_db", "scope": "botster-workspaces" },
     { "surface": "surfaces" },
+    { "surface": "session_actions", "scope": "session_type_spawn" },
     { "surface": "session_actions", "scope": "session_type_managed_git_spawn" }
   ],
   "surfaces": [

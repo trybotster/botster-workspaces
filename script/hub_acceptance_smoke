@@ -305,7 +305,7 @@ spawn_descriptor = tools.fetch("plugin_tools").find { |tool| tool.fetch("name") 
 assert(spawn_descriptor, "Hub published no botster_workspaces.spawn descriptor")
 assert(
   spawn_descriptor.fetch("description") ==
-    "Atomically ensure a Hub-managed worktree, spawn a session, and record its returned UUID.",
+    "Spawn a Hub session for a workspace spawn point and record the returned session id on success. Branch is required only for Git spawn points (managed worktree).",
   "published spawn description drifted: #{spawn_descriptor.fetch("description").inspect}"
 )
 # The Hub serializes McpToolDescriptor with rename_all = "camelCase", so the
@@ -321,7 +321,7 @@ spawn_schema.fetch("properties").each do |property, definition|
   assert(definition["type"] == "string", "published spawn property #{property} is not typed string")
 end
 assert(
-  spawn_schema.fetch("required") == %w[workspace_id target_id branch session_type_id],
+  spawn_schema.fetch("required") == %w[workspace_id target_id session_type_id],
   "published spawn required set drifted: #{spawn_schema.fetch("required").inspect}"
 )
 assert(

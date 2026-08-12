@@ -203,7 +203,7 @@ assert(
   operations.dig("spawn", "session_type_request_field") == "session_type_id",
   "spawn must name the authoritative session-type request field"
 )
-assert(operations.dig("spawn", "records") == "result.session_id", "spawn must record returned UUID")
+assert(operations.dig("spawn", "records") == "result.session_id", "spawn must record the returned session id")
 assert(operations.dig("spawn", "caller_supplied_session_id") == false, "spawn must reject caller session id")
 
 surface_contract = contract.fetch("surface")

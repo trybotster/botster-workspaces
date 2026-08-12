@@ -141,8 +141,7 @@ end
 
 local function valid_session_id(value)
   local id = trim(value)
-  return id ~= nil
-    and id:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") ~= nil
+  return id ~= nil and id == value
 end
 
 local function validate_state(state)
@@ -825,7 +824,7 @@ local function add_session(arguments)
     missing[#missing + 1] = "session_id"
   end
   if #missing > 0 then
-    return error_result("validation_failed", "add session requires a workspace and canonical session UUID", missing)
+    return error_result("validation_failed", "Add session needs a workspace and a valid session id.", missing)
   end
 
   local function attempt()
@@ -923,7 +922,7 @@ local function move_session(arguments)
     missing[#missing + 1] = "session_id"
   end
   if #missing > 0 then
-    return error_result("validation_failed", "move session requires a destination and canonical session UUID", missing)
+    return error_result("validation_failed", "Move session needs a destination workspace and a valid session id.", missing)
   end
 
   local function attempt()
@@ -1032,7 +1031,7 @@ local function remove_session(arguments)
   if not workspace_id or not valid_session_id(session_id) then
     return error_result(
       "validation_failed",
-      "remove session requires a workspace and canonical session UUID",
+      "Remove session needs a workspace and a valid session id.",
       { "workspace_id", "session_id" }
     )
   end
@@ -1102,6 +1101,8 @@ local function remove_session(arguments)
   return attempt()
 end
 
+-- Workspaces group sessions; they do not own Git. List every enabled Hub spawn
+-- point. Managed-worktree spawn is used only when the selected target is git.
 local function spawn_targets()
   local capability = botster and botster.capabilities
     and botster.capabilities.spawn_targets
@@ -1114,17 +1115,29 @@ local function spawn_targets()
   end
   local targets = {}
   for _, target in ipairs(result) do
-    if type(target) == "table"
-      and target.enabled ~= false
-      and target.kind == "git"
-      and trim(target.target_id or target.id) then
+    if type(target) == "table" and target.enabled ~= false and trim(target.target_id or target.id) then
+      local id = trim(target.target_id or target.id)
       targets[#targets + 1] = {
-        id = trim(target.target_id or target.id),
-        label = trim(target.label or target.name) or trim(target.target_id or target.id),
+        id = id,
+        label = trim(target.label or target.name) or id,
+        kind = trim(target.kind) or "directory",
       }
     end
   end
   return targets, nil
+end
+
+local function find_spawn_target(target_id)
+  local targets, list_error = spawn_targets()
+  if list_error then
+    return nil, list_error
+  end
+  for _, target in ipairs(targets or {}) do
+    if target.id == target_id then
+      return target, nil
+    end
+  end
+  return nil, error_result("spawn_target_not_found", "spawn point not found or not enabled: " .. tostring(target_id))
 end
 
 local function session_types_for_target(target_id)
@@ -1173,14 +1186,15 @@ local function spawn_session(arguments)
   if not target_id then
     missing[#missing + 1] = "target_id"
   end
-  if not branch then
-    missing[#missing + 1] = "branch"
-  end
   if not session_type_id then
     missing[#missing + 1] = "session_type_id"
   end
   if #missing > 0 then
-    return error_result("validation_failed", "spawn requires workspace, spawn point, branch, and session type", missing)
+    return error_result(
+      "validation_failed",
+      "Spawn needs a workspace, spawn point, and session type.",
+      missing
+    )
   end
 
   local state, load_error, state_revision = load_state()
@@ -1192,41 +1206,78 @@ local function spawn_session(arguments)
     return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
   end
 
+  local target, target_error = find_spawn_target(target_id)
+  if target_error then
+    return target_error
+  end
+
   local capability = botster and botster.capabilities
     and botster.capabilities.session_types
-  if not capability or type(capability.ensure_worktree_and_spawn) ~= "function" then
-    return error_result("managed_git_spawn_unavailable", "Hub atomic managed-Git spawn is unavailable")
+  if not capability then
+    return error_result("session_types_unavailable", "Hub session-type projection is unavailable")
   end
-  local ok, result = pcall(capability.ensure_worktree_and_spawn, {
-    target_id = target_id,
-    branch = branch,
-    session_type_id = session_type_id,
-    context = {
-      workspace_id = workspace_id,
-      prompt = trim(arguments.prompt),
-      ticket_id = trim(arguments.ticket_id),
-    },
-  })
-  if not ok then
-    return error_result("hub_spawn_failed", "Hub atomic managed-Git spawn failed")
+
+  local context = {
+    workspace_id = workspace_id,
+    prompt = trim(arguments.prompt),
+    ticket_id = trim(arguments.ticket_id),
+  }
+  local ok, result
+  local hub_payload
+  if target.kind == "git" then
+    if not branch then
+      return error_result(
+        "validation_failed",
+        "Git spawn points need a branch for managed worktree spawn.",
+        { "branch" }
+      )
+    end
+    if type(capability.ensure_worktree_and_spawn) ~= "function" then
+      return error_result("managed_git_spawn_unavailable", "Hub atomic managed-Git spawn is unavailable")
+    end
+    ok, result = pcall(capability.ensure_worktree_and_spawn, {
+      target_id = target_id,
+      branch = branch,
+      session_type_id = session_type_id,
+      context = context,
+    })
+    if not ok then
+      return error_result("hub_spawn_failed", "Hub atomic managed-Git spawn failed")
+    end
+    if type(result) ~= "table" or result.ok ~= true then
+      local hub_error = type(result) == "table" and result.error or nil
+      return error_result(
+        hub_error and hub_error.kind or "hub_spawn_rejected",
+        hub_error and hub_error.message or "Hub rejected the atomic managed-Git spawn"
+      )
+    end
+    hub_payload = result.result
+  else
+    if type(capability.spawn) ~= "function" then
+      return error_result("session_type_spawn_unavailable", "Hub session-type spawn is unavailable")
+    end
+    ok, result = pcall(capability.spawn, {
+      session_type_id = session_type_id,
+      target_id = target_id,
+      context = context,
+    })
+    if not ok then
+      local message = type(result) == "string" and result or "Hub session-type spawn failed"
+      return error_result("hub_spawn_failed", message)
+    end
+    hub_payload = result
   end
-  if type(result) ~= "table" or result.ok ~= true or type(result.result) ~= "table" then
-    local hub_error = type(result) == "table" and result.error or nil
-    return error_result(
-      hub_error and hub_error.kind or "hub_spawn_rejected",
-      hub_error and hub_error.message or "Hub rejected the atomic managed-Git spawn"
-    )
-  end
-  local session_id = trim(result.result.session_id)
+
+  local session_id = type(hub_payload) == "table" and trim(hub_payload.session_id) or nil
   if not valid_session_id(session_id) then
-    return error_result("invalid_hub_session_id", "Hub spawn did not return a canonical session UUID")
+    return error_result("invalid_hub_session_id", "Hub spawn did not return a valid session id.")
   end
   local owner_id, _, owner_error = resolve_owner(state, session_id)
   if owner_error then
     return owner_error
   end
   if owner_id then
-    return error_result("duplicate_hub_session_id", "Hub returned a session UUID that is already grouped")
+    return error_result("duplicate_hub_session_id", "Hub returned a session ID that is already grouped")
   end
 
   workspace.session_refs[#workspace.session_refs + 1] = session_id
@@ -1234,17 +1285,22 @@ local function spawn_session(arguments)
   local persist_error, reserved_frames, publish_results, publish_degraded =
     claim_session_batch(workspace_id, session_id, state, state_revision)
   if persist_error then
-    return error_result("persist_failed", "Hub spawned the session but workspace membership could not be persisted", nil, {
-      spawned_session_id = session_id,
-      membership_recorded = false,
-    })
+    return error_result(
+      "persist_failed",
+      "Hub spawned the session, but it could not be added to this workspace. The session still exists ungrouped.",
+      nil,
+      {
+        spawned_session_id = session_id,
+        membership_recorded = false,
+      }
+    )
   end
   return with_membership_delivery({
     ok = true,
     session_id = session_id,
     workspace = copy(workspace),
     entity = read_model(workspace),
-    hub_result = copy(result.result),
+    hub_result = copy(hub_payload),
   }, reserved_frames, publish_results, publish_degraded)
 end
 
@@ -1474,8 +1530,8 @@ local function delete_workspace_action(arguments)
   })
 end
 
--- Returns the selected session UUID and the form field id that supplied it.
--- Advanced historical UUID takes precedence when non-empty so validation errors
+-- Returns the selected session ID and the form field id that supplied it.
+-- The advanced historical ID takes precedence when non-empty so validation errors
 -- attach to the active input (picker vs advanced) instead of always the picker.
 local function resolve_add_session_id(arguments)
   local advanced = trim(form_value(
@@ -1532,7 +1588,7 @@ local function select_spawn_target_action(arguments)
   if not trim(workspace_id) or not trim(target_id) then
     return action_error(arguments, error_result(
       "validation_failed",
-      "choose a spawn point",
+      "Choose a spawn point to continue.",
       { "target_id" }
     ), {
       target_id = "botster-workspaces-spawn-target",
@@ -1599,7 +1655,7 @@ local function text_input(id, name, label, options)
   return { type = "text_input", id = id, props = props }
 end
 
-local function select_input(id, name, label, options)
+local function select_input(id, name, label, options, field_options)
   local children = {}
   for _, option in ipairs(options) do
     children[#children + 1] = {
@@ -1611,14 +1667,18 @@ local function select_input(id, name, label, options)
       },
     }
   end
+  local props = {
+    name = name,
+    label = label,
+    required = true,
+  }
+  for key, value in pairs(field_options or {}) do
+    props[key] = value
+  end
   return {
     type = "select",
     id = id,
-    props = {
-      name = name,
-      label = label,
-      required = true,
-    },
+    props = props,
     slots = {
       options = children,
     },
@@ -1626,7 +1686,9 @@ local function select_input(id, name, label, options)
 end
 
 local function form_node(id, action_id, submit_label, children, payload)
-  return {
+  -- Omit empty children: a bare Lua `{}` encodes as a JSON object, which fails
+  -- Hub UiChild deserialization (`untagged enum UiChild`).
+  local node = {
     type = "form",
     id = id,
     props = {
@@ -1636,8 +1698,28 @@ local function form_node(id, action_id, submit_label, children, payload)
       },
       submit_label = submit_label,
     },
-    children = children,
   }
+  if children and #children > 0 then
+    node.children = children
+  end
+  return node
+end
+
+local function form_section(id, title, children, description)
+  local props = { title = title }
+  if description then
+    props.description = description
+  end
+  -- Same empty-table rule as form_node: only attach non-empty array children.
+  local node = {
+    type = "form_section",
+    id = id,
+    props = props,
+  }
+  if children and #children > 0 then
+    node.children = children
+  end
+  return node
 end
 
 local function dialog_if(key, value, id, title, body)
@@ -1653,7 +1735,8 @@ local function dialog_if(key, value, id, title, body)
       id = id,
       props = {
         title = title,
-        presentation = "auto",
+        -- Overlay keeps the workspace surface underneath; "auto" can read as a page replace.
+        presentation = "overlay",
       },
       slots = {
         body = body,
@@ -1676,6 +1759,7 @@ local function create_dialog()
         {
           text_input("botster-workspaces-create-name", "name", "Name", {
             placeholder = "Release planning",
+            description = "A short name for related sessions.",
             required = true,
           }),
         }
@@ -1684,7 +1768,7 @@ local function create_dialog()
   )
 end
 
-local function workspace_dialogs(workspace, rows, targets, session_types_by_target)
+local function workspace_dialogs(workspace, rows, targets, session_types_by_target, spawn_target_projection)
   local move_destinations = {}
   for _, row in ipairs(rows) do
     if row.id ~= workspace.id then
@@ -1701,8 +1785,8 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
         type = "empty_state",
         id = "botster-workspaces-move-empty-" .. workspace.id,
         props = {
-          title = "No destination workspace",
-          description = "Create another workspace before moving a session.",
+          title = "No other workspace",
+          description = "Create another workspace before you move a session.",
         },
       },
     }
@@ -1722,8 +1806,12 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
           text_input(
             "botster-workspaces-move-session-id",
             "session_id",
-            "Session UUID",
-            { required = true }
+            "Session ID",
+            {
+              required = true,
+              placeholder = "00000000-0000-4000-8000-000000000000",
+              description = "Hub session id to move into the destination workspace.",
+            }
           ),
         },
         { workspace_id = workspace.id }
@@ -1743,12 +1831,6 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
           "Rename workspace",
           {
             text_input(
-              "botster-workspaces-rename-workspace-id",
-              "workspace_id",
-              "Workspace",
-              { value = workspace.id, disabled = true }
-            ),
-            text_input(
               "botster-workspaces-rename-name",
               "name",
               "Name",
@@ -1767,20 +1849,13 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
       {
         text_node(
           "botster-workspaces-delete-warning-" .. workspace.id,
-          "This removes only the grouping. Sessions and managed Git resources remain."
+          "Deletes only this workspace list. Sessions and their Git worktrees stay."
         ),
         form_node(
           "botster-workspaces-delete-form-" .. workspace.id,
           "botster_workspaces.delete",
           "Delete workspace",
-          {
-            text_input(
-              "botster-workspaces-delete-workspace-id",
-              "workspace_id",
-              "Workspace",
-              { value = workspace.id, disabled = true }
-            ),
-          },
+          {},
           { workspace_id = workspace.id }
         ),
       }
@@ -1811,7 +1886,7 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
             text_input(
               "botster-workspaces-add-session-id-advanced",
               "session_id_advanced",
-              "Historical session UUID",
+              "Historical session ID",
               { required = false }
             ),
             text_node(
@@ -1833,49 +1908,74 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
     ),
   }
 
-  if #targets > 0 then
-    dialogs[#dialogs + 1] = dialog_if(
-      "workspace-dialog",
-      "spawn-target:" .. workspace.id,
-      "botster-workspaces-spawn-target-dialog-" .. workspace.id,
-      "Spawn session",
+  local spawn_target_body
+  local projection = spawn_target_projection or {}
+  if projection.error then
+    local message = projection.error.error and projection.error.error.message
+      or "Hub could not list spawn points."
+    spawn_target_body = {
       {
-        form_node(
-          "botster-workspaces-spawn-target-form-" .. workspace.id,
-          "botster_workspaces.select_spawn_target",
-          "Continue",
-          {
-            text_input(
-              "botster-workspaces-spawn-workspace-id",
-              "workspace_id",
-              "Workspace",
-              { value = workspace.id, disabled = true }
-            ),
-            select_input(
-              "botster-workspaces-spawn-target",
-              "target_id",
-              "Spawn point",
-              targets
-            ),
-          },
-          { workspace_id = workspace.id }
-        ),
-      }
-    )
+        type = "empty_state",
+        id = "botster-workspaces-spawn-targets-error-" .. workspace.id,
+        props = {
+          title = "Spawn points unavailable",
+          description = message,
+        },
+      },
+    }
+  elseif #targets == 0 then
+    spawn_target_body = {
+      {
+        type = "empty_state",
+        id = "botster-workspaces-spawn-no-targets-" .. workspace.id,
+        props = {
+          title = "No spawn points",
+          description = "Add an enabled spawn point in Hub settings before you spawn a session.",
+        },
+      },
+    }
+  else
+    spawn_target_body = {
+      form_node(
+        "botster-workspaces-spawn-target-form-" .. workspace.id,
+        "botster_workspaces.select_spawn_target",
+        "Continue",
+        {
+          select_input(
+            "botster-workspaces-spawn-target",
+            "target_id",
+            "Spawn point",
+            targets,
+            {
+              description = "Where the new session should run. Any enabled Hub spawn point is listed.",
+            }
+          ),
+        },
+        { workspace_id = workspace.id }
+      ),
+    }
   end
+  dialogs[#dialogs + 1] = dialog_if(
+    "workspace-dialog",
+    "spawn-target:" .. workspace.id,
+    "botster-workspaces-spawn-target-dialog-" .. workspace.id,
+    "Spawn session",
+    spawn_target_body
+  )
 
   for _, target in ipairs(targets) do
-    local projection = session_types_by_target[target.id]
-    local session_types = projection.session_types
+    local types_projection = session_types_by_target[target.id]
+    local session_types = types_projection.session_types
     local spawn_body
-    if projection.error then
+    if types_projection.error then
       spawn_body = {
         {
           type = "empty_state",
           id = "botster-workspaces-spawn-error-" .. workspace.id .. "-" .. target.id,
           props = {
             title = "Session types unavailable",
-            description = projection.error.error.message,
+            description = types_projection.error.error.message
+              or "Hub could not list session types for this spawn point.",
           },
         },
       }
@@ -1886,44 +1986,67 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
           id = "botster-workspaces-spawn-empty-" .. workspace.id .. "-" .. target.id,
           props = {
             title = "No session types",
-            description = "No session types are available for this spawn point.",
+            description = "This spawn point has no session types yet. Add Agent, Shell, or Custom types in Hub settings, or enable a package that provides them.",
           },
         },
       }
     else
+      local form_fields = {
+        text_node(
+          "botster-workspaces-spawn-target-summary-" .. workspace.id .. "-" .. target.id,
+          "Spawn point: " .. (target.label or target.id)
+        ),
+      }
+      if target.kind == "git" then
+        form_fields[#form_fields + 1] = text_input(
+          "botster-workspaces-spawn-branch",
+          "branch",
+          "Branch",
+          {
+            required = true,
+            placeholder = "feature/my-work",
+            description = "Hub creates or reuses a managed Git worktree for this branch.",
+          }
+        )
+      end
+      form_fields[#form_fields + 1] = select_input(
+        "botster-workspaces-spawn-template",
+        "session_type_id",
+        "Session type",
+        session_types,
+        {
+          description = "How the session launches. Labels come from Hub (Agent, Shell, Custom, or package types).",
+        }
+      )
+      form_fields[#form_fields + 1] = form_section(
+        "botster-workspaces-spawn-advanced-" .. workspace.id .. "-" .. target.id,
+        "Optional context",
+        {
+          text_input(
+            "botster-workspaces-spawn-prompt",
+            "prompt",
+            "Prompt",
+            {
+              description = "Starting prompt when the session type uses one.",
+            }
+          ),
+          text_input(
+            "botster-workspaces-spawn-ticket",
+            "ticket_id",
+            "Ticket",
+            {
+              description = "Ticket id when the session type uses pipeline context.",
+            }
+          ),
+        },
+        "Skip unless the session type needs them."
+      )
       spawn_body = {
         form_node(
           "botster-workspaces-spawn-form-" .. workspace.id .. "-" .. target.id,
           "botster_workspaces.spawn",
           "Spawn session",
-          {
-            text_input(
-              "botster-workspaces-spawn-target-id",
-              "target_id",
-              "Spawn point",
-              { value = target.id, disabled = true }
-            ),
-            text_input(
-              "botster-workspaces-spawn-workspace-id",
-              "workspace_id",
-              "Workspace",
-              { value = workspace.id, disabled = true }
-            ),
-            text_input(
-              "botster-workspaces-spawn-branch",
-              "branch",
-              "Branch / worktree",
-              { required = true }
-            ),
-            select_input(
-              "botster-workspaces-spawn-template",
-              "session_type_id",
-              "Session type",
-              session_types
-            ),
-            text_input("botster-workspaces-spawn-prompt", "prompt", "Prompt"),
-            text_input("botster-workspaces-spawn-ticket", "ticket_id", "Ticket"),
-          },
+          form_fields,
           { workspace_id = workspace.id, target_id = target.id }
         ),
       }
@@ -2031,8 +2154,8 @@ local function session_groups(workspace)
         type = "empty_state",
         id = "botster-workspaces-sessions-empty-" .. workspace.id,
         props = {
-          title = "No sessions",
-          description = "Add an existing session or spawn a new one.",
+          title = "No sessions yet",
+          description = "Spawn a new session, or add an existing Hub session id.",
         },
       },
     }
@@ -2048,7 +2171,7 @@ local function session_groups(workspace)
       workspace,
       session_id,
       "indeterminate",
-      "Lifecycle status is uncertain"
+      "Status unknown"
     )
     unavailable[#unavailable + 1] = absence_binding(workspace, session_id)
   end
@@ -2059,14 +2182,14 @@ local function session_groups(workspace)
     session_group(
       workspace,
       "unavailable",
-      "Unavailable / uncertain",
-      "Unavailable or uncertain workspace sessions",
+      "Unavailable",
+      "Unavailable workspace sessions",
       unavailable
     ),
   }
 end
 
-local function workspace_detail(workspace, rows, targets, session_types_by_target)
+local function workspace_detail(workspace)
   local actions = {
     button_node(
       "botster-workspaces-spawn-" .. workspace.id,
@@ -2100,23 +2223,8 @@ local function workspace_detail(workspace, rows, targets, session_types_by_targe
       { selected_workspace = workspace.id, dialog = "move:" .. workspace.id }
     ),
   }
-  local body = {
-    {
-      type = "section",
-      id = "botster-workspaces-detail-" .. workspace.id,
-      props = {
-        title = workspace.name,
-        description = "Referenced session identities are preserved as workspace history.",
-      },
-      slots = {
-        actions = actions,
-        body = session_groups(workspace),
-      },
-    },
-  }
-  for _, dialog in ipairs(workspace_dialogs(workspace, rows, targets, session_types_by_target)) do
-    body[#body + 1] = dialog
-  end
+  -- Dialogs live at the surface root (see workspaces_surface), not under this
+  -- panel, so overlays sit on the existing index/detail view.
   return {
     ["$kind"] = "presentation_if",
     predicate = {
@@ -2131,7 +2239,20 @@ local function workspace_detail(workspace, rows, targets, session_types_by_targe
         title = workspace.name,
       },
       slots = {
-        body = body,
+        body = {
+          {
+            type = "section",
+            id = "botster-workspaces-detail-" .. workspace.id,
+            props = {
+              title = workspace.name,
+              description = "Sessions grouped for this work. Ended sessions stay here until you remove them.",
+            },
+            slots = {
+              actions = actions,
+              body = session_groups(workspace),
+            },
+          },
+        },
       },
     },
   }
@@ -2144,8 +2265,8 @@ local function workspace_index(rows)
       type = "empty_state",
       id = "botster-workspaces-empty",
       props = {
-        title = "No workspaces",
-        description = "Create a workspace to group related Botster sessions.",
+        title = "No workspaces yet",
+        description = "Create a workspace to group related sessions by purpose.",
       },
     }
     children[#children + 1] = button_node(
@@ -2206,7 +2327,9 @@ workspaces_surface = function()
     }
   end
   local rows = sorted_rows(state)
-  local targets = spawn_targets() or {}
+  local targets, list_error = spawn_targets()
+  local spawn_target_projection = { error = list_error }
+  targets = targets or {}
   local session_types_by_target = {}
   for _, target in ipairs(targets) do
     local session_types, session_type_error = session_types_for_target(target.id)
@@ -2220,7 +2343,14 @@ workspaces_surface = function()
     create_dialog(),
   }
   for _, workspace in ipairs(state.workspaces) do
-    body[#body + 1] = workspace_detail(workspace, rows, targets, session_types_by_target)
+    body[#body + 1] = workspace_detail(workspace)
+    -- Dialogs are surface-root siblings so overlay presentation is not nested
+    -- inside the selected-workspace panel (which read as a full-page replace).
+    for _, dialog in ipairs(
+      workspace_dialogs(workspace, rows, targets, session_types_by_target, spawn_target_projection)
+    ) do
+      body[#body + 1] = dialog
+    end
   end
   return {
     type = "panel",
@@ -2412,7 +2542,7 @@ return botster.register({
     },
     {
       name = "botster_workspaces.add_session",
-      description = "Add an ungrouped Hub session UUID to a workspace.",
+      description = "Add an ungrouped Hub session id to a workspace.",
       input_schema = {
         type = "object",
         properties = {
@@ -2427,7 +2557,7 @@ return botster.register({
     },
     {
       name = "botster_workspaces.move_session",
-      description = "Move a grouped Hub session UUID to another workspace atomically.",
+      description = "Move a grouped Hub session id to another workspace atomically.",
       input_schema = {
         type = "object",
         properties = {
@@ -2457,7 +2587,7 @@ return botster.register({
     },
     {
       name = "botster_workspaces.spawn",
-      description = "Atomically ensure a Hub-managed worktree, spawn a session, and record its returned UUID.",
+      description = "Spawn a Hub session for a workspace spawn point and record the returned session id on success. Branch is required only for Git spawn points (managed worktree).",
       input_schema = {
         type = "object",
         properties = {
@@ -2468,7 +2598,7 @@ return botster.register({
           prompt = { type = "string" },
           ticket_id = { type = "string" },
         },
-        required = { "workspace_id", "target_id", "branch", "session_type_id" },
+        required = { "workspace_id", "target_id", "session_type_id" },
         additionalProperties = false,
       },
       handler = "spawn_session",

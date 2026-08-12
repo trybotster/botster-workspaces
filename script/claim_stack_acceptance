@@ -360,6 +360,29 @@ def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
   assert(join, "TUI claim evidence omitted membership_join")
   assert(join.dig("payload", "workspace_id") == workspace_id, "TUI membership_join workspace mismatch")
   assert(join.dig("payload", "session_uuid") == session_uuid, "TUI membership_join session mismatch")
+  # Plan C2.5: held-open lifecycle patch on the same open picker (no reopen).
+  lifecycle = records.find { |row| row["kind"] == "lifecycle_live_update" }
+  assert(lifecycle, "TUI claim evidence omitted lifecycle_live_update (held-open C2.5)")
+  assert(lifecycle.dig("payload", "session_uuid") == session_uuid, "TUI lifecycle_live_update session mismatch")
+  assert(lifecycle.dig("payload", "reopened") == false, "TUI lifecycle_live_update must not reopen the Add form")
+  assert(
+    lifecycle.dig("payload", "lifecycle_before").to_s != "" &&
+      lifecycle.dig("payload", "lifecycle_after").to_s != "" &&
+      lifecycle.dig("payload", "lifecycle_before") != lifecycle.dig("payload", "lifecycle_after"),
+    "TUI lifecycle_live_update must change lifecycle on the held-open option: #{lifecycle.inspect}"
+  )
+  # Label live-update only when Hub supplies a dedicated label field.
+  if lifecycle.dig("payload", "label_field_present") == true
+    assert(
+      lifecycle.dig("payload", "label_live_update") == true,
+      "TUI must prove label live-update when Hub supplies a dedicated label"
+    )
+  else
+    assert(
+      lifecycle.dig("payload", "label_live_update") == false,
+      "TUI must not claim label_live_update without a dedicated Hub label"
+    )
+  end
   excluded = records.find { |row| row["kind"] == "option_excluded" }
   assert(excluded, "TUI claim evidence omitted option_excluded")
   assert(excluded.dig("payload", "session_uuid") == session_uuid, "TUI option_excluded session mismatch")
@@ -381,6 +404,7 @@ def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
   {
     "record_count" => records.length,
     "membership_join" => join.fetch("payload"),
+    "lifecycle_live_update" => lifecycle.fetch("payload"),
     "option_excluded" => excluded.fetch("payload"),
     "complete" => complete.fetch("payload"),
     "add_session_request_id" => add.dig("payload", "request_id"),

@@ -1228,13 +1228,26 @@ async function run() {
     await waitForOption(gapP2, gapForm2, heldA);
     await selectSession(gapP2, gapForm2, heldA);
     await submitAdd(gapP2, gapForm2, assignment.workspace_w2, heldA, "C6b drop peer-claim held A");
-    const dropState = await gapP1.evaluate(() =>
-      globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.getDropNextInboundEntityFrameState?.()
-      ?? null
-    );
-    if (dropState?.state !== "dropped") {
-      throw new Error(`C6b expected dropped membership frame for held A: ${JSON.stringify(dropState)}`);
-    }
+    // Wait for the armed drop to consume the membership frame for the held-A claim.
+    const dropState = await gapP1.waitForFunction(
+      () => {
+        const state = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__
+          ?.transportControl
+          ?.getDropNextInboundEntityFrameState
+          ?.() ?? null;
+        return state?.state === "dropped" ? state : null;
+      },
+      null,
+      { timeout: 30_000 }
+    ).then((handle) => handle.jsonValue()).catch(async () => {
+      const state = await gapP1.evaluate(() =>
+        globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__
+          ?.transportControl
+          ?.getDropNextInboundEntityFrameState
+          ?.() ?? null
+      );
+      throw new Error(`C6b expected dropped membership frame for held A: ${JSON.stringify(state)}`);
+    });
     // Later membership change triggers sequence_gap on the armed client.
     gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, gapTrigger);

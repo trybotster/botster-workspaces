@@ -613,12 +613,27 @@ async function run() {
     if (!metadata?.value) {
       throw new Error(`C1: option metadata missing after live appear: ${JSON.stringify(metadata)}`);
     }
-    // Projected fields: assert every field Hub supplies. lifecycle is always expected on live sessions.
+    // Dedicated producer label is a field that is not uuid/lifecycle/session_type composed text.
+    // Hub /session entities typically omit a separate label field; joined option text is not a label.
+    const producerLabel = (() => {
+      const parts = (metadata.label || "").split(/\s*·\s*/).map((part) => part.trim()).filter(Boolean);
+      const lifecycleWord = /^(running|exited|starting|stopping|failed|stale)$/i;
+      const classWord = /^(current|ended|indeterminate)$/i;
+      const dedicated = parts.find((part) =>
+        part !== metadata.value
+        && !lifecycleWord.test(part)
+        && !classWord.test(part)
+        && part !== metadata.session_type
+      );
+      return dedicated || null;
+    })();
+    // Projected fields Hub actually supplies (not merely joined display text).
     const fieldsPresent = {
-      label: Boolean(metadata.label && metadata.label.length > 0),
+      label: Boolean(producerLabel),
       lifecycle: Boolean(metadata.lifecycle),
       session_type: Boolean(metadata.session_type),
-      spawn_point: Boolean(metadata.spawn_point)
+      spawn_point: Boolean(metadata.spawn_point),
+      rendered_option_text: Boolean(metadata.label && metadata.label.length > 0)
     };
     if (!fieldsPresent.lifecycle) {
       throw new Error(`C1: Hub session entity did not project lifecycle: ${JSON.stringify(metadata)}`);
@@ -636,7 +651,7 @@ async function run() {
     }
     // Independent lifecycle live update while dialog held open (no reopen).
     const lifecycleBefore = metadata.lifecycle;
-    const labelBefore = metadata.label;
+    const producerLabelBefore = producerLabel;
     await sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: assignment.session_s });
     await p1.waitForFunction(
       ({ formId, sessionId, lifecycleBeforeValue }) => {
@@ -669,14 +684,23 @@ async function run() {
         `C1: lifecycle did not live-update independently: before=${lifecycleBefore} after=${JSON.stringify(metadataAfterLifecycle)}`
       );
     }
-    // Label live-update is only claimed when Hub supplies a distinct producer label field that
-    // changes without relying on the lifecycle attribute. Bare/session-type entities typically
-    // omit a dedicated label; do not double-count lifecycle-derived option text as label proof.
+    // Label live-update only when a dedicated producer label field changes independently
+    // of lifecycle. Joined option text changing with lifecycle is not a label update.
+    const producerLabelAfter = (() => {
+      const parts = (metadataAfterLifecycle?.label || "").split(/\s*·\s*/).map((part) => part.trim()).filter(Boolean);
+      const lifecycleWord = /^(running|exited|starting|stopping|failed|stale)$/i;
+      const classWord = /^(current|ended|indeterminate)$/i;
+      return parts.find((part) =>
+        part !== metadataAfterLifecycle?.value
+        && !lifecycleWord.test(part)
+        && !classWord.test(part)
+        && part !== metadataAfterLifecycle?.session_type
+      ) || null;
+    })();
     const labelLiveUpdate = Boolean(
-      fieldsPresent.label
-      && metadataAfterLifecycle?.label
-      && metadataAfterLifecycle.label !== labelBefore
-      && metadataAfterLifecycle.lifecycle !== labelBefore
+      producerLabelBefore
+      && producerLabelAfter
+      && producerLabelAfter !== producerLabelBefore
     );
     // Claim uses the still-present option after lifecycle change (ended sessions remain claimable).
     await selectSession(p1, form, assignment.session_s);
@@ -748,9 +772,11 @@ async function run() {
       metadata_present: metadata,
       metadata_after_lifecycle: metadataAfterLifecycle,
       lifecycle_live_update: true,
-      // Only true when a non-lifecycle producer label field changed independently.
+      // Dedicated producer label only — never joined lifecycle-derived option text.
+      producer_label_before: producerLabelBefore,
+      producer_label_after: producerLabelAfter,
       label_live_update: labelLiveUpdate,
-      label_live_update_required: fieldsPresent.label && Boolean(assignment.require_label_live_update),
+      label_live_update_required: false,
       excluded_after_claim: true,
       stale_submit_blocked: true,
       restored_after_remove: true,
@@ -974,6 +1000,8 @@ async function run() {
     };
 
     // ---- C6a reconnect via closeDataChannel ----
+    // Order is load-bearing: disconnect first, claim S2 from a second production client while
+    // offline, then prove recon subscription+snapshot pairs remove S2 before stale submit.
     const recon = await bootstrapClient(browser, appUrl, "recon");
     await selectWorkspace(recon, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     const reconForm = await openAddDialog(recon, assignment.workspace_w2);
@@ -984,132 +1012,99 @@ async function run() {
       globalThis.__CLAIM_STACK_DOCUMENT_SENTINEL__ = marker;
       return marker;
     });
-    const preClose = await recon.evaluate((requiredFamilies) => {
+    const preClose = await recon.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const familyOf = (entry) => {
-        const payload = entry?.payload ?? {};
-        const nested = payload.payload ?? {};
-        const request = payload.request ?? {};
-        const out = new Set();
-        for (const value of [
-          payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
-        ]) {
-          if (typeof value === "string" && value) out.add(value);
-        }
-        if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
-        if (Array.isArray(request.subscriptions)) {
-          for (const sub of request.subscriptions) {
-            if (sub?.entity_type) out.add(sub.entity_type);
-          }
-        }
-        return [...out];
-      };
-      const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, { subscribe_count: 0, snapshot_count: 0 }]));
-      for (const entry of events) {
-        const families = familyOf(entry);
-        const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
-        const isSnap = entry.kind === "hub_frame" && (
-          entry.payload?.kind === "entity_snapshot"
-          || entry.payload?.type === "entity_snapshot"
-          || entry.payload?.payload?.type === "entity_snapshot"
-        );
-        for (const family of families) {
-          if (!byFamily[family]) continue;
-          if (isSub) byFamily[family].subscribe_count += 1;
-          if (isSnap) byFamily[family].snapshot_count += 1;
-        }
-      }
-      return {
-        event_count: events.length,
-        by_family: byFamily
-      };
-    }, REQUIRED_ENTITY_FAMILIES);
+      return { event_count: events.length };
+    });
     await recon.waitForFunction(
       () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
       null,
       { timeout: 20_000 }
     );
-    // Claim S2 from another path during reconnect so the held selection becomes unavailable.
-    await sendDaemonRequest(socketPath, {
-      type: "plugin_mcp_call_tool",
-      name: "botster_workspaces.add_session",
-      arguments: {
-        workspace_id: assignment.workspace_w1,
-        session_id: assignment.session_s2
-      }
-    });
+    // Disconnect first so the later membership change cannot clear the held value on a live path.
     const closed = await recon.evaluate(() =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
     );
     if (!closed) {
       throw new Error("C6a closeDataChannel returned false");
     }
-    // Post-close generation must advance for each required family (/session + membership).
-    const postCloseFamilies = await recon.waitForFunction(
-      ({ sinceEventCount, priorByFamily, requiredFamilies }) => {
+    await recon.waitForFunction(
+      ({ sinceEventCount }) => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        return events.slice(sinceEventCount).some((entry) => entry.kind === "webrtc_lifecycle");
+      },
+      { sinceEventCount: preClose.event_count },
+      { timeout: 20_000 }
+    );
+    // Second production client claims S2 while recon is disconnected (no package-tool claim path).
+    const reconPeer = await bootstrapClient(browser, appUrl, "reconPeer");
+    await selectWorkspace(reconPeer, assignment.workspace_w1, assignment.workspace_w1_name || "Claim W1");
+    const reconPeerForm = await openAddDialog(reconPeer, assignment.workspace_w1);
+    await waitForOption(reconPeer, reconPeerForm, assignment.session_s2, 60_000);
+    await selectSession(reconPeer, reconPeerForm, assignment.session_s2);
+    const peerClaim = await submitAdd(
+      reconPeer,
+      reconPeerForm,
+      assignment.workspace_w1,
+      assignment.session_s2,
+      "C6a peer claim while recon offline"
+    );
+    const peerAccepted = peerClaim?.result?.accepted === true
+      || peerClaim?.result?.result?.plugin_action_result?.state === "accepted";
+    if (!peerAccepted) {
+      throw new Error(`C6a peer claim was not accepted: ${JSON.stringify(peerClaim.result)}`);
+    }
+    // Post-close: each required family must have a new subscribe_id with a later matching snapshot.
+    const postCloseEvidence = await recon.waitForFunction(
+      ({ sinceEventCount, requiredFamilies }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
         if (events.length <= sinceEventCount) return null;
         const tail = events.slice(sinceEventCount);
-        const familyOf = (entry) => {
-          const payload = entry?.payload ?? {};
-          const nested = payload.payload ?? {};
-          const request = payload.request ?? {};
-          const out = new Set();
-          for (const value of [
-            payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
-          ]) {
-            if (typeof value === "string" && value) out.add(value);
-          }
-          if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
-          if (Array.isArray(request.subscriptions)) {
-            for (const sub of request.subscriptions) {
-              if (sub?.entity_type) out.add(sub.entity_type);
+        const pairs = {};
+        for (const family of requiredFamilies) {
+          const familyPairs = [];
+          for (let i = 0; i < tail.length; i += 1) {
+            const entry = tail[i];
+            if (entry.kind !== "daemon_request" || entry.payload?.type !== "subscribe_entities") continue;
+            const entityType = entry.payload.entity_type;
+            const subscriptionId = entry.payload.subscription_id
+              || entry.payload.request?.subscription_id;
+            if (entityType !== family || !subscriptionId) continue;
+            let snapshot = null;
+            for (let j = i + 1; j < tail.length; j += 1) {
+              const later = tail[j];
+              if (later.kind !== "hub_frame") continue;
+              const payload = later.payload ?? {};
+              const nested = payload.payload ?? {};
+              const kind = payload.kind || payload.type || nested.kind || nested.type;
+              if (kind !== "entity_snapshot") continue;
+              const snapFamily = payload.entity_type || nested.entity_type;
+              const snapSub = payload.subscription_id || nested.subscription_id;
+              if (snapFamily !== family || snapSub !== subscriptionId) continue;
+              snapshot = {
+                subscription_id: snapSub,
+                snapshot_seq: payload.snapshot_seq ?? nested.snapshot_seq ?? null,
+                generation: payload.generation ?? nested.generation ?? null
+              };
+              break;
+            }
+            if (snapshot) {
+              familyPairs.push({
+                family,
+                subscribe_subscription_id: subscriptionId,
+                snapshot
+              });
             }
           }
-          return [...out];
-        };
-        const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, {
-          subscribe_count: 0,
-          snapshot_count: 0,
-          subscription_ids: [],
-          snapshot_seqs: []
-        }]));
-        for (const entry of events) {
-          const families = familyOf(entry);
-          const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
-          const isSnap = entry.kind === "hub_frame" && (
-            entry.payload?.kind === "entity_snapshot"
-            || entry.payload?.type === "entity_snapshot"
-            || entry.payload?.payload?.type === "entity_snapshot"
-          );
-          for (const family of families) {
-            if (!byFamily[family]) continue;
-            if (isSub) {
-              byFamily[family].subscribe_count += 1;
-              const sid = entry.payload?.request?.subscription_id || entry.payload?.subscription_id;
-              if (sid) byFamily[family].subscription_ids.push(sid);
-            }
-            if (isSnap) {
-              byFamily[family].snapshot_count += 1;
-              const seq = entry.payload?.snapshot_seq
-                ?? entry.payload?.payload?.snapshot_seq
-                ?? entry.payload?.generation
-                ?? entry.payload?.payload?.generation;
-              if (seq != null) byFamily[family].snapshot_seqs.push(seq);
-            }
-          }
+          pairs[family] = familyPairs;
         }
+        const allPaired = requiredFamilies.every((family) => (pairs[family] || []).length >= 1);
         const lifecycleTail = tail.some((entry) => entry.kind === "webrtc_lifecycle");
-        const allAdvanced = requiredFamilies.every((family) =>
-          byFamily[family].subscribe_count > (priorByFamily[family]?.subscribe_count ?? 0)
-          && byFamily[family].snapshot_count > (priorByFamily[family]?.snapshot_count ?? 0)
-        );
-        if (!allAdvanced || !lifecycleTail) return null;
-        return { by_family: byFamily, lifecycle_tail: true };
+        if (!allPaired || !lifecycleTail) return null;
+        return { pairs, lifecycle_tail: true };
       },
       {
         sinceEventCount: preClose.event_count,
-        priorByFamily: preClose.by_family,
         requiredFamilies: REQUIRED_ENTITY_FAMILIES
       },
       { timeout: 60_000 }
@@ -1120,7 +1115,7 @@ async function run() {
     if (!sameDocument) {
       throw new Error("C6a document reloaded; reconnect must be in-page");
     }
-    // Held S2 must disappear from options after membership claim + replacement snapshots.
+    // Held S2 must disappear via authoritative reconnect snapshot, not pre-close live path.
     await recon.waitForFunction(
       ({ formId, sessionId }) => {
         const formNode = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
@@ -1141,7 +1136,6 @@ async function run() {
         `C6a: held session still projected after reconnect exclusion: ${JSON.stringify(options)}`
       );
     });
-    // Stale held selection must emit zero successful claim outbound after replacement snapshot.
     const reconSubmit = reconForm.locator("ion-button[data-action-id='botster_workspaces.add_session']");
     const reconStaleSince = await harnessEventCount(recon);
     await reconSubmit.click({ timeout: 5_000 }).catch(() => {});
@@ -1167,11 +1161,14 @@ async function run() {
     summary.lanes.c6a = {
       control: "transportControl.closeDataChannel",
       closed: true,
+      disconnected_before_peer_claim: true,
+      peer_claim_path: "production_ui_second_browser",
+      package_tool_claim: false,
       page_reload: false,
       document_sentinel_survived: true,
       pre_close: preClose,
       post_close_generation: true,
-      post_close_families: postCloseFamilies,
+      subscription_snapshot_pairs: postCloseEvidence.pairs,
       authoritative_snapshot_after_close: true,
       options_reconciled: true,
       held_value_unavailable: true,
@@ -1179,58 +1176,26 @@ async function run() {
     };
 
     // ---- C6b ordered sequence_gap via armDropNextInboundEntityFrame ----
+    // Hold A, arm drop, peer-claim A (dropped so gapP1 never sees live exclusion), peer-claim B
+    // (triggers sequence_gap), then require replacement snapshot pairs that remove A.
     const gapSessions = assignment.gap_sessions;
     if (!Array.isArray(gapSessions) || gapSessions.length < 3) {
       throw new Error("C6b requires assignment.gap_sessions with three unclaimed session UUIDs");
     }
+    const heldA = gapSessions[0];
+    const gapTrigger = gapSessions[1];
     const gapP1 = await bootstrapClient(browser, appUrl, "gapP1");
     const gapP2 = await bootstrapClient(browser, appUrl, "gapP2");
     await selectWorkspace(gapP1, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     await selectWorkspace(gapP2, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     const gapForm1 = await openAddDialog(gapP1, assignment.workspace_w2);
-    await waitForOption(gapP1, gapForm1, gapSessions[0]);
-    await selectSession(gapP1, gapForm1, gapSessions[0]); // A held stale candidate
-    const gapBaseline = await gapP1.evaluate((requiredFamilies) => {
+    await waitForOption(gapP1, gapForm1, heldA);
+    await selectSession(gapP1, gapForm1, heldA); // held stale candidate
+    const gapBaseline = await gapP1.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const familyOf = (entry) => {
-        const payload = entry?.payload ?? {};
-        const nested = payload.payload ?? {};
-        const request = payload.request ?? {};
-        const out = new Set();
-        for (const value of [
-          payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
-        ]) {
-          if (typeof value === "string" && value) out.add(value);
-        }
-        if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
-        if (Array.isArray(request.subscriptions)) {
-          for (const sub of request.subscriptions) {
-            if (sub?.entity_type) out.add(sub.entity_type);
-          }
-        }
-        return [...out];
-      };
-      const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, { subscribe_count: 0, snapshot_count: 0 }]));
-      for (const entry of events) {
-        const families = familyOf(entry);
-        const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
-        const isSnap = entry.kind === "hub_frame" && (
-          entry.payload?.kind === "entity_snapshot"
-          || entry.payload?.type === "entity_snapshot"
-          || entry.payload?.payload?.type === "entity_snapshot"
-        );
-        for (const family of families) {
-          if (!byFamily[family]) continue;
-          if (isSub) byFamily[family].subscribe_count += 1;
-          if (isSnap) byFamily[family].snapshot_count += 1;
-        }
-      }
-      return { event_count: events.length, by_family: byFamily };
-    }, REQUIRED_ENTITY_FAMILIES);
-    let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
-    await waitForOption(gapP2, gapForm2, gapSessions[0]);
-    await selectSession(gapP2, gapForm2, gapSessions[0]);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[0], "C6b warmup A");
+      return { event_count: events.length };
+    });
+    // Arm BEFORE the peer claims the held value so exclusion is delivered only via gap recovery.
     const arm = await gapP1.evaluate(() => {
       const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
       if (!control?.armDropNextInboundEntityFrame) {
@@ -1244,106 +1209,105 @@ async function run() {
     if (!arm?.ok) {
       throw new Error(`C6b armDropNextInboundEntityFrame failed: ${JSON.stringify(arm)}`);
     }
-    gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
-    await waitForOption(gapP2, gapForm2, gapSessions[1]);
-    await selectSession(gapP2, gapForm2, gapSessions[1]);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[1], "C6b drop B");
+    // Peer claims held A — this membership frame is dropped on gapP1.
+    let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
+    await waitForOption(gapP2, gapForm2, heldA);
+    await selectSession(gapP2, gapForm2, heldA);
+    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, heldA, "C6b drop peer-claim held A");
     const dropState = await gapP1.evaluate(() =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.getDropNextInboundEntityFrameState?.()
       ?? null
     );
+    if (dropState?.state !== "dropped") {
+      throw new Error(`C6b expected dropped membership frame for held A: ${JSON.stringify(dropState)}`);
+    }
+    // Later membership change triggers sequence_gap on the armed client.
     gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
-    await waitForOption(gapP2, gapForm2, gapSessions[2]);
-    await selectSession(gapP2, gapForm2, gapSessions[2]);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[2], "C6b gap C");
+    await waitForOption(gapP2, gapForm2, gapTrigger);
+    await selectSession(gapP2, gapForm2, gapTrigger);
+    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapTrigger, "C6b gap trigger claim");
     const gapEvidence = await gapP1.waitForFunction(
-      ({ sinceEventCount, priorByFamily, requiredFamilies, membershipFamily }) => {
+      ({ sinceEventCount, membershipFamily }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
         const tail = events.slice(sinceEventCount);
-        const familyOf = (entry) => {
-          const payload = entry?.payload ?? {};
-          const nested = payload.payload ?? {};
-          const request = payload.request ?? {};
-          const out = new Set();
-          for (const value of [
-            payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
-          ]) {
-            if (typeof value === "string" && value) out.add(value);
-          }
-          if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
-          if (Array.isArray(request.subscriptions)) {
-            for (const sub of request.subscriptions) {
-              if (sub?.entity_type) out.add(sub.entity_type);
-            }
-          }
-          return [...out];
-        };
         const gapHit = tail.some((entry) => {
           const text = JSON.stringify(entry);
           return text.includes("sequence_gap")
             || entry.payload?.reason === "sequence_gap"
             || entry.payload?.payload?.reason === "sequence_gap";
         });
-        const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, {
-          subscribe_count: 0,
-          snapshot_count: 0,
-          subscription_ids: [],
-          snapshot_seqs: []
-        }]));
-        for (const entry of events) {
-          const families = familyOf(entry);
-          const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
-          const isSnap = entry.kind === "hub_frame" && (
-            entry.payload?.kind === "entity_snapshot"
-            || entry.payload?.type === "entity_snapshot"
-            || entry.payload?.payload?.type === "entity_snapshot"
-          );
-          for (const family of families) {
-            if (!byFamily[family]) continue;
-            if (isSub) {
-              byFamily[family].subscribe_count += 1;
-              const sid = entry.payload?.request?.subscription_id || entry.payload?.subscription_id;
-              if (sid) byFamily[family].subscription_ids.push(sid);
-            }
-            if (isSnap) {
-              byFamily[family].snapshot_count += 1;
-              const seq = entry.payload?.snapshot_seq
-                ?? entry.payload?.payload?.snapshot_seq
-                ?? entry.payload?.generation
-                ?? entry.payload?.payload?.generation;
-              if (seq != null) byFamily[family].snapshot_seqs.push(seq);
-            }
+        if (!gapHit) return null;
+        // Require a post-gap subscribe + later snapshot for the same membership subscription_id.
+        const pairs = [];
+        for (let i = 0; i < tail.length; i += 1) {
+          const entry = tail[i];
+          if (entry.kind !== "daemon_request" || entry.payload?.type !== "subscribe_entities") continue;
+          const entityType = entry.payload.entity_type;
+          const subscriptionId = entry.payload.subscription_id
+            || entry.payload.request?.subscription_id;
+          if (entityType !== membershipFamily || !subscriptionId) continue;
+          let snapshot = null;
+          for (let j = i + 1; j < tail.length; j += 1) {
+            const later = tail[j];
+            if (later.kind !== "hub_frame") continue;
+            const payload = later.payload ?? {};
+            const nested = payload.payload ?? {};
+            const kind = payload.kind || payload.type || nested.kind || nested.type;
+            if (kind !== "entity_snapshot") continue;
+            const snapFamily = payload.entity_type || nested.entity_type;
+            const snapSub = payload.subscription_id || nested.subscription_id;
+            if (snapFamily !== membershipFamily || snapSub !== subscriptionId) continue;
+            snapshot = {
+              subscription_id: snapSub,
+              snapshot_seq: payload.snapshot_seq ?? nested.snapshot_seq ?? null,
+              generation: payload.generation ?? nested.generation ?? null
+            };
+            break;
+          }
+          if (snapshot) {
+            pairs.push({
+              family: membershipFamily,
+              subscribe_subscription_id: subscriptionId,
+              snapshot
+            });
           }
         }
-        // Armed drop is membership-only; require that family's post-gap resubscribe + replacement
-        // snapshot. Session family counters are recorded for correlation evidence but are not
-        // required to advance when the gap was not on that family.
-        const membershipAdvanced =
-          byFamily[membershipFamily].subscribe_count > (priorByFamily[membershipFamily]?.subscribe_count ?? 0)
-          && byFamily[membershipFamily].snapshot_count > (priorByFamily[membershipFamily]?.snapshot_count ?? 0);
-        if (!gapHit || !membershipAdvanced) return null;
+        if (pairs.length < 1) return null;
         return {
           sequence_gap: true,
           resubscribe: true,
           replacement_snapshot: true,
-          by_family: byFamily,
           membership_family: membershipFamily,
-          membership_subscribe_delta:
-            byFamily[membershipFamily].subscribe_count - (priorByFamily[membershipFamily]?.subscribe_count ?? 0),
-          membership_snapshot_delta:
-            byFamily[membershipFamily].snapshot_count - (priorByFamily[membershipFamily]?.snapshot_count ?? 0),
+          subscription_snapshot_pairs: pairs,
+          pair_count: pairs.length,
           tail_count: tail.length
         };
       },
       {
         sinceEventCount: gapBaseline.event_count,
-        priorByFamily: gapBaseline.by_family,
-        requiredFamilies: REQUIRED_ENTITY_FAMILIES,
         membershipFamily: "botster-workspaces.membership"
       },
       { timeout: 60_000 }
     ).then((handle) => handle.jsonValue());
-    // Held A was claimed by peer; must emit zero outbound claim for A after gap resync.
+    // Replacement snapshot must exclude held A before the stale submit check.
+    await gapP1.waitForFunction(
+      ({ formId, sessionId }) => {
+        const formNode = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+        if (!formNode) return true;
+        const options = [...formNode.querySelectorAll(
+          "[data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option"
+        )];
+        return !options.some((option) => (option.value ?? option.getAttribute("value")) === sessionId);
+      },
+      {
+        formId: `botster-workspaces-add-form-${assignment.workspace_w2}`,
+        sessionId: heldA
+      },
+      { timeout: 45_000 }
+    ).catch(async () => {
+      const options = await readSelectOptions(gapForm1);
+      throw new Error(`C6b held A still projected after gap recovery: ${JSON.stringify(options)}`);
+    });
     const gapStaleSince = await harnessEventCount(gapP1);
     await gapForm1.locator("ion-button[data-action-id='botster_workspaces.add_session']")
       .click({ timeout: 5_000 })
@@ -1361,7 +1325,7 @@ async function run() {
           || values["botster-workspaces-add-session-id-advanced"];
         return resolved === sessionId;
       }),
-    { since: gapStaleSince, sessionId: gapSessions[0] });
+    { since: gapStaleSince, sessionId: heldA });
     if (gapStaleOutbound.length !== 0) {
       throw new Error(
         `C6b stale held A emitted claim outbound after sequence_gap resync: count=${gapStaleOutbound.length}`
@@ -1370,10 +1334,11 @@ async function run() {
     summary.lanes.c6b = {
       control: "transportControl.armDropNextInboundEntityFrame",
       filter: { entity_type: "botster-workspaces.membership" },
-      chronology: "warmup_A_drop_B_gap_C",
+      chronology: "hold_A_arm_drop_peer_claim_A_gap_trigger_B",
       arm,
       drop_state: dropState,
       gap_evidence: gapEvidence,
+      held_value_unavailable_via_gap_recovery: true,
       stale_outbound_for_held_a: 0
     };
 

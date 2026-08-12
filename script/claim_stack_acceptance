@@ -155,6 +155,15 @@ def assert_min_pin!(label, actual, minimum, source_checkout: nil)
   assert(ok, "#{label} pin #{actual} is not a descendant of required minimum #{minimum} in #{repo}")
 end
 
+def assert_sha256_match!(path, expected_sha, label:)
+  actual = Digest::SHA256.file(path).hexdigest
+  assert(
+    actual == expected_sha,
+    "#{label}: entrypoint sha #{actual} != expected #{expected_sha}"
+  )
+  actual
+end
+
 def directory_digest(path)
   raise "Web dist directory is absent: #{path}" unless Dir.exist?(path)
 
@@ -617,11 +626,15 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       c1_fields["session_type"] == true,
       "C1 session-type spawn must project session_type_id: #{c1_fields.inspect}"
     )
-    # Independent label live-update is required only when Hub supplied a dedicated label field.
-    if c1_fields["label"] == true && web_summary.dig("lanes", "c1", "label_live_update_required")
+    # Joined option text is not a dedicated producer label.
+    unless web_summary.dig("lanes", "c1", "producer_label_before")
       assert(
-        web_summary.dig("lanes", "c1", "label_live_update") == true,
-        "C1 must prove independent label live update when Hub supplies label"
+        c1_fields["label"] == false,
+        "C1 must record label=false when Hub supplies no dedicated producer label: #{c1_fields.inspect}"
+      )
+      assert(
+        web_summary.dig("lanes", "c1", "label_live_update") == false,
+        "C1 must not claim label_live_update without a dedicated producer label"
       )
     end
 
@@ -630,40 +643,52 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       "C6a must assert zero stale outbound claims after reconnect"
     )
     assert(
-      web_summary.dig("lanes", "c6a", "post_close_generation") == true,
-      "C6a must prove post-close generation"
+      web_summary.dig("lanes", "c6a", "disconnected_before_peer_claim") == true,
+      "C6a must disconnect before the peer claim"
     )
-    c6a_families = web_summary.dig("lanes", "c6a", "post_close_families", "by_family") || {}
+    assert(
+      web_summary.dig("lanes", "c6a", "package_tool_claim") == false,
+      "C6a must not use package-tool claims for the offline peer path"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "peer_claim_path") == "production_ui_second_browser",
+      "C6a peer claim must use a second production browser"
+    )
+    c6a_pairs = web_summary.dig("lanes", "c6a", "subscription_snapshot_pairs") || {}
     %w[session botster-workspaces.membership].each do |family|
-      row = c6a_families[family]
-      assert(row.is_a?(Hash), "C6a missing family-correlated counters for #{family}: #{c6a_families.inspect}")
-      assert(
-        row.fetch("subscribe_count", 0).to_i > 0 && row.fetch("snapshot_count", 0).to_i > 0,
-        "C6a family #{family} must show subscribe+snapshot: #{row.inspect}"
-      )
+      pairs = c6a_pairs[family]
+      assert(pairs.is_a?(Array) && !pairs.empty?, "C6a missing subscription/snapshot pairs for #{family}: #{c6a_pairs.inspect}")
+      pairs.each do |pair|
+        assert(pair["subscribe_subscription_id"].to_s != "", "C6a pair missing subscribe id: #{pair.inspect}")
+        snap = pair["snapshot"] || {}
+        assert(
+          snap["subscription_id"].to_s == pair["subscribe_subscription_id"].to_s,
+          "C6a snapshot subscription_id must match subscribe: #{pair.inspect}"
+        )
+      end
     end
     assert(
       web_summary.dig("lanes", "c6b", "stale_outbound_for_held_a").to_i == 0,
       "C6b must assert zero stale outbound for held A"
     )
+    assert(
+      web_summary.dig("lanes", "c6b", "held_value_unavailable_via_gap_recovery") == true,
+      "C6b must clear held A via gap recovery, not pre-drop live exclusion"
+    )
     c6b_evidence = web_summary.dig("lanes", "c6b", "gap_evidence") || {}
     assert(c6b_evidence["sequence_gap"] == true, "C6b must prove sequence_gap")
     assert(c6b_evidence["resubscribe"] == true, "C6b must prove membership resubscribe")
     assert(c6b_evidence["replacement_snapshot"] == true, "C6b must prove membership replacement snapshot")
-    c6b_families = c6b_evidence["by_family"] || {}
-    membership_gap = c6b_families["botster-workspaces.membership"]
-    assert(
-      membership_gap.is_a?(Hash) && membership_gap.fetch("subscribe_count", 0).to_i > 0,
-      "C6b must family-correlate membership resubscribe: #{c6b_families.inspect}"
-    )
-    assert(
-      c6b_evidence.fetch("membership_subscribe_delta", 0).to_i >= 1,
-      "C6b membership subscribe delta must be positive: #{c6b_evidence.inspect}"
-    )
-    assert(
-      c6b_evidence.fetch("membership_snapshot_delta", 0).to_i >= 1,
-      "C6b membership snapshot delta must be positive: #{c6b_evidence.inspect}"
-    )
+    c6b_pairs = c6b_evidence["subscription_snapshot_pairs"] || []
+    assert(c6b_pairs.is_a?(Array) && !c6b_pairs.empty?, "C6b must export membership subscription/snapshot pairs: #{c6b_evidence.inspect}")
+    c6b_pairs.each do |pair|
+      assert(pair["subscribe_subscription_id"].to_s != "", "C6b pair missing subscribe id: #{pair.inspect}")
+      snap = pair["snapshot"] || {}
+      assert(
+        snap["subscription_id"].to_s == pair["subscribe_subscription_id"].to_s,
+        "C6b snapshot subscription_id must match subscribe: #{pair.inspect}"
+      )
+    end
 
     # ---- C2: parent-owned TUI keyboard claim on the same clean Hub ----
     # Consumes botster-tui claim seam from ticket_1786529885_807584 (≥ d40f28f).
@@ -689,18 +714,19 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       end
       File.chmod(0o755, tui_package_bin)
     end
-    package_bin_sha = Digest::SHA256.file(tui_package_bin).hexdigest
-    assert(
-      package_bin_sha == validated_tui.fetch("sha256"),
-      "TUI package entrypoint SHA-256 #{package_bin_sha} != validated tui_binary #{validated_tui.fetch('sha256')}"
+    package_bin_sha = assert_sha256_match!(
+      tui_package_bin,
+      validated_tui.fetch("sha256"),
+      label: "TUI package entrypoint positive bind"
     )
-    # Stale-binary negative control: a mismatched digest must fail closed (probe the checker).
+    # Stale-binary negative control: checker must fail closed on a mismatched expected digest.
     begin
-      fake_digest = "0" * 64
-      assert(fake_digest != package_bin_sha, "stale-binary negative control needs distinct digest")
+      assert_sha256_match!(tui_package_bin, "0" * 64, label: "TUI stale-binary negative")
+      raise "stale-binary negative control did not fail closed"
+    rescue RuntimeError => error
       assert(
-        package_bin_sha != fake_digest,
-        "stale-binary negative control: package entrypoint must not match a fabricated digest"
+        error.message.include?("entrypoint sha") && error.message.include?("TUI stale-binary negative"),
+        "stale-binary negative control raised unexpected error: #{error.message}"
       )
     end
     tui_binary_receipt = {

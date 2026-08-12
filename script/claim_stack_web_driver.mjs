@@ -83,6 +83,8 @@ function sendDaemonRequest(path, payload, timeoutMs = 15_000) {
           reject(error);
           return;
         }
+        // Hub hello is protocol+compatibility without a response kind.
+        if (message.protocol === protocol && message.kind == null && message.compatibility) continue;
         if (message.protocol === protocol && message.kind === "hello") continue;
         clearTimeout(timer);
         socket.end();

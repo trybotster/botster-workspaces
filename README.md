@@ -55,6 +55,16 @@ Detail preserves every referenced session UUID and exposes:
 - Add or move an existing session
 - remove membership
 
+**Add existing session** authors an Available sessions picker bound to Hub
+`/session` through `entity_options`, excluding every UUID present in
+`/botster-workspaces.membership`. Option labels prefer Hub `label` when present
+and fall back to `session_uuid`; optional `lifecycle`, `lifecycle_class`,
+`session_type_id`, and `spawn_point` fields are projected when present and never
+copied into `plugin.db`. An always-visible advanced **Historical session UUID**
+field remains for sessions absent from current Hub entity state; when both
+fields are set, the advanced value wins. Membership claim and remove still
+publish live membership entity frames for open pickers.
+
 Detail groups each stored reference as **Current**, **Ended**, or
 **Unavailable / uncertain** by binding the stable surface tree directly to the
 Hub-owned `/session` entity family. Snapshot, upsert, patch, and remove frames

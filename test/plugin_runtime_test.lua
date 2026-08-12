@@ -904,6 +904,55 @@ assert_true(
   "detail exposes lifecycle-bound remove membership"
 )
 
+presentation_state["workspace-dialog"] = "add:" .. renamed.workspace.id
+local add_dialog = materialize(handler(spec, "workspaces_surface")({}), presentation_state)
+local add_select = find_node(add_dialog, "botster-workspaces-add-session-id")
+assert_true(add_select, "Add dialog authors Available sessions select")
+assert_eq(add_select.type, "select", "Available sessions is a select control")
+assert_eq(add_select.props.name, "session_id", "picker form name remains session_id")
+assert_eq(add_select.props.label, "Available sessions", "picker label is Available sessions")
+assert_eq(add_select.props.required, false, "picker required is action-side false")
+assert_true(add_select.props.options_source, "picker uses options_source")
+assert_eq(add_select.props.options_source["$kind"], "entity_options", "picker uses entity_options kind")
+assert_eq(add_select.props.options_source.source, "/session", "picker sources Hub /session")
+assert_eq(add_select.props.options_source.value_field, "session_uuid", "picker value is session_uuid")
+assert_eq(
+  table.concat(add_select.props.options_source.display_fields, ","),
+  "label,session_uuid,lifecycle,lifecycle_class,session_type_id,spawn_point",
+  "display_fields are pinned exactly"
+)
+assert_eq(
+  table.concat(add_select.props.options_source.order, ","),
+  "label,lifecycle_class,lifecycle,session_type_id,session_uuid",
+  "order fields are pinned exactly"
+)
+assert_eq(
+  add_select.props.options_source.exclude.source,
+  "/botster-workspaces.membership",
+  "picker excludes membership family"
+)
+assert_eq(
+  add_select.props.options_source.exclude.value_field,
+  "session_uuid",
+  "exclude value is session_uuid"
+)
+assert_eq(add_select.slots, nil, "entity_options select has no static select_option children")
+local advanced_input = find_node(add_dialog, "botster-workspaces-add-session-id-advanced")
+assert_true(advanced_input, "advanced historical UUID field is present")
+assert_eq(advanced_input.type, "text_input", "advanced field is text input")
+assert_eq(advanced_input.props.name, "session_id_advanced", "advanced form name is session_id_advanced")
+assert_eq(advanced_input.props.label, "Historical session UUID", "advanced label is pinned")
+assert_eq(advanced_input.props.required, false, "advanced field is not required")
+local advanced_help = find_node(add_dialog, "botster-workspaces-add-session-id-advanced-help")
+assert_true(advanced_help, "advanced helper copy is present")
+assert_eq(
+  advanced_help.props.text,
+  "Use only when the session is absent from current Hub session state.",
+  "advanced helper copy is pinned"
+)
+assert_true(add_select.type ~= "text_input", "normal path is not required Session UUID text")
+presentation_state["workspace-dialog"] = nil
+
 local lifecycle_bindings = {}
 collect_bind_lists(surface, lifecycle_bindings)
 assert_eq(#lifecycle_bindings, 8, "each stored reference authors exactly four canonical session bindings")
@@ -1164,6 +1213,69 @@ local removed_action = handler(spec, "remove_session_action")({
 assert_eq(removed_action.state, "accepted", "remove membership action is accepted")
 assert_eq(removed_action.presentation, nil, "remove membership omits empty presentation operations")
 assert_true(removed_action.replacement, "remove membership installs owner-authored replacement")
+
+-- Advanced form precedence matrix for Add existing session (picker vs historical).
+local advanced_workspace = create({ name = "Advanced claim workspace" }).workspace
+-- Use UUID space that does not collide with later producer-matrix fixtures.
+local advanced_session = "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1"
+local add_action = handler(spec, "add_session_action")
+local picker_only = add_action({
+  request_id = "add-picker-only",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.add_session",
+  node_id = "botster-workspaces-add-form-" .. advanced_workspace.id,
+  values = {
+    ["botster-workspaces-add-workspace-id"] = advanced_workspace.id,
+    ["botster-workspaces-add-session-id"] = advanced_session,
+  },
+})
+assert_eq(picker_only.state, "accepted", "picker-only valid claim is accepted")
+assert_eq(show({ id = advanced_workspace.id }).workspace.session_refs[1], advanced_session, "picker-only claims membership")
+
+local historical = "e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2"
+local other_workspace = create({ name = "Other claim workspace" }).workspace
+local advanced_only = add_action({
+  request_id = "add-advanced-only",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.add_session",
+  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
+  values = {
+    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
+    ["botster-workspaces-add-session-id-advanced"] = historical,
+  },
+})
+assert_eq(advanced_only.state, "accepted", "advanced-only historical claim is accepted")
+assert_eq(show({ id = other_workspace.id }).workspace.session_refs[1], historical, "advanced-only claims historical UUID")
+
+local both_set_session = "e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3"
+local both_set = add_action({
+  request_id = "add-both",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.add_session",
+  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
+  values = {
+    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
+    ["botster-workspaces-add-session-id"] = "e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4",
+    ["botster-workspaces-add-session-id-advanced"] = both_set_session,
+  },
+})
+assert_eq(both_set.state, "accepted", "both-set uses advanced precedence")
+assert_eq(
+  show({ id = other_workspace.id }).workspace.session_refs[2],
+  both_set_session,
+  "advanced value wins when both fields are set"
+)
+
+local both_empty = add_action({
+  request_id = "add-empty",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.add_session",
+  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
+  values = {
+    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
+  },
+})
+assert_eq(both_empty.state, "rejected", "both empty is validation_failed")
 
 local delete_target = create({ name = "Disposable grouping" })
 local session_to_preserve = "66666666-6666-4666-8666-666666666666"

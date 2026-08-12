@@ -94,7 +94,15 @@
       "duplicate_error": "session_already_owned",
       "idempotent_same_workspace": true,
       "membership_index_key": "membership:<session_uuid>",
-      "publishes": "entity_upsert"
+      "publishes": "entity_upsert",
+      "picker": {
+        "options_source_kind": "entity_options",
+        "source": "/session",
+        "value_field": "session_uuid",
+        "exclude_source": "/botster-workspaces.membership",
+        "advanced_field": "session_id_advanced"
+      },
+      "same_workspace_idempotent": true
     },
     "move_session": {
       "one_state_write": true,

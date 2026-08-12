@@ -449,6 +449,43 @@ membership_session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 action_surface = render_surface(socket)
 add_form = find_node(action_surface, "botster-workspaces-add-form-#{workspace_id}")
 assert(add_form, "selected workspace is missing the rendered Add session form")
+add_select = find_node(action_surface, "botster-workspaces-add-session-id")
+assert(add_select, "Add dialog missing Available sessions select")
+assert(add_select["type"] == "select", "Available sessions control must be a select")
+assert(add_select.dig("props", "name") == "session_id", "picker name must remain session_id")
+assert(add_select.dig("props", "label") == "Available sessions", "picker label must be Available sessions")
+options_source = add_select.dig("props", "options_source")
+assert(options_source, "picker must author options_source")
+assert(options_source["$kind"] == "entity_options", "picker must use entity_options")
+assert(options_source["source"] == "/session", "picker source must be /session")
+assert(options_source["value_field"] == "session_uuid", "picker value_field must be session_uuid")
+assert(
+  options_source["display_fields"] == %w[
+    label session_uuid lifecycle lifecycle_class session_type_id spawn_point
+  ],
+  "picker display_fields drifted: #{options_source["display_fields"].inspect}"
+)
+assert(
+  options_source.dig("exclude", "source") == "/botster-workspaces.membership",
+  "picker must exclude membership family"
+)
+assert(options_source.dig("exclude", "value_field") == "session_uuid", "exclude value_field must be session_uuid")
+assert(
+  add_select.dig("slots", "options").nil? || add_select.dig("slots", "options").empty?,
+  "entity_options select must not ship static select_option children"
+)
+advanced_input = find_node(action_surface, "botster-workspaces-add-session-id-advanced")
+assert(advanced_input, "Add dialog missing advanced historical UUID field")
+assert(advanced_input.dig("props", "name") == "session_id_advanced", "advanced field name drifted")
+assert(advanced_input.dig("props", "label") == "Historical session UUID", "advanced field label drifted")
+advanced_help = find_node(action_surface, "botster-workspaces-add-session-id-advanced-help")
+assert(advanced_help, "Add dialog missing advanced helper copy")
+assert(
+  advanced_help.dig("props", "text") ==
+    "Use only when the session is absent from current Hub session state.",
+  "advanced helper copy drifted"
+)
+
 rejected_add = action(
   socket,
   id: add_form.dig("props", "action", "id"),
@@ -458,13 +495,14 @@ rejected_add = action(
   values: { "botster-workspaces-add-session-id" => "1-2-3-4-5" }
 )
 assert_rejected(rejected_add, "botster-workspaces-add-session-id", "non-canonical Add session UUID")
+# Historical recovery path: session absent from current Hub /session state.
 added_action = action(
   socket,
   id: add_form.dig("props", "action", "id"),
   node_id: add_form.fetch("id"),
   kind: "submit",
   payload: add_form.dig("props", "action", "payload"),
-  values: { "botster-workspaces-add-session-id" => membership_session_id }
+  values: { "botster-workspaces-add-session-id-advanced" => membership_session_id }
 )
 assert(added_action["state"] == "accepted", "Add session action was not accepted")
 assert(
@@ -533,7 +571,7 @@ assert(
 # ---------------------------------------------------------------------------
 # Six operator producer checks (question_1786508223_721040).
 # Production claim/remove tools + held generic membership subscription.
-# Free-text Add dialog is not product proof for exclusion/restoration.
+# Free-text advanced field is historical recovery only; normal path is entity_options.
 #
 # Seed one membership before SubscribeEntities so the provider baseline is a
 # non-empty JSON array. Empty Lua `items = {}` still fails validation on some

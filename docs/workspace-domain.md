@@ -55,6 +55,22 @@ counter nor the stream. Provider reconnect snapshots allocate one durable
 sequence value on their own CAS path and never invent a sequence at or below the
 committed floor.
 
+## Available sessions picker
+
+Add existing session authors one `ui.select` with
+`props.options_source.$kind = "entity_options"`:
+
+- `source = "/session"`
+- `value_field = "session_uuid"`
+- `display_fields = label, session_uuid, lifecycle, lifecycle_class,
+  session_type_id, spawn_point`
+- `exclude.source = "/botster-workspaces.membership"`
+
+There are no static `select_option` children on that control. An always-visible
+advanced historical UUID field (`session_id_advanced`) sits below the picker
+for sessions absent from current Hub entity state. Action extraction prefers a
+non-empty advanced value, then the picker value, and validates a canonical UUID.
+
 ## Rename and Delete
 
 Rename changes the trimmed unique name while preserving id, membership, and

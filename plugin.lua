@@ -1309,6 +1309,46 @@ local function membership_entity_provider(_request)
   return attempt()
 end
 
+local function available_session_options_source()
+  return {
+    ["$kind"] = "entity_options",
+    source = "/session",
+    value_field = "session_uuid",
+    display_fields = {
+      "label",
+      "session_uuid",
+      "lifecycle",
+      "lifecycle_class",
+      "session_type_id",
+      "spawn_point",
+    },
+    order = {
+      "label",
+      "lifecycle_class",
+      "lifecycle",
+      "session_type_id",
+      "session_uuid",
+    },
+    exclude = {
+      source = "/botster-workspaces.membership",
+      value_field = "session_uuid",
+    },
+  }
+end
+
+local function entity_options_select(id, name, label, options_source)
+  return {
+    type = "select",
+    id = id,
+    props = {
+      name = name,
+      label = label,
+      required = false,
+      options_source = options_source,
+    },
+  }
+end
+
 local function action_result(arguments, state, extra)
   local result = {
     request_id = arguments.request_id or arguments.action_id or "workspace-action",
@@ -1424,13 +1464,26 @@ local function delete_workspace_action(arguments)
   })
 end
 
+local function resolve_add_session_id(arguments)
+  local advanced = trim(form_value(
+    arguments,
+    "session_id_advanced",
+    "botster-workspaces-add-session-id-advanced"
+  ))
+  if advanced then
+    return advanced
+  end
+  return trim(form_value(arguments, "session_id", "botster-workspaces-add-session-id"))
+end
+
 local function add_session_action(arguments)
   return mutation_action(arguments, add_session, {
     workspace_id = form_value(arguments, "workspace_id", "botster-workspaces-add-workspace-id"),
-    session_id = form_value(arguments, "session_id", "botster-workspaces-add-session-id"),
+    session_id = resolve_add_session_id(arguments),
   }, true, {
     workspace_id = "botster-workspaces-add-workspace-id",
     session_id = "botster-workspaces-add-session-id",
+    session_id_advanced = "botster-workspaces-add-session-id-advanced",
   })
 end
 
@@ -1735,11 +1788,22 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
               "Workspace",
               { value = workspace.id, disabled = true }
             ),
-            text_input(
+            entity_options_select(
               "botster-workspaces-add-session-id",
               "session_id",
-              "Session UUID",
-              { required = true }
+              "Available sessions",
+              available_session_options_source()
+            ),
+            text_input(
+              "botster-workspaces-add-session-id-advanced",
+              "session_id_advanced",
+              "Historical session UUID",
+              { required = false }
+            ),
+            text_node(
+              "botster-workspaces-add-session-id-advanced-help",
+              "Use only when the session is absent from current Hub session state.",
+              "muted"
             ),
           },
           { workspace_id = workspace.id }

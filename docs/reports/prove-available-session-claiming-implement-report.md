@@ -71,19 +71,21 @@ script/test
 # ok
 
 script/test-hub-flow claim-stack run MANIFEST EVIDENCE_DIR
-# script/claim_stack_acceptance: ok (after this revisit)
+# script/claim_stack_acceptance: ok
+# evidence: /private/tmp/claim-stack-evidence-reviewfix13e-1786555551
+# status=passed
 ```
 
 | Lane / check | Result |
 | --- | --- |
-| C1 live appear + session_type + lifecycle live update + restore | required |
-| C2 TUI shared-Hub keyboard claim (validated binary) | required |
-| C3 accept + exact `session_already_owned` + dual picker reconcile | required |
-| C4 accept + idempotent | required |
-| C5 historical | required |
-| C6a reconnect family generation + zero stale outbound | required |
-| C6b sequence_gap membership family + zero held-A outbound | required |
-| Supporting Web/TUI lifecycle | required |
+| C1 live appear + session_type + lifecycle live update + restore | passed |
+| C2 TUI shared-Hub keyboard claim (validated binary) | passed (`membership_join` + `option_excluded`) |
+| C3 accept + exact `session_already_owned` + dual picker reconcile | passed |
+| C4 accept + idempotent | passed |
+| C5 historical | passed |
+| C6a reconnect family generation + zero stale outbound | passed |
+| C6b sequence_gap membership family + zero held-A outbound | passed |
+| Supporting Web/TUI lifecycle | passed |
 
 TUI pin floor: `d40f28f9de2b621e50367c0f014880429eddedde` (`botster.tui.workspaces-claim-driver/v1`).
 

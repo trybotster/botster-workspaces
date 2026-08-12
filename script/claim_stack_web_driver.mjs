@@ -536,22 +536,96 @@ async function run() {
     await waitForOption(idB, idFormB, assignment.session_idem);
     await selectSession(idFormA, assignment.session_idem);
     await selectSession(idFormB, assignment.session_idem);
-    const idemResults = await Promise.allSettled([
-      submitAdd(idA, idFormA, assignment.workspace_w1, assignment.session_idem, "C4 idem A"),
-      submitAdd(idB, idFormB, assignment.workspace_w1, assignment.session_idem, "C4 idem B")
+    // Fire both clicks in the same tick so membership exclusion cannot clear the second
+    // select before its submit is observed.
+    const sinceA = await harnessEventCount(idA);
+    const sinceB = await harnessEventCount(idB);
+    const submitA = idFormA.locator("ion-button[data-action-id='botster_workspaces.add_session']").first();
+    const submitB = idFormB.locator("ion-button[data-action-id='botster_workspaces.add_session']").first();
+    const formNodeA = await idFormA.getAttribute("data-ui-node-id");
+    const formNodeB = await idFormB.getAttribute("data-ui-node-id");
+    await Promise.all([submitA.click(), submitB.click()]);
+    const waitRequest = async (page, since, formNodeId, label) => {
+      try {
+        return await page.waitForFunction(
+          ({ sinceIndex, nodeId, workspace, session }) => {
+            const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
+              const request = candidate.payload?.request;
+              if (
+                candidate.kind !== "daemon_request" ||
+                candidate.payload?.type !== "plugin_surface_action" ||
+                request?.action_id !== "botster_workspaces.add_session"
+              ) return false;
+              if (nodeId && request?.node_id && request.node_id !== nodeId) return false;
+              const values = request.values ?? {};
+              const resolved = values.session_id
+                || values.session_id_advanced
+                || values["botster-workspaces-add-session-id"]
+                || values["botster-workspaces-add-session-id-advanced"];
+              const workspaceValue = values.workspace_id || values["botster-workspaces-add-workspace-id"];
+              if (workspaceValue && workspaceValue !== workspace) return false;
+              if (resolved && resolved !== session) return false;
+              return Boolean(request.request_id);
+            });
+            return entry?.payload?.request?.request_id ?? null;
+          },
+          {
+            sinceIndex: since,
+            nodeId: formNodeId,
+            workspace: assignment.workspace_w1,
+            session: assignment.session_idem
+          },
+          { timeout: 20_000 }
+        ).then((handle) => handle.jsonValue());
+      } catch (error) {
+        throw new Error(`${label}: ${error.message}`);
+      }
+    };
+    const waitResult = async (page, since, requestId, label) => page.waitForFunction(
+      ({ sinceIndex, expectedRequestId }) => {
+        const entry = (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(sinceIndex).find((candidate) => {
+          if (candidate.kind === "hub_frame" && candidate.payload?.kind === "action_result") {
+            const payload = candidate.payload.payload ?? {};
+            const rid = payload.request_id || payload.result?.plugin_action_result?.request_id;
+            return rid === expectedRequestId;
+          }
+          return false;
+        });
+        return entry ? (entry.payload?.payload ?? entry.payload) : null;
+      },
+      { sinceIndex: since, expectedRequestId: requestId },
+      { timeout: 30_000 }
+    ).then((handle) => handle.jsonValue()).catch((error) => {
+      throw new Error(`${label}: ${error.message}`);
+    });
+    const requestIds = await Promise.all([
+      waitRequest(idA, sinceA, formNodeA, "C4 request A"),
+      waitRequest(idB, sinceB, formNodeB, "C4 request B")
     ]);
-    const idemFulfilled = idemResults
-      .filter((entry) => entry.status === "fulfilled")
-      .map((entry) => entry.value);
-    if (idemFulfilled.length < 2) {
-      throw new Error(`C4 expected two correlated UI results; got ${JSON.stringify(idemResults)}`);
+    if (new Set(requestIds).size !== 2) {
+      throw new Error(`C4 request_ids were not distinct: ${JSON.stringify(requestIds)}`);
     }
-    if (new Set(idemFulfilled.map((entry) => entry.request_id)).size !== 2) {
-      throw new Error("C4 request_ids were not distinct");
-    }
+    const results = await Promise.all([
+      waitResult(idA, sinceA, requestIds[0], "C4 result A").then((result) => ({
+        request_id: requestIds[0],
+        workspace_id: assignment.workspace_w1,
+        session_uuid: assignment.session_idem,
+        node_id: formNodeA,
+        action_id: "botster_workspaces.add_session",
+        result
+      })),
+      waitResult(idB, sinceB, requestIds[1], "C4 result B").then((result) => ({
+        request_id: requestIds[1],
+        workspace_id: assignment.workspace_w1,
+        session_uuid: assignment.session_idem,
+        node_id: formNodeB,
+        action_id: "botster_workspaces.add_session",
+        result
+      }))
+    ]);
     summary.lanes.c4 = {
       participants: "dual_browser_same_workspace_select_before_reconcile",
-      results: idemFulfilled
+      results
     };
 
     // ---- C5: historical advanced path for intentionally absent session ----

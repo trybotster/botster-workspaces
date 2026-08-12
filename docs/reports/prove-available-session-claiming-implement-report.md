@@ -12,53 +12,47 @@
 | PR | https://github.com/trybotster/botster-workspaces/pull/18 |
 | Approved plan | `docs/plans/prove-available-session-claiming-across-hub-web-tui.md` (v4) |
 | Runtime-teardown class | **Does not apply** |
-| Functional HEAD | `406935cc164043fe0435271cf8df1c673a60a45f` |
-| Report HEAD | (this commit) |
+| Workspaces HEAD | (this report commit) |
+| TUI claim pin | `96823e0b9c53a1957a7d7ab376b005a41dcc358f` (held-open lifecycle claim driver) |
 
-## Review revisit (sequence 19) — open findings map
+## Merge-block revisit (post-Verify)
 
-| Finding | Resolution |
+Verify approved at `32d34a1`, then direct merge blocked. This Implement pass addresses both blockers.
+
+| Blocker | Resolution |
 | --- | --- |
-| `finding_1786557814_874424` C6a records offline state but does not require it | Driver fails unless `offline_at_peer_claim.channel_still_closed` is true after peer claim. Requires exact `webrtc_data_channel` closed event (no lifecycle heuristic). Parent asserts both. Recovery baseline and exact ready correlation retained. |
-| `finding_1786557814_865834` PR still links sequence-15 evidence | PR test plan updated to reviewfix19 evidence and current heads. |
-
-## Prior reviews — resolved
-
-Sequence 17 (offline order, real ready correlation, spawn_point label exclusion), sequence 15, sequence 13, and sequence 10 findings remain resolved.
+| `git merge-tree` conflict in `test/plugin_runtime_test.lua` vs main `7db06a6` | Merged `origin/main`; kept structured `session_already_owned` action-error coverage; wrapped late fixtures for Lua 200-local limit; aligned smoke with main’s non-UUID session-id validation and `Historical session ID` label. |
+| Plan C2.5 TUI held-open lifecycle | TUI claim driver emits `lifecycle_live_update` after `option_present` (shutdown session; option projection changes; form not reopened; zero `PluginSurfaceRender` delta). Parent `parse_tui_claim_evidence!` requires it. Label live-update only when Hub supplies dedicated label. |
 
 ## Playbooks / notes applied
 
 1. [[implementer-playbook]]
 2. [[botster-implementer-playbook]]
 3. [[botster-workspaces-playbook]]
-4. [[project-pipelines-playbook]] (gate/artifact handoff only)
-5. Plan v4 acceptance matrix for C1–C6 and typed conflict
+4. [[project-pipelines-playbook]] (gate/artifact handoff)
+5. Plan v4 product decision 8 (held-open label + lifecycle on Web and TUI)
 
 ## Files changed (this revisit)
 
 | Path | Role |
 | --- | --- |
-| `script/claim_stack_web_driver.mjs` | Hard-fail C6a when channel reopens before peer-claim proof; exact `webrtc_data_channel` closed only |
-| `script/claim_stack_acceptance` | Assert `offline_at_peer_claim.channel_still_closed` and exact closed kind |
+| `test/plugin_runtime_test.lua` | Merge resolution; typed conflict action-error tests; local-limit wrap |
+| `script/claim_stack_acceptance` | Require TUI `lifecycle_live_update` (C2.5) |
+| `script/hub_acceptance_smoke` | Align with main advanced label + blank-id validation |
 | `docs/reports/...implement-report.md` | This report |
+| **TUI** `96823e0` (separate repo branch) | Claim driver held-open lifecycle proof + process-wide session projection |
 
 ## Ownership boundaries
 
-- Workspaces owns package claim semantics, parent claim-stack harness, and surface projection authoring.
-- Web/TUI/Hub product code not edited in this worktree.
+- Workspaces owns package semantics, parent claim-stack, and merge resolution.
+- TUI claim-driver lifecycle stage is a TUI consumer seam (`project-pipelines/claim-held-open-lifecycle` @ `96823e0`); consumed via pin, not edited inside Workspaces product code.
 
-## Cross-repo dependencies
+## Cross-repo routing
 
-| Ticket | Status |
+| Item | Status |
 | --- | --- |
-| Prior Hub/Web/TUI/Workspaces deps | closed |
-| `ticket_1786518263_839128` Web frame-drop | closed |
-| `ticket_1786529885_807584` TUI shared-Hub claim | closed at `d40f28f9de2b621e50367c0f014880429eddedde` |
-
-## Deviations
-
-1. Hub `/session` entities still omit dedicated `label` and `spawn_point` on the current Hub pin.
-2. Web `hub_frame` entity_snapshot projections omit wire `subscription_id`; correlation uses `webrtc_entity_subscription` ready events.
+| Prior Hub/Web/TUI deps | closed |
+| TUI claim driver held-open lifecycle | shipped on branch pin `96823e0` (PR: botster-tui claim-held-open-lifecycle) |
 
 ## Tests and proof
 
@@ -66,26 +60,27 @@ Sequence 17 (offline order, real ready correlation, spawn_point label exclusion)
 script/test
 # ok
 
-script/claim_stack_acceptance /private/tmp/claim-stack-pins-12563/inputs-reviewfix13.json EVIDENCE_DIR
-# script/claim_stack_acceptance: ok
-# evidence: /private/tmp/claim-stack-evidence-reviewfix19-1786557883
+git merge-tree --write-tree origin/main HEAD
+# clean
+
+script/claim_stack_acceptance … EVIDENCE_DIR
+# ok evidence=/private/tmp/claim-stack-evidence-mergefix-1786559692
 # status=passed
 ```
 
-| Lane / check | Result |
+| Check | Result |
 | --- | --- |
-| C1 live appear + session_type + lifecycle | passed |
-| C2 TUI shared-Hub keyboard claim | passed |
-| C3/C4/C5 | passed |
-| C6a exact closed + channel_still_closed + S2 held + ready pairs + zero stale | passed |
-| C6b arm-before-held-claim + ready pairs + zero stale | passed |
-| Supporting Web/TUI lifecycle | passed |
+| C1 Web held-open lifecycle | passed |
+| C2 TUI keyboard claim + **C2.5 lifecycle_live_update** (reopened=false) | passed |
+| C3–C6b | passed |
+| merge-tree vs main | clean |
 
 ## Residual risk
 
-- C6a offline window still depends on prepare-first peer claim completing before recon reconnects; hard fail if channel reopens first (correct fail-closed).
+- TUI pin is a branch SHA ahead of TUI `main` until the claim-held-open-lifecycle PR merges; claim-stack pins that exact revision + binary digest.
+- Hub still omits dedicated session `label` / `spawn_point` on the claim-stack Hub pin; label_live_update stays false when absent.
 
 ## Missing vault guidance
 
 - Parent multi-client claim campaign pattern
-- Web hub_frame entity projections strip wire subscription correlation; harness ready events are the durable parent claim-stack correlation surface
+- TUI claim-driver held-open lifecycle stage for Available sessions

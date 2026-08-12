@@ -1178,130 +1178,287 @@ assert_eq(#spawn_calls, spawn_call_count, "delete never invokes Hub spawn or lif
 assert_eq(create({ name = "Disposable grouping" }).ok, true, "delete releases name immediately")
 
 
--- Membership producer matrix needs a valid workspace_state after action fixtures.
--- Reset only the workspace record while preserving durable membership seq continuity
--- where keys still exist; rebuild a clean empty workspace store for these checks.
-database.workspace_state = {
-  schema_version = 1,
-  revision = (database.workspace_state and database.workspace_state.revision) or 1,
-  payload = {
-    next_workspace = 100,
-    next_timestamp = 100,
-    workspaces = {},
-  },
-}
--- Membership producer matrix: multi-delete range, CAS conflict silence, provider seq,
--- post-reload first publish, and failed-batch silence.
-local multi_ws = create({ name = "Multi delete source" })
-assert_eq(multi_ws.ok, true, "multi-delete workspace creates")
-local multi_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-local multi_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-assert_eq(add_session({ workspace_id = multi_ws.workspace.id, session_id = multi_b }).ok, true, "multi seed b")
-assert_eq(add_session({ workspace_id = multi_ws.workspace.id, session_id = multi_a }).ok, true, "multi seed a")
-local seq_before_delete = database["membership_entity_seq"].payload.next_seq
-local publish_before_delete = #publish_calls
-local batch_before_delete = batch_calls
-local deleted_multi = delete({ id = multi_ws.workspace.id })
-assert_eq(deleted_multi.ok, true, "multi-membership delete succeeds")
-assert_eq(batch_calls, batch_before_delete + 1, "multi-delete uses one batch")
-assert_eq(database["membership:" .. multi_a], nil, "multi-delete clears membership a")
-assert_eq(database["membership:" .. multi_b], nil, "multi-delete clears membership b")
-assert_eq(
-  database["membership_entity_seq"].payload.next_seq,
-  seq_before_delete + 2,
-  "multi-delete range-reserves N=2 consecutive seqs"
-)
-assert_eq(#publish_calls, publish_before_delete + 2, "multi-delete publishes N remove frames")
-local remove_a = publish_calls[publish_before_delete + 1]
-local remove_b = publish_calls[publish_before_delete + 2]
-assert_eq(remove_a.type, "entity_remove", "first multi-delete frame is remove")
-assert_eq(remove_b.type, "entity_remove", "second multi-delete frame is remove")
-assert_eq(remove_a.id, multi_a, "multi-delete removes in ascending session_uuid order first")
-assert_eq(remove_b.id, multi_b, "multi-delete removes in ascending session_uuid order second")
-assert_eq(remove_a.snapshot_seq, seq_before_delete + 1, "multi-delete first reserved seq")
-assert_eq(remove_b.snapshot_seq, seq_before_delete + 2, "multi-delete second reserved seq")
 
-local silence_ws = create({ name = "Batch silence" })
-assert_eq(add_session({
-  workspace_id = silence_ws.workspace.id,
-  session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-}).ok, true, "silence seed claim")
-local seq_before_fail = database["membership_entity_seq"].payload.next_seq
-local publish_before_fail = #publish_calls
-fail_next_batch = true
-local failed_remove = remove_session({
-  workspace_id = silence_ws.workspace.id,
-  session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-})
-assert_eq(failed_remove.ok, false, "failed batch remove fails closed")
-assert_eq(failed_remove.error.code, "persist_failed", "failed batch is typed persist_failed")
-assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_fail, "failed batch does not advance seq")
-assert_eq(#publish_calls, publish_before_fail, "failed batch publishes no frames")
-assert_true(
-  database["membership:cccccccc-cccc-4ccc-8ccc-cccccccccccc"] ~= nil,
-  "failed batch leaves membership key intact"
-)
+local function run_membership_producer_matrix_tests()
+  -- Membership producer matrix needs a valid workspace_state after action fixtures.
+  database.workspace_state = {
+    schema_version = 1,
+    revision = (database.workspace_state and database.workspace_state.revision) or 1,
+    payload = {
+      next_workspace = 100,
+      next_timestamp = 100,
+      workspaces = {},
+    },
+  }
 
-local cas_ws_a = create({ name = "CAS owner A" })
-local cas_ws_b = create({ name = "CAS owner B" })
-local cas_session = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-local seq_before_cas = database["membership_entity_seq"].payload.next_seq
-local publish_before_cas = #publish_calls
-batch_conflict_once = true
-local cas_first = add_session({ workspace_id = cas_ws_a.workspace.id, session_id = cas_session })
-assert_eq(cas_first.ok, true, "CAS retry claim eventually succeeds")
-assert_eq(database["membership:" .. cas_session].payload.workspace_id, cas_ws_a.workspace.id, "CAS winner owns session")
-assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_cas + 1, "CAS winner advances seq once")
-assert_eq(#publish_calls, publish_before_cas + 1, "CAS winner publishes exactly once")
-local cas_loser = add_session({ workspace_id = cas_ws_b.workspace.id, session_id = cas_session })
-assert_eq(cas_loser.error.code, "session_already_owned", "CAS loser is session_already_owned")
-assert_eq(#publish_calls, publish_before_cas + 1, "CAS loser publishes nothing")
+  local multi_ws = create({ name = "Multi delete source" })
+  assert_eq(multi_ws.ok, true, "multi-delete workspace creates")
+  local multi_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  local multi_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  assert_eq(add_session({ workspace_id = multi_ws.workspace.id, session_id = multi_b }).ok, true, "multi seed b")
+  assert_eq(add_session({ workspace_id = multi_ws.workspace.id, session_id = multi_a }).ok, true, "multi seed a")
+  local seq_before_delete = database["membership_entity_seq"].payload.next_seq
+  local publish_before_delete = #publish_calls
+  local batch_before_delete = batch_calls
+  local deleted_multi = delete({ id = multi_ws.workspace.id })
+  assert_eq(deleted_multi.ok, true, "multi-membership delete succeeds")
+  assert_eq(batch_calls, batch_before_delete + 1, "multi-delete uses one batch")
+  assert_eq(database["membership:" .. multi_a], nil, "multi-delete clears membership a")
+  assert_eq(database["membership:" .. multi_b], nil, "multi-delete clears membership b")
+  assert_eq(
+    database["membership_entity_seq"].payload.next_seq,
+    seq_before_delete + 2,
+    "multi-delete range-reserves N=2 consecutive seqs"
+  )
+  assert_eq(#publish_calls, publish_before_delete + 2, "multi-delete publishes N remove frames")
+  local remove_a = publish_calls[publish_before_delete + 1]
+  local remove_b = publish_calls[publish_before_delete + 2]
+  assert_eq(remove_a.type, "entity_remove", "first multi-delete frame is remove")
+  assert_eq(remove_b.type, "entity_remove", "second multi-delete frame is remove")
+  assert_eq(remove_a.id, multi_a, "multi-delete removes in ascending session_uuid order first")
+  assert_eq(remove_b.id, multi_b, "multi-delete removes in ascending session_uuid order second")
+  assert_eq(remove_a.snapshot_seq, seq_before_delete + 1, "multi-delete first reserved seq")
+  assert_eq(remove_b.snapshot_seq, seq_before_delete + 2, "multi-delete second reserved seq")
 
-local membership_provider = registered_handler(spec, "membership_entity_provider")
-assert_eq(membership_provider.kind, "entity_provider", "membership entity_provider is registered")
-assert_eq(membership_provider.descriptor_id, "botster-workspaces.membership", "membership provider family is exact")
-assert_eq(membership_provider.descriptor.entity_type, "botster-workspaces.membership", "membership descriptor entity_type matches")
-assert_eq(membership_provider.descriptor.id_field, "id", "membership provider uses id field")
-local seq_before_provider = database["membership_entity_seq"].payload.next_seq
-local provider_snapshot = membership_provider.call({ subscription_id = "test-sub" })
-assert_eq(provider_snapshot.type, "entity_snapshot", "membership provider returns entity_snapshot")
-assert_eq(provider_snapshot.entity_type, "botster-workspaces.membership", "membership snapshot family matches")
-assert_eq(provider_snapshot.snapshot_seq, seq_before_provider + 1, "provider allocates one durable seq")
-assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_provider + 1, "provider CAS advances next_seq")
-assert_true(#provider_snapshot.items >= 1, "membership snapshot includes durable memberships")
-for _, item in ipairs(provider_snapshot.items) do
-  assert_keys(item, { "id", "session_uuid", "workspace_id" }, "membership row shape is exact")
-  assert_eq(item.id, item.session_uuid, "membership id equals session_uuid")
-  assert_eq(item.lifecycle, nil, "membership snapshot omits Hub lifecycle")
-  assert_eq(item.label, nil, "membership snapshot omits Hub label")
-  assert_eq(item.spawn_point, nil, "membership snapshot omits Hub spawn_point")
+  local silence_ws = create({ name = "Batch silence" })
+  assert_eq(add_session({
+    workspace_id = silence_ws.workspace.id,
+    session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  }).ok, true, "silence seed claim")
+  local seq_before_fail = database["membership_entity_seq"].payload.next_seq
+  local publish_before_fail = #publish_calls
+  fail_next_batch = true
+  local failed_remove = remove_session({
+    workspace_id = silence_ws.workspace.id,
+    session_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  })
+  assert_eq(failed_remove.ok, false, "failed batch remove fails closed")
+  assert_eq(failed_remove.error.code, "persist_failed", "failed batch is typed persist_failed")
+  assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_fail, "failed batch does not advance seq")
+  assert_eq(#publish_calls, publish_before_fail, "failed batch publishes no frames")
+  assert_true(
+    database["membership:cccccccc-cccc-4ccc-8ccc-cccccccccccc"] ~= nil,
+    "failed batch leaves membership key intact"
+  )
+
+  local cas_ws_a = create({ name = "CAS owner A" })
+  local cas_ws_b = create({ name = "CAS owner B" })
+  local cas_session = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  local seq_before_cas = database["membership_entity_seq"].payload.next_seq
+  local publish_before_cas = #publish_calls
+  batch_conflict_once = true
+  local cas_first = add_session({ workspace_id = cas_ws_a.workspace.id, session_id = cas_session })
+  assert_eq(cas_first.ok, true, "CAS retry claim eventually succeeds")
+  assert_eq(database["membership:" .. cas_session].payload.workspace_id, cas_ws_a.workspace.id, "CAS winner owns session")
+  assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_cas + 1, "CAS winner advances seq once")
+  assert_eq(#publish_calls, publish_before_cas + 1, "CAS winner publishes exactly once")
+  local cas_loser = add_session({ workspace_id = cas_ws_b.workspace.id, session_id = cas_session })
+  assert_eq(cas_loser.error.code, "session_already_owned", "CAS loser is session_already_owned")
+  assert_eq(#publish_calls, publish_before_cas + 1, "CAS loser publishes nothing")
+
+  local membership_provider = registered_handler(spec, "membership_entity_provider")
+  assert_eq(membership_provider.kind, "entity_provider", "membership entity_provider is registered")
+  assert_eq(membership_provider.descriptor_id, "botster-workspaces.membership", "membership provider family is exact")
+  assert_eq(membership_provider.descriptor.entity_type, "botster-workspaces.membership", "membership descriptor entity_type matches")
+  assert_eq(membership_provider.descriptor.id_field, "id", "membership provider uses id field")
+  local seq_before_provider = database["membership_entity_seq"].payload.next_seq
+  local provider_snapshot = membership_provider.call({ subscription_id = "test-sub" })
+  assert_eq(provider_snapshot.type, "entity_snapshot", "membership provider returns entity_snapshot")
+  assert_eq(provider_snapshot.entity_type, "botster-workspaces.membership", "membership snapshot family matches")
+  assert_eq(provider_snapshot.snapshot_seq, seq_before_provider + 1, "provider allocates one durable seq")
+  assert_eq(database["membership_entity_seq"].payload.next_seq, seq_before_provider + 1, "provider CAS advances next_seq")
+  assert_true(#provider_snapshot.items >= 1, "membership snapshot includes durable memberships")
+  for _, item in ipairs(provider_snapshot.items) do
+    assert_keys(item, { "id", "session_uuid", "workspace_id" }, "membership row shape is exact")
+    assert_eq(item.id, item.session_uuid, "membership id equals session_uuid")
+    assert_eq(item.lifecycle, nil, "membership snapshot omits Hub lifecycle")
+    assert_eq(item.label, nil, "membership snapshot omits Hub label")
+    assert_eq(item.spawn_point, nil, "membership snapshot omits Hub spawn_point")
+  end
+
+  local durable_seq_after_provider = database["membership_entity_seq"].payload.next_seq
+  local reloaded_spec = dofile("plugin.lua")
+  local reloaded_add = tool(reloaded_spec, "botster_workspaces.add_session")
+  local reloaded_ws = tool(reloaded_spec, "botster_workspaces.create")({ name = "Post reload" })
+  local reload_session = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  local publish_before_reload = #publish_calls
+  local reloaded_claim = reloaded_add({
+    workspace_id = reloaded_ws.workspace.id,
+    session_id = reload_session,
+  })
+  assert_eq(reloaded_claim.ok, true, "first post-reload claim succeeds")
+  assert_eq(
+    database["membership_entity_seq"].payload.next_seq,
+    durable_seq_after_provider + 1,
+    "post-reload claim continues durable sequence"
+  )
+  assert_eq(#publish_calls, publish_before_reload + 1, "post-reload claim publishes once")
+  assert_eq(
+    publish_calls[#publish_calls].snapshot_seq,
+    durable_seq_after_provider + 1,
+    "post-reload publish uses next durable seq without stale/duplicate"
+  )
+  assert_eq(publish_calls[#publish_calls].id, reload_session, "post-reload publish id matches claim")
 end
 
--- Simulated package reload: re-dofile keeps durable membership_entity_seq floor.
-local durable_seq_after_provider = database["membership_entity_seq"].payload.next_seq
-local reloaded_spec = dofile("plugin.lua")
-local reloaded_add = tool(reloaded_spec, "botster_workspaces.add_session")
-local reloaded_ws = tool(reloaded_spec, "botster_workspaces.create")({ name = "Post reload" })
-local reload_session = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-local publish_before_reload = #publish_calls
-local reloaded_claim = reloaded_add({
-  workspace_id = reloaded_ws.workspace.id,
-  session_id = reload_session,
-})
-assert_eq(reloaded_claim.ok, true, "first post-reload claim succeeds")
-assert_eq(
-  database["membership_entity_seq"].payload.next_seq,
-  durable_seq_after_provider + 1,
-  "post-reload claim continues durable sequence"
-)
-assert_eq(#publish_calls, publish_before_reload + 1, "post-reload claim publishes once")
-assert_eq(
-  publish_calls[#publish_calls].snapshot_seq,
-  durable_seq_after_provider + 1,
-  "post-reload publish uses next durable seq without stale/duplicate"
-)
-assert_eq(publish_calls[#publish_calls].id, reload_session, "post-reload publish id matches claim")
+local function run_review_rework_tests()
+  database.workspace_state = {
+    schema_version = 1,
+    revision = (database.workspace_state and database.workspace_state.revision) or 1,
+    payload = {
+      next_workspace = 200,
+      next_timestamp = 200,
+      workspaces = {},
+    },
+  }
 
+  local fence_ws = create({ name = "Provider fence workspace" })
+  assert_eq(fence_ws.ok, true, "provider fence workspace creates")
+  local fence_session = "f1111111-1111-4111-8111-111111111111"
+  assert_eq(add_session({
+    workspace_id = fence_ws.workspace.id,
+    session_id = fence_session,
+  }).ok, true, "provider fence seed claim")
+  local seq_before_fence = database["membership_entity_seq"].payload.next_seq
+  local fence_list_hits = 0
+  local original_list = botster.capabilities.plugin_db.list
+  botster.capabilities.plugin_db.list = function(request)
+    if request.prefix == "membership:" then
+      fence_list_hits = fence_list_hits + 1
+      if fence_list_hits == 1 then
+        local current = database["membership_entity_seq"]
+        local rev = current and (current.revision or 1) or 0
+        local last = current and current.payload and current.payload.next_seq or 0
+        apply_set({
+          key = "membership_entity_seq",
+          schema_version = 1,
+          expected_revision = rev,
+          payload = { next_seq = last + 1 },
+        })
+      end
+    end
+    return original_list(request)
+  end
+  local fenced_provider = registered_handler(spec, "membership_entity_provider")
+  local fenced_snapshot = fenced_provider.call({ subscription_id = "fence-sub" })
+  botster.capabilities.plugin_db.list = original_list
+  assert_eq(fenced_snapshot.type, "entity_snapshot", "fenced provider returns snapshot after concurrent advance")
+  assert_true(fence_list_hits >= 2, "provider retried list after concurrent sequence advance")
+  assert_eq(
+    fenced_snapshot.snapshot_seq,
+    database["membership_entity_seq"].payload.next_seq,
+    "fenced provider snapshot_seq matches durable floor after retry"
+  )
+  assert_true(
+    fenced_snapshot.snapshot_seq > seq_before_fence,
+    "fenced provider still advances past pre-interleave floor"
+  )
+
+  -- Clear membership keys so list_membership_records uses the workspace_state fallback.
+  for key in pairs(database) do
+    if type(key) == "string" and key:sub(1, #"membership:") == "membership:" then
+      database[key] = nil
+    end
+  end
+  local preindex_session = "f2222222-2222-4222-8222-222222222222"
+  local preindex_ws = create({ name = "Preindex remove" })
+  assert_eq(preindex_ws.ok, true, "preindex workspace creates")
+  local state_record = database.workspace_state
+  local payload = copy(state_record.payload)
+  for _, workspace in ipairs(payload.workspaces) do
+    if workspace.id == preindex_ws.workspace.id then
+      workspace.session_refs = { preindex_session }
+      workspace.updated_at = "plugin-clock-preindex"
+    end
+  end
+  database.workspace_state = {
+    schema_version = 1,
+    revision = state_record.revision or 1,
+    payload = payload,
+  }
+  assert_eq(database["membership:" .. preindex_session], nil, "preindex fixture has no membership key")
+  local preindex_provider = registered_handler(spec, "membership_entity_provider")
+  local preindex_snap = preindex_provider.call({ subscription_id = "preindex-sub" })
+  local saw_preindex = false
+  for _, item in ipairs(preindex_snap.items or {}) do
+    if item.session_uuid == preindex_session then
+      saw_preindex = true
+    end
+  end
+  assert_true(saw_preindex, "preindex fallback surfaces session_ref in membership snapshot")
+  local publish_before_preindex_remove = #publish_calls
+  local preindex_remove = remove_session({
+    workspace_id = preindex_ws.workspace.id,
+    session_id = preindex_session,
+  })
+  assert_eq(preindex_remove.ok, true, "preindex remove succeeds without membership key")
+  assert_eq(#publish_calls, publish_before_preindex_remove + 1, "preindex remove publishes entity_remove")
+  assert_eq(publish_calls[#publish_calls].type, "entity_remove", "preindex remove frame type")
+  assert_eq(publish_calls[#publish_calls].id, preindex_session, "preindex remove frame id")
+
+  local multi_pre_a = "f3333333-3333-4333-8333-333333333333"
+  local multi_pre_b = "f4444444-4444-4444-8444-444444444444"
+  local multi_pre_ws = create({ name = "Preindex multi delete" })
+  local multi_state = database.workspace_state
+  local multi_payload = copy(multi_state.payload)
+  for _, workspace in ipairs(multi_payload.workspaces) do
+    if workspace.id == multi_pre_ws.workspace.id then
+      workspace.session_refs = { multi_pre_b, multi_pre_a }
+    end
+  end
+  database.workspace_state = {
+    schema_version = 1,
+    revision = multi_state.revision or 1,
+    payload = multi_payload,
+  }
+  local publish_before_multi_pre = #publish_calls
+  local multi_pre_delete = delete({ id = multi_pre_ws.workspace.id })
+  assert_eq(multi_pre_delete.ok, true, "preindex multi-delete succeeds")
+  assert_eq(#publish_calls, publish_before_multi_pre + 2, "preindex multi-delete publishes two removes")
+  assert_eq(publish_calls[publish_before_multi_pre + 1].id, multi_pre_a, "preindex multi-delete order first")
+  assert_eq(publish_calls[publish_before_multi_pre + 2].id, multi_pre_b, "preindex multi-delete order second")
+
+  local retry_ws = create({ name = "Publish retry" })
+  local retry_session = "f5555555-5555-4555-8555-555555555555"
+  local original_publish = botster.entity_publish
+  local publish_attempts = 0
+  botster.entity_publish = function(frame)
+    publish_attempts = publish_attempts + 1
+    if publish_attempts == 1 then
+      return { ok = false, status = "stale_sequence", last_accepted_seq = 0, high_water_seq = 0 }
+    end
+    return original_publish(frame)
+  end
+  local retry_claim = add_session({
+    workspace_id = retry_ws.workspace.id,
+    session_id = retry_session,
+  })
+  botster.entity_publish = original_publish
+  assert_eq(retry_claim.ok, true, "claim succeeds even when first publish is rejected")
+  assert_eq(publish_attempts, 2, "rejected publish is retried once")
+  assert_eq(retry_claim.membership_delivery, "published", "retry recovers delivery")
+  assert_eq(retry_claim.membership_publish[1].status, "accepted", "retry result is accepted")
+
+  local fail_ws = create({ name = "Publish degraded" })
+  local fail_session = "f6666666-6666-4666-8666-666666666666"
+  publish_attempts = 0
+  botster.entity_publish = function(_frame)
+    publish_attempts = publish_attempts + 1
+    return { ok = false, status = "stale_sequence", last_accepted_seq = 0, high_water_seq = 0 }
+  end
+  local degraded_claim = add_session({
+    workspace_id = fail_ws.workspace.id,
+    session_id = fail_session,
+  })
+  botster.entity_publish = original_publish
+  assert_eq(degraded_claim.ok, true, "durable claim still succeeds when publish remains rejected")
+  assert_eq(publish_attempts, 2, "degraded path still retries once")
+  assert_eq(degraded_claim.membership_delivery, "degraded", "unrecovered publish reports degraded delivery")
+  assert_true(database["membership:" .. fail_session] ~= nil, "degraded path keeps membership key committed")
+end
+
+run_membership_producer_matrix_tests()
+run_review_rework_tests()
 
 
 database.workspace_state = {

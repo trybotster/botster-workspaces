@@ -423,14 +423,36 @@ local function membership_publish_frame(frame)
   return result
 end
 
+local function membership_publish_result_ok(result)
+  if type(result) ~= "table" then
+    return false
+  end
+  local status = result.status
+  if result.ok == true then
+    return status == nil
+      or status == "accepted"
+      or status == "pending_gap"
+  end
+  return status == "accepted" or status == "pending_gap"
+end
+
 -- Publish pre-reserved frames after a successful membership batch. Never allocates
--- new sequence values here; retry uses the same reserved seqs only.
+-- new sequence values here. Each failed frame is retried once with the same reserved
+-- sequence; unrecovered delivery is reported as degraded so callers stay truthful.
 local function publish_membership_frames(frames)
   local results = {}
+  local degraded = false
   for _, frame in ipairs(frames or {}) do
-    results[#results + 1] = membership_publish_frame(frame)
+    local result = membership_publish_frame(frame)
+    if not membership_publish_result_ok(result) then
+      result = membership_publish_frame(frame)
+    end
+    if not membership_publish_result_ok(result) then
+      degraded = true
+    end
+    results[#results + 1] = result
   end
-  return results
+  return results, degraded
 end
 
 local function build_reserved_frames(last_seq, draft_frames)
@@ -469,10 +491,11 @@ local function commit_membership_batch(mutations, draft_frames)
     return persist_error, nil, nil
   end
   local publish_results = {}
+  local publish_degraded = false
   if n > 0 then
-    publish_results = publish_membership_frames(reserved)
+    publish_results, publish_degraded = publish_membership_frames(reserved)
   end
-  return nil, reserved, publish_results
+  return nil, reserved, publish_results, publish_degraded
 end
 
 local function claim_session_batch(workspace_id, session_id, state, state_revision, draft_frames)
@@ -718,11 +741,13 @@ local function delete_workspace(arguments)
           key = membership_key(session_id),
           expected_revision = membership_revision,
         }
-        draft_frames[#draft_frames + 1] = {
-          type = "entity_remove",
-          id = session_id,
-        }
       end
+      -- Always publish remove for every released session_ref, including pre-index
+      -- rows that only existed via the workspace_state fallback snapshot path.
+      draft_frames[#draft_frames + 1] = {
+        type = "entity_remove",
+        id = session_id,
+      }
     end
     table.remove(state.workspaces, index)
     mutations[#mutations + 1] = {
@@ -846,25 +871,25 @@ local function add_session(arguments)
 
     workspace.session_refs[#workspace.session_refs + 1] = session_id
     workspace.updated_at = next_timestamp(state)
-    local persist_error, reserved_frames, publish_results = claim_session_batch(workspace_id, session_id, state, state_revision)
+    local persist_error, reserved_frames, publish_results, publish_degraded =
+      claim_session_batch(workspace_id, session_id, state, state_revision)
     if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
       return attempt()
     end
     if persist_error then
       return persist_error
     end
+    local reserved_seqs = {}
+    for _, frame in ipairs(reserved_frames or {}) do
+      reserved_seqs[#reserved_seqs + 1] = frame.snapshot_seq
+    end
     return {
       ok = true,
       workspace = copy(workspace),
       entity = read_model(workspace),
       membership_publish = publish_results,
-      membership_reserved_seqs = reserved_frames and (function()
-        local seqs = {}
-        for _, frame in ipairs(reserved_frames) do
-          seqs[#seqs + 1] = frame.snapshot_seq
-        end
-        return seqs
-      end)() or {},
+      membership_reserved_seqs = reserved_seqs,
+      membership_delivery = publish_degraded and "degraded" or "published",
     }
   end
 
@@ -1036,26 +1061,32 @@ local function remove_session(arguments)
         payload = state,
       },
     }
-    local draft_frames = {}
+    local draft_frames = {
+      {
+        type = "entity_remove",
+        id = session_id,
+      },
+    }
     if membership then
       mutations[#mutations + 1] = {
         operation = "delete",
         key = membership_key(session_id),
         expected_revision = membership_revision,
       }
-      draft_frames[#draft_frames + 1] = {
-        type = "entity_remove",
-        id = session_id,
-      }
     end
-    local persist_error = select(1, commit_membership_batch(mutations, draft_frames))
+    local persist_error, _, publish_results, publish_degraded = commit_membership_batch(mutations, draft_frames)
     if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
       return attempt()
     end
     if persist_error then
       return persist_error
     end
-    return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+    local result = { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+    if publish_results then
+      result.membership_publish = publish_results
+      result.membership_delivery = publish_degraded and "degraded" or "published"
+    end
+    return result
   end
 
   return attempt()
@@ -1227,16 +1258,25 @@ local function membership_items_for_snapshot(records)
 end
 
 -- Provider snapshots allocate exactly one durable sequence value via their own
--- CAS, separate from mutator range reservation.
+-- CAS, separate from mutator range reservation. Sequence revision is read first
+-- so a concurrent mutator that advances the floor causes CAS failure and a full
+-- retry rather than a stale row set published at a newer sequence.
 local function membership_entity_provider(_request)
   local function attempt()
+    local last_seq, seq_revision, seq_error = get_membership_seq()
+    if seq_error then
+      return seq_error
+    end
     local records, list_error = list_membership_records()
     if list_error then
       return list_error
     end
-    local last_seq, seq_revision, seq_error = get_membership_seq()
-    if seq_error then
-      return seq_error
+    local current_seq, current_revision, current_error = get_membership_seq()
+    if current_error then
+      return current_error
+    end
+    if current_seq ~= last_seq or current_revision ~= seq_revision then
+      return attempt()
     end
     local snapshot_seq = last_seq + 1
     local persist_error = batch_mutations({

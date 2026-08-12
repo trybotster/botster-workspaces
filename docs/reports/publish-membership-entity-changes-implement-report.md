@@ -8,7 +8,7 @@
 | Run | `run_1786507239_475224` |
 | Target repository | `botster-workspaces` |
 | target_id | `tgt_71266a8d976d4535902ffed09c18a7ba` |
-| Path authority | `list_spawn_targets` → `/Users/jasonconigliari/Projects/botster-workspaces` |
+| Path authority | `list_spawn_targets` → repository `botster-workspaces` / `tgt_71266a8d976d4535902ffed09c18a7ba` |
 | Worktree | this pipeline worktree on `project-pipelines/ticket_1786507221_760227` |
 | Plan revision | 4 (approved `review_1786508655_142687`) |
 | Working base | `main@3ec366abd1fd86dcade81b7a14470dcacfcbd504` (main-first; not PR #16 stack) |
@@ -109,3 +109,12 @@ Package matrix also covers multi-membership delete N-range, move single upsert, 
 
 Same gaps recorded in the plan: producer vs visible-picker split; durable seq range in same batch; main-first extraction when consumer PR depends on producer; smoke conf tracking Hub pin.
 
+## Review rework (`review_1786509999_267460`)
+
+| Finding | Fix |
+| --- | --- |
+| Provider row/seq race | Provider reads seq revision first, lists rows, re-checks revision, CAS-reserves against the original revision; full retry on change/conflict |
+| Pre-index fallback removals | `remove_session` / `delete_workspace` always reserve and publish `entity_remove` for every released `session_ref`, even without a membership key |
+| Silent publish failure | Post-commit publish retries each reserved frame once; mutators report `membership_delivery=degraded` when recovery fails |
+| Absolute path in report | Replaced with repository name + target_id |
+| Strict diff EOF | Trailing blank line removed |

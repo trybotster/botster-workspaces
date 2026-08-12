@@ -360,11 +360,18 @@ def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
   assert(join, "TUI claim evidence omitted membership_join")
   assert(join.dig("payload", "workspace_id") == workspace_id, "TUI membership_join workspace mismatch")
   assert(join.dig("payload", "session_uuid") == session_uuid, "TUI membership_join session mismatch")
-  # Plan C2.5: held-open lifecycle patch on the same open picker (no reopen).
-  lifecycle = records.find { |row| row["kind"] == "lifecycle_live_update" }
-  assert(lifecycle, "TUI claim evidence omitted lifecycle_live_update (held-open C2.5)")
+  # Plan C2.5: held-open lifecycle patch on the same open picker (no reopen / no surface refresh).
+  option_present_idx = records.index { |row| row["kind"] == "option_present" }
+  assert(!option_present_idx.nil?, "TUI claim evidence omitted option_present")
+  lifecycle_idx = records.index { |row| row["kind"] == "lifecycle_live_update" }
+  assert(!lifecycle_idx.nil?, "TUI claim evidence omitted lifecycle_live_update (held-open C2.5)")
+  lifecycle = records[lifecycle_idx]
   assert(lifecycle.dig("payload", "session_uuid") == session_uuid, "TUI lifecycle_live_update session mismatch")
   assert(lifecycle.dig("payload", "reopened") == false, "TUI lifecycle_live_update must not reopen the Add form")
+  assert(
+    lifecycle.dig("payload", "surface_render_delta") == 0,
+    "TUI lifecycle_live_update must prove zero PluginSurfaceRender delta: #{lifecycle.inspect}"
+  )
   assert(
     lifecycle.dig("payload", "lifecycle_before").to_s != "" &&
       lifecycle.dig("payload", "lifecycle_after").to_s != "" &&
@@ -390,13 +397,20 @@ def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
   assert(complete.dig("payload", "action_id") == "botster_workspaces.add_session", "TUI complete action_id mismatch")
   assert(complete.dig("payload", "session_uuid") == session_uuid, "TUI complete session mismatch")
   assert(complete.dig("payload", "workspace_id") == workspace_id, "TUI complete workspace mismatch")
-  add = records.find do |row|
+  add_idx = records.index do |row|
     row["kind"] == "dispatched_action" && row.dig("payload", "action_id") == "botster_workspaces.add_session"
   end
-  assert(add, "TUI claim evidence omitted dispatched add_session")
+  assert(!add_idx.nil?, "TUI claim evidence omitted dispatched add_session")
+  add = records[add_idx]
   values = add.dig("payload", "values") || {}
   resolved = values["session_id"] || values["session_id_advanced"]
   assert(resolved == session_uuid, "TUI add_session values must carry exact session_uuid: #{values.inspect}")
+  # Ordered held-open form: option_present → lifecycle_live_update → add_session.
+  assert(
+    option_present_idx < lifecycle_idx && lifecycle_idx < add_idx,
+    "TUI C2.5 ordering must be option_present < lifecycle_live_update < add_session: " \
+    "present=#{option_present_idx} lifecycle=#{lifecycle_idx} add=#{add_idx}"
+  )
   summary = records.find { |row| row["kind"] == "request_summary" }
   if summary
     assert(summary.dig("payload", "list_sessions_count").to_i == 0, "TUI claim issued list_sessions")
@@ -405,6 +419,12 @@ def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
     "record_count" => records.length,
     "membership_join" => join.fetch("payload"),
     "lifecycle_live_update" => lifecycle.fetch("payload"),
+    "c2_5_ordering" => {
+      "option_present_index" => option_present_idx,
+      "lifecycle_live_update_index" => lifecycle_idx,
+      "add_session_index" => add_idx,
+      "surface_render_delta" => lifecycle.dig("payload", "surface_render_delta"),
+    },
     "option_excluded" => excluded.fetch("payload"),
     "complete" => complete.fetch("payload"),
     "add_session_request_id" => add.dig("payload", "request_id"),

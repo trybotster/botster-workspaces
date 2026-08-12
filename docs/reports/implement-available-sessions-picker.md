@@ -26,14 +26,16 @@
 | Generic Web/TUI package paths | Web lifecycle + membership-reactive **pass** on `2a41220`; TUI lifecycle **pass** on `abc804e1` |
 | PR 16 not linked | Linked via `project_pipelines_link_pr` (`pr_1786494179_679803`) |
 | Absolute local paths in report | Path-neutral env vars only (`BOTSTER_HUB_BIN`, `BOTSTER_SESSION_WORKER_BIN`, `BOTSTER_WORKSPACES_PACKAGE_PATH`) |
+| Invalid advanced UUID errors attach to picker (`finding_1786515663_804955`) | `resolve_add_session_id` returns value + source field id; `add_session_action` maps `session_id` validation to the active field. Runtime tests assert invalid advanced → `botster-workspaces-add-session-id-advanced` and invalid picker → picker only |
+| PR body marks consumer verification incomplete (`finding_1786515664_588472`) | PR 16 body checklist now marks Web and TUI package lifecycle verification complete with closed pins |
 
 ## Files changed (picker product on producer main)
 
 | Path | Role |
 | --- | --- |
-| `plugin.lua` | entity_options Available sessions + advanced historical UUID; form precedence |
+| `plugin.lua` | entity_options Available sessions + advanced historical UUID; form precedence; active-field validation mapping |
 | `script/hub_acceptance_smoke` | entity_options authoring; empty `items == []`; held-open publish proofs (from main) |
-| `test/plugin_runtime_test.lua` | Picker + advanced precedence |
+| `test/plugin_runtime_test.lua` | Picker + advanced precedence + invalid advanced/picker field_errors |
 | `test/fixtures/workspaces/contract.json` | Picker contract |
 | `README.md` / `docs/workspace-domain.md` | Picker docs |
 | `docs/plans/...` / `docs/reports/...` | Plan + this report |
@@ -98,6 +100,8 @@ BOTSTER_SESSION_WORKER_BIN=<session-worker-debug> \
 
 Workspaces surface → Add existing session → Available sessions (`entity_options` `/session` exclude membership) or advanced historical UUID → `botster_workspaces.add_session` → membership index batch + `entity_publish` upsert → open pickers exclude without surface refresh → remove publishes membership remove and restores option.
 
+Invalid advanced UUID validation attaches field error to `botster-workspaces-add-session-id-advanced`; invalid picker UUID attaches to `botster-workspaces-add-session-id`.
+
 ## Residual risk
 
 - None blocking for Review admission. Web/TUI proofs used explicit closed pins above; continuous main drift may require re-pin later.
@@ -106,5 +110,5 @@ Workspaces surface → Add existing session → Available sessions (`entity_opti
 
 1. First product `entity_options` + membership exclude consumer pattern.
 2. Membership index create-only uniqueness + publish after batch.
-3. Advanced historical UUID precedence.
+3. Advanced historical UUID precedence and active-field validation mapping.
 4. Empty entity_provider items rely on Hub field-exact coercion (not package sentinels).

@@ -1276,6 +1276,53 @@ local both_empty = add_action({
   },
 })
 assert_eq(both_empty.state, "rejected", "both empty is validation_failed")
+assert_true(
+  both_empty.field_errors["botster-workspaces-add-session-id"],
+  "empty selection keys field error to the picker when advanced is empty"
+)
+
+local invalid_advanced = add_action({
+  request_id = "add-invalid-advanced",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.add_session",
+  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
+  values = {
+    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
+    ["botster-workspaces-add-session-id"] = "e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4",
+    ["botster-workspaces-add-session-id-advanced"] = "not-a-uuid",
+  },
+})
+assert_eq(invalid_advanced.state, "rejected", "invalid advanced UUID is validation_failed")
+assert_true(
+  invalid_advanced.field_errors["botster-workspaces-add-session-id-advanced"],
+  "invalid advanced UUID keys field error to the advanced input"
+)
+assert_eq(
+  invalid_advanced.field_errors["botster-workspaces-add-session-id"],
+  nil,
+  "invalid advanced UUID does not attach field error to the normal picker"
+)
+
+local invalid_picker = add_action({
+  request_id = "add-invalid-picker",
+  surface_id = "workspaces",
+  action_id = "botster_workspaces.add_session",
+  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
+  values = {
+    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
+    ["botster-workspaces-add-session-id"] = "also-not-a-uuid",
+  },
+})
+assert_eq(invalid_picker.state, "rejected", "invalid picker UUID is validation_failed")
+assert_true(
+  invalid_picker.field_errors["botster-workspaces-add-session-id"],
+  "invalid picker UUID keys field error to the picker"
+)
+assert_eq(
+  invalid_picker.field_errors["botster-workspaces-add-session-id-advanced"],
+  nil,
+  "invalid picker UUID does not attach field error to the advanced input"
+)
 
 local delete_target = create({ name = "Disposable grouping" })
 local session_to_preserve = "66666666-6666-4666-8666-666666666666"

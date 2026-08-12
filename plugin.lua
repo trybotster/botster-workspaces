@@ -1464,6 +1464,9 @@ local function delete_workspace_action(arguments)
   })
 end
 
+-- Returns the selected session UUID and the form field id that supplied it.
+-- Advanced historical UUID takes precedence when non-empty so validation errors
+-- attach to the active input (picker vs advanced) instead of always the picker.
 local function resolve_add_session_id(arguments)
   local advanced = trim(form_value(
     arguments,
@@ -1471,19 +1474,20 @@ local function resolve_add_session_id(arguments)
     "botster-workspaces-add-session-id-advanced"
   ))
   if advanced then
-    return advanced
+    return advanced, "botster-workspaces-add-session-id-advanced"
   end
-  return trim(form_value(arguments, "session_id", "botster-workspaces-add-session-id"))
+  return trim(form_value(arguments, "session_id", "botster-workspaces-add-session-id")),
+    "botster-workspaces-add-session-id"
 end
 
 local function add_session_action(arguments)
+  local session_id, session_field_id = resolve_add_session_id(arguments)
   return mutation_action(arguments, add_session, {
     workspace_id = form_value(arguments, "workspace_id", "botster-workspaces-add-workspace-id"),
-    session_id = resolve_add_session_id(arguments),
+    session_id = session_id,
   }, true, {
     workspace_id = "botster-workspaces-add-workspace-id",
-    session_id = "botster-workspaces-add-session-id",
-    session_id_advanced = "botster-workspaces-add-session-id-advanced",
+    session_id = session_field_id,
   })
 end
 

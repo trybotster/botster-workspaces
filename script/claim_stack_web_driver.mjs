@@ -416,23 +416,38 @@ async function run() {
     const metadata = await optionMetadata(form, assignment.session_s);
     await selectSession(form, assignment.session_s);
     const c1Claim = await submitAdd(p1, form, assignment.workspace_w1, assignment.session_s, "C1 claim");
-    // Re-open and prove exclusion of claimed session.
+    // Dialog clears on accepted claim; wait for form gone then re-open for exclusion proof.
+    await p1.locator(`form[data-ui-node-id='botster-workspaces-add-form-${assignment.workspace_w1}']`)
+      .waitFor({ state: "detached", timeout: 30_000 })
+      .catch(() => {});
+    // Wait for membership entity frame for the claimed session when available.
+    await p1.waitForFunction(
+      ({ sessionId }) => {
+        const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
+        return events.some((entry) => {
+          const text = JSON.stringify(entry);
+          return text.includes("botster-workspaces.membership") && text.includes(sessionId);
+        });
+      },
+      { sessionId: assignment.session_s },
+      { timeout: 30_000 }
+    ).catch(() => {});
     form = await openAddDialog(p1, assignment.workspace_w1);
-    await p1.waitForTimeout(1000);
-    const afterClaimOptions = await readSelectOptions(form);
-    if (afterClaimOptions.includes(assignment.session_s)) {
-      // Membership fanout may still be in flight; wait deterministically for exclusion.
-      await p1.waitForFunction(
-        ({ formId, sessionId }) => {
-          const options = [...globalThis.document.querySelectorAll(
-            `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
-          )];
-          return !options.some((option) => (option.value ?? option.getAttribute("value")) === sessionId);
-        },
-        { formId: `botster-workspaces-add-form-${assignment.workspace_w1}`, sessionId: assignment.session_s },
-        { timeout: 30_000 }
-      );
-    }
+    // Wait for entity_options projection to settle without the claimed session.
+    await p1.waitForFunction(
+      ({ formId, sessionId }) => {
+        const select = globalThis.document.querySelector(
+          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select`
+        );
+        if (!select) return false;
+        const options = [...globalThis.document.querySelectorAll(
+          `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
+        )];
+        return !options.some((option) => (option.value ?? option.getAttribute("value")) === sessionId);
+      },
+      { formId: `botster-workspaces-add-form-${assignment.workspace_w1}`, sessionId: assignment.session_s },
+      { timeout: 45_000 }
+    );
     const excludedOptions = await readSelectOptions(form);
     if (excludedOptions.includes(assignment.session_s)) {
       throw new Error(`C1: claimed session still present in options: ${JSON.stringify(excludedOptions)}`);

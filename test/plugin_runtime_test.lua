@@ -190,10 +190,37 @@ botster = {
             { session_type_id = "acceptance-package/review", id = "review", label = "Review" },
           }
         end
+        if request.target_id == "tgt_directory" then
+          return {
+            { session_type_id = "acceptance-package/shell", id = "shell", label = "Shell" },
+          }
+        end
         return {}
       end,
+      spawn = function(request)
+        spawn_calls[#spawn_calls + 1] = {
+          path = "spawn",
+          request = copy(request),
+        }
+        if spawn_mode == "throw" then
+          error("injected worker error")
+        end
+        if spawn_mode == "reject" then
+          error(spawn_rejection_message)
+        end
+        return {
+          session_id = next_spawn_uuid,
+          lifecycle = "running",
+          session_type_id = request.session_type_id,
+          context_id = "ctx-" .. next_spawn_uuid,
+          context_keys = { "workspace_id" },
+        }
+      end,
       ensure_worktree_and_spawn = function(request)
-        spawn_calls[#spawn_calls + 1] = copy(request)
+        spawn_calls[#spawn_calls + 1] = {
+          path = "ensure_worktree_and_spawn",
+          request = copy(request),
+        }
         if spawn_mode == "throw" then
           error("injected worker error")
         end
@@ -527,8 +554,13 @@ assert_keys(
 )
 assert_eq(spawn_schema.type, "object", "spawn schema is an object schema")
 assert_eq(spawn_schema.additionalProperties, false, "spawn schema forbids additional properties")
-assert_eq(table.concat(spawn_schema.required, ","), "workspace_id,target_id,branch,session_type_id", "spawn schema requires the migrated field set in order")
+assert_eq(
+  table.concat(spawn_schema.required, ","),
+  "workspace_id,target_id,session_type_id",
+  "spawn schema requires workspace, target, and session type; branch is Git-only"
+)
 assert_eq(spawn_schema.properties.session_type_id.type, "string", "spawn schema types session_type_id")
+assert_eq(spawn_schema.properties.branch.type, "string", "spawn schema still publishes optional branch")
 assert_eq(spawn_schema.properties.template_id, nil, "spawn schema publishes no superseded field") -- cold-cut negative control
 
 local empty_surface = handler(spec, "workspaces_surface")({})
@@ -673,10 +705,8 @@ local duplicate_add = add_session({ workspace_id = second.workspace.id, session_
 assert_eq(duplicate_add.error.code, "session_already_owned", "add rejects another owner")
 assert_eq(duplicate_add.owner_workspace_id, renamed.workspace.id, "duplicate identifies current owner")
 assert_eq(#publish_calls, publish_before_conflict, "conflict loser publishes no false state")
-local invalid_session = add_session({ workspace_id = second.workspace.id, session_id = "not-a-uuid" })
-assert_eq(invalid_session.error.code, "validation_failed", "membership requires canonical UUID")
-local short_uuid = add_session({ workspace_id = second.workspace.id, session_id = "1-2-3-4-5" })
-assert_eq(short_uuid.error.code, "validation_failed", "membership rejects non-canonical UUID group lengths")
+local blank_session = add_session({ workspace_id = second.workspace.id, session_id = "   " })
+assert_eq(blank_session.error.code, "validation_failed", "membership rejects a blank session id")
 
 local added_second = add_session({ workspace_id = renamed.workspace.id, session_id = session_two })
 assert_eq(added_second.ok, true, "second reference adds")
@@ -729,10 +759,12 @@ local spawn_result = spawn({
 })
 local persisted_spawn_uuid = spawn_result.session_id
 assert_eq(spawn_result.ok, true, "atomic Hub spawn succeeds")
-assert_eq(spawn_result.session_id, next_spawn_uuid, "only returned Hub UUID is recorded")
+assert_eq(spawn_result.session_id, next_spawn_uuid, "only the returned Hub session id is recorded")
 assert_eq(#spawn_result.workspace.session_refs, #spawn_before.workspace.session_refs + 1, "spawn appends one membership")
-assert_eq(spawn_result.workspace.session_refs[#spawn_result.workspace.session_refs], next_spawn_uuid, "spawn persists returned UUID")
-local spawn_request = spawn_calls[#spawn_calls]
+assert_eq(spawn_result.workspace.session_refs[#spawn_result.workspace.session_refs], next_spawn_uuid, "spawn persists the returned session id")
+local spawn_call = spawn_calls[#spawn_calls]
+assert_eq(spawn_call.path, "ensure_worktree_and_spawn", "Git targets use managed-worktree spawn")
+local spawn_request = spawn_call.request
 assert_keys(
   spawn_request,
   { "target_id", "branch", "session_type_id", "context" },
@@ -752,6 +784,47 @@ assert_eq(spawn_request.cwd, nil, "spawn never supplies cwd")
 assert_eq(spawn_request.repo_path, nil, "spawn never supplies repo path")
 assert_eq(spawn_request.worktree_path, nil, "spawn never supplies worktree path")
 assert_eq(spawn_request.base_ref, nil, "spawn never supplies base ref")
+
+next_spawn_uuid = "session-type-shell"
+local directory_before = show({ id = renamed.workspace.id })
+local directory_spawn = spawn({
+  workspace_id = renamed.workspace.id,
+  target_id = "tgt_directory",
+  session_type_id = "acceptance-package/shell",
+  prompt = "open a shell",
+})
+assert_eq(directory_spawn.ok, true, "directory spawn point succeeds without a branch")
+assert_eq(directory_spawn.session_id, next_spawn_uuid, "directory spawn records an opaque Hub session id")
+assert_eq(
+  #directory_spawn.workspace.session_refs,
+  #directory_before.workspace.session_refs + 1,
+  "directory spawn appends membership"
+)
+local directory_call = spawn_calls[#spawn_calls]
+assert_eq(directory_call.path, "spawn", "non-Git targets use session_types.spawn")
+assert_eq(directory_call.request.target_id, "tgt_directory", "directory spawn sends target id")
+assert_eq(directory_call.request.session_type_id, "acceptance-package/shell", "directory spawn sends session type")
+assert_eq(directory_call.request.branch, nil, "directory spawn never sends branch")
+assert_eq(directory_call.request.context.workspace_id, renamed.workspace.id, "directory spawn sends workspace context")
+assert_eq(directory_call.request.context.prompt, "open a shell", "directory spawn forwards prompt")
+
+local opaque_restart_spec = dofile("plugin.lua")
+local opaque_restart = tool(opaque_restart_spec, "botster_workspaces.show")({ id = renamed.workspace.id })
+assert_eq(opaque_restart.ok, true, "restart accepts persisted opaque Hub session ids")
+assert_eq(
+  opaque_restart.workspace.session_refs[#opaque_restart.workspace.session_refs],
+  next_spawn_uuid,
+  "restart preserves the opaque Hub session id"
+)
+
+local git_without_branch = spawn({
+  workspace_id = renamed.workspace.id,
+  target_id = "tgt_git",
+  session_type_id = "acceptance-package/implement",
+})
+assert_eq(git_without_branch.ok, false, "Git spawn without branch is rejected")
+assert_eq(git_without_branch.error.code, "validation_failed", "missing Git branch is validation_failed")
+assert_eq(git_without_branch.fields[1], "branch", "missing Git branch names the branch field")
 
 local caller_id_rejected = spawn({
   workspace_id = renamed.workspace.id,
@@ -870,8 +943,8 @@ local session_type_calls_before_surface = #session_type_list_calls
 local surface = handler(spec, "workspaces_surface")({})
 assert_eq(
   #session_type_list_calls,
-  session_type_calls_before_surface + 2,
-  "one surface render lists session types once per enabled Git target"
+  session_type_calls_before_surface + 3,
+  "one surface render lists session types once per enabled spawn target"
 )
 local raw_forms = {}
 collect_type(surface, "form", raw_forms)
@@ -938,10 +1011,10 @@ assert_eq(
 )
 assert_eq(add_select.slots, nil, "entity_options select has no static select_option children")
 local advanced_input = find_node(add_dialog, "botster-workspaces-add-session-id-advanced")
-assert_true(advanced_input, "advanced historical UUID field is present")
+assert_true(advanced_input, "advanced historical session ID field is present")
 assert_eq(advanced_input.type, "text_input", "advanced field is text input")
 assert_eq(advanced_input.props.name, "session_id_advanced", "advanced form name is session_id_advanced")
-assert_eq(advanced_input.props.label, "Historical session UUID", "advanced label is pinned")
+assert_eq(advanced_input.props.label, "Historical session ID", "advanced label is pinned")
 assert_eq(advanced_input.props.required, false, "advanced field is not required")
 local advanced_help = find_node(add_dialog, "botster-workspaces-add-session-id-advanced-help")
 assert_true(advanced_help, "advanced helper copy is present")
@@ -950,12 +1023,12 @@ assert_eq(
   "Use only when the session is absent from current Hub session state.",
   "advanced helper copy is pinned"
 )
-assert_true(add_select.type ~= "text_input", "normal path is not required Session UUID text")
+assert_true(add_select.type ~= "text_input", "normal path is not required session ID text")
 presentation_state["workspace-dialog"] = nil
 
 local lifecycle_bindings = {}
 collect_bind_lists(surface, lifecycle_bindings)
-assert_eq(#lifecycle_bindings, 8, "each stored reference authors exactly four canonical session bindings")
+assert_eq(#lifecycle_bindings, 12, "each stored reference authors exactly four canonical session bindings")
 for _, binding in ipairs(lifecycle_bindings) do
   assert_eq(binding.source, "/session", "lifecycle bindings use the canonical Hub session family")
 end
@@ -969,7 +1042,7 @@ for _, group in ipairs({ "current", "ended", "indeterminate" }) do
     end
   end
   assert_true(binding, group .. " lifecycle binding is present")
-  assert_eq(binding.where.session_uuid, persisted_spawn_uuid, group .. " binding filters exact session UUID")
+  assert_eq(binding.where.session_uuid, persisted_spawn_uuid, group .. " binding filters the exact session id")
   assert_eq(binding.where.lifecycle_class, group, group .. " binding filters canonical lifecycle class")
   assert_eq(binding.empty_template, nil, group .. " binding renders nothing when it does not match")
   local remove = find_node(binding.item_template, "botster-workspaces-remove-" .. group .. "-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid)
@@ -982,15 +1055,15 @@ for _, group in ipairs({ "current", "ended", "indeterminate" }) do
       "botster-workspaces-session-subtitle-" .. group .. "-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
     )
     assert_true(subtitle, "indeterminate row states its uncertain lifecycle classification")
-    assert_eq(subtitle.props.text, "Lifecycle status is uncertain", "indeterminate row remains legible downstream")
+    assert_eq(subtitle.props.text, "Status unknown", "indeterminate row remains legible downstream")
   end
 end
 for group, presentation in pairs({
   current = { title = "Current", aria_label = "Current workspace sessions" },
   ended = { title = "Ended", aria_label = "Ended workspace sessions" },
   unavailable = {
-    title = "Unavailable / uncertain",
-    aria_label = "Unavailable or uncertain workspace sessions",
+    title = "Unavailable",
+    aria_label = "Unavailable workspace sessions",
   },
 }) do
   local section = find_node(surface, "botster-workspaces-sessions-" .. group .. "-" .. renamed.workspace.id)
@@ -1010,7 +1083,7 @@ for _, candidate in ipairs(lifecycle_bindings) do
   end
 end
 assert_true(absence_binding, "absence projection is present")
-assert_eq(absence_binding.where.session_uuid, persisted_spawn_uuid, "absence projection filters exact session UUID")
+assert_eq(absence_binding.where.session_uuid, persisted_spawn_uuid, "absence projection filters the exact session id")
 assert_eq(absence_binding.where.lifecycle_class, nil, "absence projection does not guess lifecycle")
 assert_eq(absence_binding.item_template.type, "stack", "present absence template is structurally inert")
 assert_eq(#(absence_binding.item_template.children or {}), 0, "present absence template has no visible descendants")
@@ -1052,7 +1125,7 @@ for index = 1, 16 do
     "botster-workspaces-remove-ended-" .. scale_workspace.id .. "-" .. session_id
   )
   assert_true(remove, "scale row keeps an actionable literal descendant")
-  assert_eq(remove.props.action.payload.session_id, session_id, "scale action preserves its literal session UUID")
+  assert_eq(remove.props.action.payload.session_id, session_id, "scale action preserves its literal session id")
 end
 assert_eq(delete({ id = scale_workspace.id }).ok, true, "scale fixture cleans up through workspace semantics")
 
@@ -1102,15 +1175,115 @@ apply_presentation(presentation_state, open_spawn)
 local target_dialog = materialize(surface, presentation_state)
 local target_form = find_node(target_dialog, "botster-workspaces-spawn-target-form-" .. renamed.workspace.id)
 assert_true(target_form, "Spawn opens target-first dialog")
+assert_eq(find_node(target_form, "botster-workspaces-spawn-workspace-id"), nil, "target step omits disabled workspace id field")
 local target_select = find_node(target_form, "botster-workspaces-spawn-target")
-assert_eq(#target_select.slots.options, 2, "spawn point projection includes enabled Git targets only")
+assert_eq(#target_select.slots.options, 3, "spawn point projection includes every enabled Hub target")
 assert_eq(target_select.slots.options[1].props.value, "tgt_git", "spawn point uses Hub target id")
+assert_eq(target_select.slots.options[3].props.value, "tgt_directory", "directory spawn points are listed")
+assert_eq(
+  target_select.props.description,
+  "Where the new session should run. Any enabled Hub spawn point is listed.",
+  "spawn point select has product guidance"
+)
+
+local create_name = find_node(surface, "botster-workspaces-create-name")
+assert_true(create_name, "create form authors the name field")
+assert_eq(create_name.props.description, "A short name for related sessions.", "create name field explains purpose")
+local delete_warning = find_node(surface, "botster-workspaces-delete-warning-" .. renamed.workspace.id)
+assert_true(delete_warning, "delete dialog states the non-destructive scope")
+assert_true(
+  delete_warning.props.text:find("workspace list", 1, true)
+    and delete_warning.props.text:find("stay", 1, true),
+  "delete warning keeps grouping-only product language"
+)
+local delete_form = find_node(surface, "botster-workspaces-delete-form-" .. renamed.workspace.id)
+assert_true(delete_form, "delete dialog includes the submit form")
+assert_eq(
+  delete_form.children,
+  nil,
+  "delete form omits empty children so Lua does not encode {} as a JSON object (Hub UiChild reject)"
+)
+assert_eq(
+  find_node(surface, "botster-workspaces-rename-workspace-id"),
+  nil,
+  "rename dialog omits disabled workspace id field"
+)
+local add_workspace_field = find_node(surface, "botster-workspaces-add-workspace-id")
+assert_true(add_workspace_field, "add dialog includes its workspace identity source")
+assert_eq(add_workspace_field.props.disabled, true, "add workspace identity is not editable")
+assert_eq(add_workspace_field.props.value, renamed.workspace.id, "add workspace identity is exact")
+local add_session_field = find_node(surface, "botster-workspaces-add-session-id")
+assert_true(add_session_field, "add dialog authors session id field")
+assert_eq(add_session_field.props.label, "Available sessions", "add field uses the available sessions label")
+
+local previous_list_targets = botster.capabilities.spawn_targets.list
+botster.capabilities.spawn_targets.list = function()
+  return {}
+end
+local no_targets_surface = handler(spec, "workspaces_surface")({})
+presentation_state["workspace-dialog"] = "spawn-target:" .. renamed.workspace.id
+local no_targets_dialog = materialize(no_targets_surface, presentation_state)
+local no_targets = find_node(
+  no_targets_dialog,
+  "botster-workspaces-spawn-no-targets-" .. renamed.workspace.id
+)
+assert_true(no_targets, "missing spawn points render an explicit empty state")
+assert_eq(no_targets.props.title, "No spawn points", "missing spawn points title is product language")
+assert_true(
+  no_targets.props.description:find("Hub settings", 1, true),
+  "missing spawn points copy points users at Hub settings"
+)
+
+botster.capabilities.spawn_targets.list = function()
+  return {
+    { target_id = "tgt_dir_a", label = "App repo", kind = "directory", enabled = true },
+    { target_id = "tgt_dir_b", label = "Docs repo", kind = "directory", enabled = true },
+  }
+end
+local directory_only_surface = handler(spec, "workspaces_surface")({})
+presentation_state["workspace-dialog"] = "spawn-target:" .. renamed.workspace.id
+local directory_only_dialog = materialize(directory_only_surface, presentation_state)
+local directory_only_form = find_node(
+  directory_only_dialog,
+  "botster-workspaces-spawn-target-form-" .. renamed.workspace.id
+)
+assert_true(directory_only_form, "directory-only spawn points open the target form")
+local directory_only_select = find_node(directory_only_form, "botster-workspaces-spawn-target")
+assert_eq(#directory_only_select.slots.options, 2, "directory-only hubs list both enabled directory points")
+
+local spawn_dialog = find_node(
+  surface,
+  "botster-workspaces-spawn-target-dialog-" .. renamed.workspace.id
+)
+assert_true(spawn_dialog, "spawn dialog is authored on the surface")
+assert_eq(
+  spawn_dialog.props.presentation,
+  "overlay",
+  "spawn dialog uses overlay presentation so it sits on the existing surface"
+)
+assert_eq(
+  find_node(find_node(surface, "botster-workspaces-selected-" .. renamed.workspace.id), "botster-workspaces-spawn-target-dialog-" .. renamed.workspace.id),
+  nil,
+  "spawn dialog is not nested under the selected-workspace panel"
+)
+
+botster.capabilities.spawn_targets.list = previous_list_targets
+presentation_state["workspace-dialog"] = "spawn-target:" .. renamed.workspace.id
+surface = handler(spec, "workspaces_surface")({})
 
 presentation_state["workspace-dialog"] = "spawn:" .. renamed.workspace.id .. ":tgt_empty"
 local empty_session_types_dialog = materialize(surface, presentation_state)
+local empty_session_types = find_node(
+  empty_session_types_dialog,
+  "botster-workspaces-spawn-empty-" .. renamed.workspace.id .. "-tgt_empty"
+)
+assert_true(empty_session_types, "target with no effective session types renders an explicit empty state")
+assert_eq(empty_session_types.props.title, "No session types", "empty session types title is product language")
 assert_true(
-  find_node(empty_session_types_dialog, "botster-workspaces-spawn-empty-" .. renamed.workspace.id .. "-tgt_empty"),
-  "target with no effective session types renders an explicit empty state"
+  empty_session_types.props.description:find("Agent", 1, true)
+    and empty_session_types.props.description:find("Shell", 1, true)
+    and empty_session_types.props.description:find("Custom", 1, true),
+  "empty session types copy names Hub presets Agent/Shell/Custom"
 )
 fail_session_type_list_for = "tgt_empty"
 local failed_projection_surface = handler(spec, "workspaces_surface")({})
@@ -1141,21 +1314,50 @@ local spawn_form = find_node(
   "botster-workspaces-spawn-form-" .. renamed.workspace.id .. "-tgt_git"
 )
 assert_true(spawn_form, "target selection installs target-filtered spawn form")
-assert_eq(spawn_form.children[1].props.label, "Spawn point", "spawn form begins with selected spawn point")
-assert_eq(spawn_form.children[3].props.label, "Branch / worktree", "branch/worktree follows spawn point")
-assert_eq(spawn_form.children[4].props.label, "Session type", "effective session type follows branch/worktree")
-assert_eq(spawn_form.children[4].id, "botster-workspaces-spawn-template", "session type select keeps its authored node id")
-assert_eq(spawn_form.children[4].props.name, "session_type_id", "session type select carries the current field name")
-assert_eq(#spawn_form.children[4].slots.options, 2, "session type options are target-filtered")
+local spawn_target_summary = find_node(
+  spawn_form,
+  "botster-workspaces-spawn-target-summary-" .. renamed.workspace.id .. "-tgt_git"
+)
+assert_true(spawn_target_summary, "spawn form shows selected spawn point as summary text")
 assert_eq(
-  spawn_form.children[4].slots.options[1].props.value,
+  spawn_target_summary.props.text,
+  "Spawn point: Local Git",
+  "spawn summary uses the Hub target label, not a protocol id dump"
+)
+assert_eq(find_node(spawn_form, "botster-workspaces-spawn-target-id"), nil, "spawn form omits disabled target id field")
+assert_eq(find_node(spawn_form, "botster-workspaces-spawn-workspace-id"), nil, "spawn form omits disabled workspace id field")
+local branch_field = find_node(spawn_form, "botster-workspaces-spawn-branch")
+assert_true(branch_field, "spawn form includes branch field")
+assert_eq(branch_field.props.label, "Branch", "branch label is product language")
+assert_eq(branch_field.props.placeholder, "feature/my-work", "branch field has a concrete placeholder")
+local session_type_field = find_node(spawn_form, "botster-workspaces-spawn-template")
+assert_true(session_type_field, "spawn form includes session type select")
+assert_eq(session_type_field.props.label, "Session type", "session type label is current vocabulary")
+assert_eq(session_type_field.id, "botster-workspaces-spawn-template", "session type select keeps its authored node id")
+assert_eq(session_type_field.props.name, "session_type_id", "session type select carries the current field name")
+assert_eq(#session_type_field.slots.options, 2, "session type options are target-filtered")
+assert_eq(
+  session_type_field.slots.options[1].props.value,
   "acceptance-package/implement",
   "session type option carries the fully qualified Hub id, not the bare id"
 )
+local advanced_section = find_node(
+  spawn_form,
+  "botster-workspaces-spawn-advanced-" .. renamed.workspace.id .. "-tgt_git"
+)
+assert_true(advanced_section, "optional prompt and ticket sit under progressive disclosure")
+assert_eq(advanced_section.type, "form_section", "advanced fields use form_section")
+assert_eq(advanced_section.props.title, "Optional context", "advanced section has a clear product title")
+assert_true(find_node(advanced_section, "botster-workspaces-spawn-prompt"), "prompt remains available")
+assert_true(find_node(advanced_section, "botster-workspaces-spawn-ticket"), "ticket remains available")
 for _, request in ipairs(session_type_list_calls) do
   assert_true(
-    request.target_id == "tgt_git" or request.target_id == "tgt_empty",
-    "every session-type projection is scoped to an enabled Git target"
+    request.target_id == "tgt_git"
+      or request.target_id == "tgt_empty"
+      or request.target_id == "tgt_directory"
+      or request.target_id == "tgt_dir_a"
+      or request.target_id == "tgt_dir_b",
+    "every session-type projection is scoped to an enabled spawn target"
   )
 end
 
@@ -1167,18 +1369,34 @@ local spawned_action = handler(spec, "spawn_session_action")({
   node_id = spawn_form.id,
   payload = spawn_form.props.action.payload,
   values = {
-    ["botster-workspaces-spawn-target-id"] = "tgt_git",
-    ["botster-workspaces-spawn-workspace-id"] = renamed.workspace.id,
     ["botster-workspaces-spawn-branch"] = "action-adapter",
     ["botster-workspaces-spawn-template"] = "acceptance-package/review",
   },
 })
-assert_eq(spawned_action.state, "accepted", "spawn action submits through the authored form nodes")
+assert_eq(spawned_action.state, "accepted", "spawn action submits through payload identity plus authored form fields")
 assert_eq(#spawn_calls, spawn_action_calls_before + 1, "spawn action issues exactly one Hub capability call")
+assert_eq(spawn_calls[#spawn_calls].path, "ensure_worktree_and_spawn", "Git form action uses managed spawn")
 assert_eq(
-  spawn_calls[#spawn_calls].session_type_id,
+  spawn_calls[#spawn_calls].request.session_type_id,
   "acceptance-package/review",
   "spawn action forwards the selected session type unchanged"
+)
+
+presentation_state["workspace-dialog"] = "spawn:" .. renamed.workspace.id .. ":tgt_directory"
+local directory_form_surface = materialize(handler(spec, "workspaces_surface")({}), presentation_state)
+local directory_form = find_node(
+  directory_form_surface,
+  "botster-workspaces-spawn-form-" .. renamed.workspace.id .. "-tgt_directory"
+)
+assert_true(directory_form, "directory target opens a spawn form")
+assert_eq(
+  find_node(directory_form, "botster-workspaces-spawn-branch"),
+  nil,
+  "directory spawn form omits branch"
+)
+assert_true(
+  find_node(directory_form, "botster-workspaces-spawn-template"),
+  "directory spawn form still requires a session type"
 )
 
 local accepted_create = create_action({
@@ -1216,7 +1434,7 @@ assert_true(removed_action.replacement, "remove membership installs owner-author
 
 -- Advanced form precedence matrix for Add existing session (picker vs historical).
 local advanced_workspace = create({ name = "Advanced claim workspace" }).workspace
--- Use UUID space that does not collide with later producer-matrix fixtures.
+-- Use identity values that do not collide with later producer-matrix fixtures.
 local advanced_session = "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1"
 local add_action = handler(spec, "add_session_action")
 local picker_only = add_action({
@@ -1245,7 +1463,7 @@ local advanced_only = add_action({
   },
 })
 assert_eq(advanced_only.state, "accepted", "advanced-only historical claim is accepted")
-assert_eq(show({ id = other_workspace.id }).workspace.session_refs[1], historical, "advanced-only claims historical UUID")
+assert_eq(show({ id = other_workspace.id }).workspace.session_refs[1], historical, "advanced-only claims historical session ID")
 
 local both_set_session = "e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3"
 local both_set = add_action({
@@ -1279,49 +1497,6 @@ assert_eq(both_empty.state, "rejected", "both empty is validation_failed")
 assert_true(
   both_empty.field_errors["botster-workspaces-add-session-id"],
   "empty selection keys field error to the picker when advanced is empty"
-)
-
-local invalid_advanced = add_action({
-  request_id = "add-invalid-advanced",
-  surface_id = "workspaces",
-  action_id = "botster_workspaces.add_session",
-  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
-  values = {
-    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
-    ["botster-workspaces-add-session-id"] = "e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4",
-    ["botster-workspaces-add-session-id-advanced"] = "not-a-uuid",
-  },
-})
-assert_eq(invalid_advanced.state, "rejected", "invalid advanced UUID is validation_failed")
-assert_true(
-  invalid_advanced.field_errors["botster-workspaces-add-session-id-advanced"],
-  "invalid advanced UUID keys field error to the advanced input"
-)
-assert_eq(
-  invalid_advanced.field_errors["botster-workspaces-add-session-id"],
-  nil,
-  "invalid advanced UUID does not attach field error to the normal picker"
-)
-
-local invalid_picker = add_action({
-  request_id = "add-invalid-picker",
-  surface_id = "workspaces",
-  action_id = "botster_workspaces.add_session",
-  node_id = "botster-workspaces-add-form-" .. other_workspace.id,
-  values = {
-    ["botster-workspaces-add-workspace-id"] = other_workspace.id,
-    ["botster-workspaces-add-session-id"] = "also-not-a-uuid",
-  },
-})
-assert_eq(invalid_picker.state, "rejected", "invalid picker UUID is validation_failed")
-assert_true(
-  invalid_picker.field_errors["botster-workspaces-add-session-id"],
-  "invalid picker UUID keys field error to the picker"
-)
-assert_eq(
-  invalid_picker.field_errors["botster-workspaces-add-session-id-advanced"],
-  nil,
-  "invalid picker UUID does not attach field error to the advanced input"
 )
 
 local delete_target = create({ name = "Disposable grouping" })

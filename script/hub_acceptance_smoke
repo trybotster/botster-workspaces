@@ -477,7 +477,7 @@ assert(
 advanced_input = find_node(action_surface, "botster-workspaces-add-session-id-advanced")
 assert(advanced_input, "Add dialog missing advanced historical UUID field")
 assert(advanced_input.dig("props", "name") == "session_id_advanced", "advanced field name drifted")
-assert(advanced_input.dig("props", "label") == "Historical session UUID", "advanced field label drifted")
+assert(advanced_input.dig("props", "label") == "Historical session ID", "advanced field label drifted")
 advanced_help = find_node(action_surface, "botster-workspaces-add-session-id-advanced-help")
 assert(advanced_help, "Add dialog missing advanced helper copy")
 assert(
@@ -486,15 +486,16 @@ assert(
   "advanced helper copy drifted"
 )
 
-rejected_add = action(
+# Empty selection remains rejected (session id is required). Non-empty shape is not UUID-canonical.
+empty_add = action(
   socket,
   id: add_form.dig("props", "action", "id"),
   node_id: add_form.fetch("id"),
   kind: "submit",
   payload: add_form.dig("props", "action", "payload"),
-  values: { "botster-workspaces-add-session-id" => "1-2-3-4-5" }
+  values: {}
 )
-assert_rejected(rejected_add, "botster-workspaces-add-session-id", "non-canonical Add session UUID")
+assert_rejected(empty_add, "botster-workspaces-add-session-id", "empty Add session selection")
 # Historical recovery path: session absent from current Hub /session state.
 added_action = action(
   socket,
@@ -672,13 +673,14 @@ if IO.select([held_membership_socket], nil, nil, 0.4)
 end
 
 # Failed validation publishes no membership frames (check 5 sample) while held open.
+# Session id shape is non-empty only; use a blank id for validation_failed.
 invalid_claim = call_tool(
   socket,
   "botster_workspaces.add_session",
-  { workspace_id: workspace_id, session_id: "not-a-uuid" }
+  { workspace_id: workspace_id, session_id: "" }
 )
-assert(invalid_claim["ok"] == false, "invalid claim must fail")
-assert(invalid_claim.dig("error", "code") == "validation_failed", "invalid claim is validation_failed")
+assert(invalid_claim["ok"] == false, "blank claim must fail")
+assert(invalid_claim.dig("error", "code") == "validation_failed", "blank claim is validation_failed")
 if IO.select([held_membership_socket], nil, nil, 0.4)
   unexpected = begin
     JSON.parse(held_membership_socket.gets || "")
@@ -689,10 +691,10 @@ if IO.select([held_membership_socket], nil, nil, 0.4)
     unexpected.nil? || unexpected["type"] == "entity_remove" || unexpected["type"] == "entity_upsert",
     "producer check 5: validation failure must not invent non-entity noise: #{unexpected.inspect}"
   )
-  # A validation failure must not publish a membership frame for the invalid id.
+  # A validation failure must not publish a membership frame for an empty id.
   assert(
-    unexpected.nil? || unexpected["id"] != "not-a-uuid",
-    "producer check 5: validation failure must not publish frames for invalid ids: #{unexpected.inspect}"
+    unexpected.nil? || unexpected["id"].to_s != "",
+    "producer check 5: validation failure must not publish empty-id frames: #{unexpected.inspect}"
   )
 end
 

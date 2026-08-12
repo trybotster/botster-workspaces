@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "digest"
+require "fileutils"
 require "json"
 require "tmpdir"
 
@@ -33,12 +34,37 @@ assert(!manifest.key?("configuration"), "manifest must not retain workspace sett
 
 assert(hub_flow.include?("shared-stack validate-inputs"), "Hub flow must expose the shared-stack input profile")
 assert(hub_flow.include?("shared-stack run"), "Hub flow must expose the final shared-stack acceptance profile")
-%w[script/test-hub-flow script/validate_shared_stack_inputs script/shared_stack_acceptance].each do |path|
+assert(hub_flow.include?("claim-stack validate-inputs"), "Hub flow must expose the claim-stack input profile")
+assert(hub_flow.include?("claim-stack run"), "Hub flow must expose the claim-stack acceptance profile")
+%w[script/test-hub-flow script/validate_shared_stack_inputs script/shared_stack_acceptance script/validate_claim_stack_inputs script/claim_stack_acceptance].each do |path|
   assert(
     system("ruby", "-c", File.join(ROOT, path), out: File::NULL, err: File::NULL),
     "#{path} must pass Ruby syntax validation"
   )
 end
+claim_web_driver = read("script/claim_stack_web_driver.mjs")
+%w[
+  armDropNextInboundEntityFrame
+  closeDataChannel
+  botster_workspaces.add_session
+  claim-stack-web-summary
+  dual_browser_contexts
+  entity_options
+].each do |token|
+  assert(claim_web_driver.include?(token), "claim web driver must wire #{token}")
+end
+# Force interaction and synthetic select assignment are forbidden on claim UI paths.
+["force: true", "force:true", "force: true,", "evaluate((node) => node.click())", 'dispatchEvent(new CustomEvent("ionChange"'].each do |token|
+  assert(!claim_web_driver.include?(token), "claim web driver must not use #{token}")
+end
+assert(claim_web_driver.include?("select.click"), "claim web driver must open ion-select with a real click")
+claim_stack = read("script/claim_stack_acceptance")
+assert(claim_stack.include?("merge-base"), "claim-stack must enforce pin ancestry via merge-base")
+assert(claim_stack.include?("session_already_owned"), "claim-stack must assert typed race conflict")
+assert(claim_stack.include?("idempotent"), "claim-stack must assert same-workspace idempotent outcomes")
+assert(claim_stack.include?("botster.tui.workspaces-claim-driver/v1"), "claim-stack must wire the TUI claim-driver schema")
+assert(claim_stack.include?("write-claim-build-receipt"), "claim-stack must use the TUI claim build receipt writer")
+assert(claim_stack.include?("membership_join"), "claim-stack must assert TUI membership_join evidence")
 
 surfaces = manifest.fetch("surfaces")
 assert(surfaces.length == 1, "manifest must declare one surface")
@@ -214,6 +240,9 @@ assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", 
     "session_type_id",
     "fresh Hub data directory",
     "script/hub_acceptance_smoke",
+    "Claim-stack acceptance",
+    "claim-stack validate-inputs",
+    "armDropNextInboundEntityFrame",
   ],
   "docs/workspace-domain.md" => [
     "Exact Record",
@@ -280,6 +309,9 @@ scanned_files = %w[
   script/hub_acceptance_smoke
   script/shared_stack_acceptance
   script/validate_shared_stack_inputs
+  script/claim_stack_acceptance
+  script/validate_claim_stack_inputs
+  script/claim_stack_web_driver.mjs
   script/validate_ui_node_contract
   test/fixtures/legacy-session-template-manifest/botster-package.json
   test/fixtures/legacy-session-template-manifest/plugin.lua
@@ -416,6 +448,19 @@ Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
   File.write(manifest_path, JSON.pretty_generate(valid_manifest))
   File.write(File.join(source_checkout, "untracked"), "dirty\n")
   assert(!system(validator, manifest_path, out: File::NULL, err: File::NULL), "shared-stack validator accepted a dirty checkout")
+
+  # Claim-stack reuses the same immutable pin schema.
+  FileUtils.rm_f(File.join(source_checkout, "untracked"))
+  File.write(manifest_path, JSON.pretty_generate(valid_manifest))
+  claim_validator = File.join(ROOT, "script", "validate_claim_stack_inputs")
+  assert(
+    system(hub_flow_command, "claim-stack", "validate-inputs", manifest_path, out: File::NULL),
+    "valid claim-stack provenance was rejected"
+  )
+  invalid_claim = JSON.parse(File.read(manifest_path))
+  invalid_claim["artifacts"]["hub_binary"]["sha256"] = "0" * 64
+  File.write(manifest_path, JSON.pretty_generate(invalid_claim))
+  assert(!system(claim_validator, manifest_path, out: File::NULL, err: File::NULL), "claim-stack validator accepted a false binary digest")
 end
 
 lua = ENV.fetch("LUA", "lua")
@@ -435,5 +480,46 @@ assert(
     "Lua shell gate did not reject #{label}"
   )
 end
+
+
+# C2.5 TUI oracle negative controls (mirror parse_tui_claim_evidence! fail-closed rules).
+def c2_5_oracle_accepts?(records)
+  option_present_idx = records.index { |row| row["kind"] == "option_present" }
+  lifecycle_idx = records.index { |row| row["kind"] == "lifecycle_live_update" }
+  add_idx = records.index do |row|
+    row["kind"] == "dispatched_action" && row.dig("payload", "action_id") == "botster_workspaces.add_session"
+  end
+  return false if option_present_idx.nil? || lifecycle_idx.nil? || add_idx.nil?
+  lifecycle = records[lifecycle_idx]
+  return false unless lifecycle.dig("payload", "reopened") == false
+  return false unless lifecycle.dig("payload", "surface_render_delta") == 0
+  return false unless option_present_idx < lifecycle_idx && lifecycle_idx < add_idx
+  true
+end
+
+good_c2_5 = [
+  { "kind" => "option_present", "payload" => {} },
+  { "kind" => "lifecycle_live_update", "payload" => { "reopened" => false, "surface_render_delta" => 0 } },
+  { "kind" => "dispatched_action", "payload" => { "action_id" => "botster_workspaces.add_session" } },
+]
+assert(c2_5_oracle_accepts?(good_c2_5), "C2.5 positive control must accept ordered zero-delta evidence")
+
+nonzero_delta = Marshal.load(Marshal.dump(good_c2_5))
+nonzero_delta[1]["payload"]["surface_render_delta"] = 1
+assert(!c2_5_oracle_accepts?(nonzero_delta), "C2.5 oracle must fail closed on nonzero surface_render_delta")
+
+wrong_order = [
+  { "kind" => "lifecycle_live_update", "payload" => { "reopened" => false, "surface_render_delta" => 0 } },
+  { "kind" => "option_present", "payload" => {} },
+  { "kind" => "dispatched_action", "payload" => { "action_id" => "botster_workspaces.add_session" } },
+]
+assert(!c2_5_oracle_accepts?(wrong_order), "C2.5 oracle must fail closed when lifecycle precedes option_present")
+
+add_before_lifecycle = [
+  { "kind" => "option_present", "payload" => {} },
+  { "kind" => "dispatched_action", "payload" => { "action_id" => "botster_workspaces.add_session" } },
+  { "kind" => "lifecycle_live_update", "payload" => { "reopened" => false, "surface_render_delta" => 0 } },
+]
+assert(!c2_5_oracle_accepts?(add_before_lifecycle), "C2.5 oracle must fail closed when add_session precedes lifecycle")
 
 puts "script/test: ok"

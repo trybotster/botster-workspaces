@@ -1,0 +1,1077 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Parent claim-stack acceptance for available-session claiming across Hub, Web, and TUI.
+# Owns one clean Hub data directory, installs pin-matched packages, seeds unclaimed sessions,
+# drives production Web dual-browser claim lanes, collates package substrate + supporting
+# consumer proofs, and writes a machine-readable evidence ledger.
+#
+# Usage:
+#   script/claim_stack_acceptance MANIFEST EVIDENCE_DIR
+#   script/test-hub-flow claim-stack validate-inputs MANIFEST
+#   script/test-hub-flow claim-stack run MANIFEST EVIDENCE_DIR
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+require "pathname"
+require "socket"
+require "timeout"
+require "tmpdir"
+require "securerandom"
+
+ROOT = File.expand_path("..", __dir__)
+PROTOCOL = "botster-hub-daemon-v1"
+TARGET_ID = "workspaces-acceptance"
+MAX_UNIX_SOCKET_PATH_BYTES = 103
+TERMINAL_SESSION_LIFECYCLES = %w[exited stale].freeze
+FRAME_DROP_CONTROL = "transportControl.armDropNextInboundEntityFrame"
+RECONNECT_CONTROL = "transportControl.closeDataChannel"
+WEB_MIN_PIN = "102d39ea6c8ae7b927006dfba109171191c7b775"
+WORKSPACES_MIN_PIN = "7ab4d1334214b3ea3c8b02e9ea665a27e70c0916"
+HUB_MIN_PIN = "de6b09982e72fd5efd04a5258f5fc645f611adbc"
+# Shared-Hub Available sessions keyboard claim seam (ticket_1786529885_807584).
+TUI_MIN_PIN = "d40f28f9de2b621e50367c0f014880429eddedde"
+TUI_CLAIM_SCHEMA = "botster.tui.workspaces-claim-driver/v1"
+
+class HubExited < RuntimeError
+  attr_reader :status
+
+  def initialize(status)
+    @status = status
+    super("claim-stack Hub exited before socket readiness: #{status}")
+  end
+end
+
+def assert(condition, message)
+  raise message unless condition
+end
+
+def run!(*command, chdir: ROOT, env: {})
+  stdout, stderr, status = Open3.capture3(env, *command, chdir: chdir)
+  raise "command failed: #{command.join(' ')}\n#{stdout}#{stderr}" unless status.success?
+
+  stdout
+end
+
+def run_process!(command, chdir:, env:, output_path:, timeout: 900)
+  status = nil
+  File.open(output_path, "w") do |output|
+    pid = Process.spawn(env, *command, chdir: chdir, in: File::NULL, out: output, err: output)
+    begin
+      Timeout.timeout(timeout) do
+        Process.waitpid(pid)
+        status = $?
+      end
+    rescue Timeout::Error
+      Process.kill("TERM", pid) rescue nil
+      Process.waitpid(pid) rescue nil
+      raise "timed out after #{timeout}s: #{command.join(' ')}"
+    end
+  end
+  body = File.read(output_path)
+  raise "command failed: #{command.join(' ')}\n#{body}" unless status&.success?
+
+  body
+end
+
+def wait_for_socket(path, pid)
+  Timeout.timeout(20) do
+    loop do
+      raise HubExited, $? if Process.waitpid(pid, Process::WNOHANG)
+      begin
+        socket = UNIXSocket.new(path)
+        socket.close
+        return
+      rescue Errno::ENOENT, Errno::ECONNREFUSED
+        sleep 0.05
+      end
+    end
+  end
+end
+
+class Daemon
+  def initialize(socket_path)
+    @socket_path = socket_path
+  end
+
+  def request(payload)
+    socket = UNIXSocket.new(@socket_path)
+    socket.puts(JSON.generate(protocol: PROTOCOL))
+    hello = JSON.parse(socket.gets || raise("daemon closed before hello"))
+    raise "daemon protocol mismatch" unless hello["protocol"] == PROTOCOL
+
+    socket.puts(JSON.generate(payload))
+    response = JSON.parse(socket.gets || raise("daemon closed before response"))
+    raise "daemon #{payload.fetch(:type)} failed: #{response['error']}" if response["error"]
+
+    response
+  ensure
+    socket&.close
+  end
+
+  def call_tool(name, arguments)
+    response = request(type: "plugin_mcp_call_tool", name: name, arguments: arguments)
+    raise "#{name} returned #{response['kind']}" unless response["kind"] == "plugin_mcp_tool_result"
+
+    response.fetch("plugin_tool_result")
+  end
+end
+
+def validated_artifacts(manifest_path)
+  output = run!(File.join(ROOT, "script", "validate_claim_stack_inputs"), manifest_path)
+  JSON.parse(output).fetch("artifacts")
+end
+
+def required_absolute_new_directory(path)
+  pathname = Pathname.new(path)
+  raise "evidence directory must be absolute" unless pathname.absolute?
+  raise "evidence directory already exists: #{path}" if pathname.exist?
+
+  FileUtils.mkdir_p(path)
+  File.realpath(path)
+end
+
+def git_revision(path)
+  run!("git", "-C", path, "rev-parse", "HEAD").strip
+end
+
+def clean_git_provenance(path)
+  status = run!("git", "-C", path, "status", "--porcelain", "--untracked-files=all")
+  assert(status.empty?, "claim-stack harness checkout must be clean")
+  { "kind" => "git_checkout", "revision" => git_revision(path), "clean" => true }
+end
+
+def assert_min_pin!(label, actual, minimum, source_checkout: nil)
+  assert(actual.is_a?(String) && actual.match?(/\A[0-9a-f]{40}\z/), "#{label} revision must be full sha")
+  assert(minimum.match?(/\A[0-9a-f]{40}\z/), "#{label} minimum pin must be full sha")
+  return if actual == minimum
+  repo = source_checkout || ROOT
+  ok = system(
+    "git", "-C", repo, "merge-base", "--is-ancestor", minimum, actual,
+    out: File::NULL, err: File::NULL
+  )
+  assert(ok, "#{label} pin #{actual} is not a descendant of required minimum #{minimum} in #{repo}")
+end
+
+def assert_sha256_match!(path, expected_sha, label:)
+  actual = Digest::SHA256.file(path).hexdigest
+  assert(
+    actual == expected_sha,
+    "#{label}: entrypoint sha #{actual} != expected #{expected_sha}"
+  )
+  actual
+end
+
+def directory_digest(path)
+  raise "Web dist directory is absent: #{path}" unless Dir.exist?(path)
+
+  files = Dir.glob(File.join(path, "**", "*"), File::FNM_DOTMATCH).select { |entry| File.file?(entry) }.sort
+  raise "Web dist directory contains no files: #{path}" if files.empty?
+
+  digest = Digest::SHA256.new
+  files.each do |entry|
+    relative = entry.delete_prefix("#{path}/")
+    digest << relative << "\0" << Digest::SHA256.file(entry).hexdigest << "\0"
+  end
+  digest.hexdigest
+end
+
+def package_proof!(daemon)
+  required = %w[botster-web botster-tui botster-workspaces]
+  rows = daemon.request(type: "list_packages").fetch("packages")
+  required.to_h do |package_name|
+    matches = rows.select { |row| row["package_name"] == package_name }
+    assert(matches.length == 1, "expected exactly one installed #{package_name} package")
+    row = matches.first
+    assert(row["state"] == "enabled", "#{package_name} is not enabled")
+    [package_name, row.slice("package_name", "version", "state", "source", "runnable_entrypoints")]
+  end
+end
+
+def spawn_unclaimed_session!(daemon, session_id)
+  response = daemon.request(type: "spawn", session_id: session_id, command: "sleep 3600")
+  assert(!response["error"], "spawn unclaimed session failed: #{response['error']}")
+  session_id
+end
+
+def create_workspace!(daemon, name)
+  result = daemon.call_tool("botster_workspaces.create", { name: name })
+  assert(result["ok"] == true, "workspace create failed for #{name}: #{result.inspect}")
+  workspace = result["workspace"] || result.dig("result", "workspace")
+  id = workspace&.fetch("id") { result["id"] || result.dig("workspace", "id") }
+  assert(id.is_a?(String) && !id.empty?, "create workspace omitted id: #{result.inspect}")
+  { "id" => id, "name" => name }
+end
+
+def membership_keys(daemon)
+  snapshot = daemon.request(
+    type: "plugin_mcp_call_tool",
+    name: "botster_workspaces.entity_snapshot",
+    arguments: { family: "botster-workspaces.membership" }
+  )
+  # Prefer tool shape; fall back to list via show.
+  result = snapshot["plugin_tool_result"] || snapshot
+  items = result["items"] || result.dig("snapshot", "items") || []
+  Array(items).map { |item| item["session_uuid"] || item["id"] }.compact
+end
+
+def workspace_session_refs(daemon, workspace_id)
+  shown = daemon.call_tool("botster_workspaces.show", { id: workspace_id })
+  workspace = shown["workspace"] || shown
+  Array(workspace["session_refs"])
+end
+
+def remove_membership!(daemon, workspace_id, session_uuid)
+  result = daemon.call_tool("botster_workspaces.remove_session", {
+    workspace_id: workspace_id,
+    session_id: session_uuid,
+  })
+  assert(result["ok"] == true, "remove_session failed: #{result.inspect}")
+  result
+end
+
+def parse_web_summary(output)
+  line = output.lines.reverse.find { |candidate| candidate.start_with?("claim-stack-web-summary ") }
+  raise "claim-stack web driver omitted structured summary" unless line
+
+  JSON.parse(line.delete_prefix("claim-stack-web-summary "))
+end
+
+def dig_code(value)
+  case value
+  when Hash
+    value["code"] || value[:code]
+  when String
+    value
+  else
+    nil
+  end
+end
+
+def error_message(value)
+  case value
+  when Hash
+    value["message"] || value[:message]
+  when String
+    value
+  else
+    nil
+  end
+end
+
+def action_classification(entry)
+  result = entry["result"] || {}
+  plugin = result.dig("result", "plugin_action_result") || result["plugin_action_result"] || {}
+  plugin = {} unless plugin.is_a?(Hash)
+  payload = result.dig("result", "payload") || plugin["payload"] || result["payload"] || {}
+  payload = {} unless payload.is_a?(Hash)
+  accepted = result["accepted"] == true || plugin["state"] == "accepted"
+  state = plugin["state"] || result["state"] || result["status"]
+  idempotent = payload["idempotent"] == true || plugin["idempotent"] == true || result["idempotent"] == true
+  # Prefer structured payload.error.code from action_error. UiActionResult.error is a
+  # string; do not invent codes from free-text form_errors.
+  error_code = dig_code(payload["error"]) ||
+    dig_code(plugin.dig("payload", "error")) ||
+    dig_code(result.dig("result", "payload", "error")) ||
+    dig_code(plugin["error_code"]) ||
+    result["code"]
+  error_text = [
+    error_message(payload["error"]),
+    error_message(plugin.dig("payload", "error")),
+    error_message(plugin["error"]),
+    Array(plugin["form_errors"]).join(" "),
+    result["reason"],
+    error_message(result["error"]),
+  ].compact.join(" ")
+  {
+    "accepted" => accepted,
+    "state" => state,
+    "idempotent" => idempotent,
+    "error_code" => error_code,
+    "error_text" => error_text,
+  }
+end
+
+def classify_race_pair(results)
+  classifications = results.map { |entry| action_classification(entry) }
+  {
+    "count" => results.length,
+    "request_ids" => results.map { |entry| entry["request_id"] },
+    "classifications" => classifications,
+  }
+end
+
+def session_present_in_hub?(daemon, session_id)
+  sessions = daemon.request(type: "list_sessions").fetch("sessions")
+  sessions.any? { |row| (row["session_id"] || row["session_uuid"]) == session_id }
+end
+
+def end_and_remove_session!(daemon, hub_binary, data_dir, session_id)
+  begin
+    daemon.request(type: "shutdown_session", session_id: session_id)
+  rescue StandardError => error
+    # Already terminal is acceptable; other errors fail closed below via presence check.
+    warn "claim-stack shutdown_session note for #{session_id}: #{error.message}"
+  end
+  removed = false
+  %i[remove_session delete_session].each do |type|
+    begin
+      daemon.request(type: type, session_id: session_id)
+      removed = true
+      break
+    rescue StandardError
+      next
+    end
+  end
+  unless removed
+    stdout, stderr, status = Open3.capture3(hub_binary, "sessions", "remove", "--data-dir", data_dir, session_id)
+    assert(status.success?, "historical session remove CLI failed for #{session_id}: #{stdout}#{stderr}")
+  end
+  # Authoritative absence required before C5 advanced path.
+  Timeout.timeout(20) do
+    loop do
+      break unless session_present_in_hub?(daemon, session_id)
+
+      sleep 0.1
+    end
+  end
+  assert(!session_present_in_hub?(daemon, session_id), "historical session still present in Hub state: #{session_id}")
+end
+
+def unique_session_refs!(refs, label)
+  assert(refs.is_a?(Array), "#{label} session_refs must be an array")
+  assert(refs.length == refs.uniq.length, "#{label} has duplicate session refs: #{refs.inspect}")
+  refs
+end
+
+def hub_build_target_dir(hub_binary)
+  # BOTSTER_HUB_BIN is typically $TARGET/release/botster-hub.
+  File.expand_path("..", File.dirname(File.realpath(hub_binary)))
+end
+
+def parse_tui_claim_evidence!(path, workspace_id, session_uuid)
+  assert(File.file?(path), "TUI claim evidence missing: #{path}")
+  records = File.readlines(path, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+  assert(records.any? { |row| row["kind"] == "complete" }, "TUI claim evidence omitted complete: #{path}")
+  assert(records.none? { |row| row["kind"] == "failure" }, "TUI claim evidence recorded failure: #{path}")
+  join = records.find { |row| row["kind"] == "membership_join" }
+  assert(join, "TUI claim evidence omitted membership_join")
+  assert(join.dig("payload", "workspace_id") == workspace_id, "TUI membership_join workspace mismatch")
+  assert(join.dig("payload", "session_uuid") == session_uuid, "TUI membership_join session mismatch")
+  # Plan C2.5: held-open lifecycle patch on the same open picker (no reopen / no surface refresh).
+  option_present_idx = records.index { |row| row["kind"] == "option_present" }
+  assert(!option_present_idx.nil?, "TUI claim evidence omitted option_present")
+  lifecycle_idx = records.index { |row| row["kind"] == "lifecycle_live_update" }
+  assert(!lifecycle_idx.nil?, "TUI claim evidence omitted lifecycle_live_update (held-open C2.5)")
+  lifecycle = records[lifecycle_idx]
+  assert(lifecycle.dig("payload", "session_uuid") == session_uuid, "TUI lifecycle_live_update session mismatch")
+  assert(lifecycle.dig("payload", "reopened") == false, "TUI lifecycle_live_update must not reopen the Add form")
+  assert(
+    lifecycle.dig("payload", "surface_render_delta") == 0,
+    "TUI lifecycle_live_update must prove zero PluginSurfaceRender delta: #{lifecycle.inspect}"
+  )
+  assert(
+    lifecycle.dig("payload", "lifecycle_before").to_s != "" &&
+      lifecycle.dig("payload", "lifecycle_after").to_s != "" &&
+      lifecycle.dig("payload", "lifecycle_before") != lifecycle.dig("payload", "lifecycle_after"),
+    "TUI lifecycle_live_update must change lifecycle on the held-open option: #{lifecycle.inspect}"
+  )
+  # Label live-update only when Hub supplies a dedicated label field.
+  if lifecycle.dig("payload", "label_field_present") == true
+    assert(
+      lifecycle.dig("payload", "label_live_update") == true,
+      "TUI must prove label live-update when Hub supplies a dedicated label"
+    )
+  else
+    assert(
+      lifecycle.dig("payload", "label_live_update") == false,
+      "TUI must not claim label_live_update without a dedicated Hub label"
+    )
+  end
+  excluded = records.find { |row| row["kind"] == "option_excluded" }
+  assert(excluded, "TUI claim evidence omitted option_excluded")
+  assert(excluded.dig("payload", "session_uuid") == session_uuid, "TUI option_excluded session mismatch")
+  complete = records.find { |row| row["kind"] == "complete" }
+  assert(complete.dig("payload", "action_id") == "botster_workspaces.add_session", "TUI complete action_id mismatch")
+  assert(complete.dig("payload", "session_uuid") == session_uuid, "TUI complete session mismatch")
+  assert(complete.dig("payload", "workspace_id") == workspace_id, "TUI complete workspace mismatch")
+  add_idx = records.index do |row|
+    row["kind"] == "dispatched_action" && row.dig("payload", "action_id") == "botster_workspaces.add_session"
+  end
+  assert(!add_idx.nil?, "TUI claim evidence omitted dispatched add_session")
+  add = records[add_idx]
+  values = add.dig("payload", "values") || {}
+  resolved = values["session_id"] || values["session_id_advanced"]
+  assert(resolved == session_uuid, "TUI add_session values must carry exact session_uuid: #{values.inspect}")
+  # Ordered held-open form: option_present → lifecycle_live_update → add_session.
+  assert(
+    option_present_idx < lifecycle_idx && lifecycle_idx < add_idx,
+    "TUI C2.5 ordering must be option_present < lifecycle_live_update < add_session: " \
+    "present=#{option_present_idx} lifecycle=#{lifecycle_idx} add=#{add_idx}"
+  )
+  summary = records.find { |row| row["kind"] == "request_summary" }
+  if summary
+    assert(summary.dig("payload", "list_sessions_count").to_i == 0, "TUI claim issued list_sessions")
+  end
+  {
+    "record_count" => records.length,
+    "membership_join" => join.fetch("payload"),
+    "lifecycle_live_update" => lifecycle.fetch("payload"),
+    "c2_5_ordering" => {
+      "option_present_index" => option_present_idx,
+      "lifecycle_live_update_index" => lifecycle_idx,
+      "add_session_index" => add_idx,
+      "surface_render_delta" => lifecycle.dig("payload", "surface_render_delta"),
+    },
+    "option_excluded" => excluded.fetch("payload"),
+    "complete" => complete.fetch("payload"),
+    "add_session_request_id" => add.dig("payload", "request_id"),
+  }
+end
+
+manifest_path, evidence_argument = ARGV
+unless ARGV.length == 2
+  warn "usage: script/claim_stack_acceptance MANIFEST EVIDENCE_DIR"
+  exit 1
+end
+manifest_path = File.realpath(manifest_path)
+evidence_dir = required_absolute_new_directory(evidence_argument)
+artifacts = validated_artifacts(manifest_path)
+harness_provenance = clean_git_provenance(ROOT)
+
+web_path = artifacts.fetch("web_driver_source").fetch("path")
+tui_path = artifacts.fetch("tui_driver_source").fetch("path")
+workspaces_path = artifacts.fetch("workspaces_package").fetch("path")
+hub_binary = artifacts.fetch("hub_binary").fetch("path")
+worker_binary = artifacts.fetch("session_worker_binary").fetch("path")
+
+web_revision = artifacts.fetch("web_package").fetch("revision")
+tui_revision = artifacts.fetch("tui_package").fetch("revision")
+workspaces_revision = artifacts.fetch("workspaces_package").fetch("revision")
+hub_revision = artifacts.fetch("hub_binary").fetch("revision")
+assert_min_pin!("web", web_revision, WEB_MIN_PIN, source_checkout: web_path)
+assert_min_pin!("tui", tui_revision, TUI_MIN_PIN, source_checkout: tui_path)
+assert_min_pin!("workspaces", workspaces_revision, WORKSPACES_MIN_PIN, source_checkout: workspaces_path)
+assert_min_pin!(
+  "hub",
+  hub_revision,
+  HUB_MIN_PIN,
+  source_checkout: artifacts.fetch("hub_binary").fetch("source_checkout")
+)
+
+# Frame-drop control must exist on the Web pin (ticket_1786518263_839128).
+webrtc_source = File.read(File.join(web_path, "src/botster/webrtcDaemonClient.ts"))
+assert(
+  webrtc_source.include?("armDropNextInboundEntityFrame"),
+  "Web pin lacks armDropNextInboundEntityFrame (sequence_gap control from ticket_1786518263_839128)"
+)
+assert(
+  webrtc_source.include?("closeDataChannel"),
+  "Web pin lacks closeDataChannel reconnect control"
+)
+
+web_digest_before = directory_digest(File.join(web_path, "dist"))
+binary_digests_before = %w[hub_binary session_worker_binary tui_binary].to_h do |name|
+  [name, Digest::SHA256.file(artifacts.fetch(name).fetch("path")).hexdigest]
+end
+
+summary = nil
+failure = nil
+teardown = nil
+temporary_root = Dir.exist?("/private/tmp") ? "/private/tmp" : Dir.tmpdir
+
+Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
+  data_dir = File.join(fixture_root, "hub")
+  repository = File.join(fixture_root, "repository")
+  socket_path = File.join(data_dir, "botster-hub.sock")
+  assert(socket_path.bytesize <= MAX_UNIX_SOCKET_PATH_BYTES, "claim-stack Hub socket path is too long")
+  FileUtils.mkdir_p(repository)
+  File.write(File.join(repository, "README.md"), "claim stack fixture\n")
+  run!("git", "init", "--initial-branch", "main", repository)
+  run!("git", "-C", repository, "config", "user.name", "Claim Stack Acceptance")
+  run!("git", "-C", repository, "config", "user.email", "claim-stack.invalid")
+  run!("git", "-C", repository, "add", ".")
+  run!("git", "-C", repository, "commit", "-m", "Seed claim stack fixture")
+  FileUtils.mkdir_p(data_dir)
+
+  hub_log = File.open(File.join(evidence_dir, "hub.log"), "w")
+  hub_pid = Process.spawn(
+    hub_binary, "start", "--data-dir", data_dir, "--session-worker-bin", worker_binary,
+    out: hub_log, err: hub_log
+  )
+  hub_status = nil
+  daemon = nil
+  begin
+    wait_for_socket(socket_path, hub_pid)
+    daemon = Daemon.new(socket_path)
+    run!(
+      hub_binary, "spawn-targets", "create", "--data-dir", data_dir, "--root", repository,
+      "--id", TARGET_ID, "--label", "Workspaces claim stack", "--kind", "git", "--base-ref", "main"
+    )
+    session_type_package = File.join(ROOT, "test", "fixtures", "session-type-package")
+    legacy_manifest_package = File.join(ROOT, "test", "fixtures", "legacy-session-template-manifest")
+    [web_path, tui_path, workspaces_path, session_type_package, legacy_manifest_package].each do |package_path|
+      run!(hub_binary, "packages", "install", "--data-dir", data_dir, "--path", package_path)
+    end
+    %w[
+      botster-web
+      botster-tui
+      botster-workspaces
+      botster-workspaces-acceptance-session-type
+      botster-workspaces-legacy-manifest-negative
+    ].each do |package_name|
+      run!(hub_binary, "packages", "enable", "--data-dir", data_dir, package_name)
+    end
+    packages = package_proof!(daemon)
+    File.write(File.join(evidence_dir, "packages.json"), JSON.pretty_generate(packages))
+
+    # Supporting package/Hub substrate (B): real Hub smoke against this data-dir's installed package path.
+    # hub_acceptance_smoke connects to the live socket; it uses package tools for substrate only.
+    run_process!(
+      [File.join(ROOT, "script", "hub_acceptance_smoke"), socket_path, "Claim stack substrate"],
+      chdir: ROOT,
+      env: {
+        "BOTSTER_WORKSPACES_ACCEPTANCE_SESSION_TYPE" => "botster-workspaces-acceptance-session-type/workspace-acceptance",
+      },
+      output_path: File.join(evidence_dir, "hub-substrate.log"),
+      timeout: 300
+    )
+
+    # Session S is spawned by the Web driver after the Add dialog is open (C1 live appear).
+    # Other campaign sessions are seeded here; historical is removed authoritatively before C5.
+    session_s = SecureRandom.uuid
+    session_s2 = SecureRandom.uuid
+    session_race = SecureRandom.uuid
+    session_idem = SecureRandom.uuid
+    session_historical = SecureRandom.uuid
+    gap_a = SecureRandom.uuid
+    gap_b = SecureRandom.uuid
+    gap_c = SecureRandom.uuid
+    [session_s2, session_race, session_idem, session_historical, gap_a, gap_b, gap_c].each do |session_id|
+      spawn_unclaimed_session!(daemon, session_id)
+    end
+    end_and_remove_session!(daemon, hub_binary, data_dir, session_historical)
+    assert(
+      !session_present_in_hub?(daemon, session_historical),
+      "C5 precondition failed: historical session still in Hub state"
+    )
+
+    w1 = create_workspace!(daemon, "Claim W1")
+    w2 = create_workspace!(daemon, "Claim W2")
+    File.write(File.join(evidence_dir, "seed.json"), JSON.pretty_generate({
+      "sessions" => {
+        "s" => session_s,
+        "s_spawned_by" => "web_driver_after_dialog_open",
+        "s2" => session_s2,
+        "race" => session_race,
+        "idem" => session_idem,
+        "historical" => session_historical,
+        "historical_absent" => true,
+        "gap" => [gap_a, gap_b, gap_c],
+      },
+      "workspaces" => { "w1" => w1, "w2" => w2 },
+    }))
+
+    run!(hub_binary, "packages", "start-entrypoint", "--data-dir", data_dir, "botster-web", "web-client")
+
+    assignment = {
+      "workspace_w1" => w1.fetch("id"),
+      "workspace_w2" => w2.fetch("id"),
+      "workspace_w1_name" => w1.fetch("name"),
+      "workspace_w2_name" => w2.fetch("name"),
+      "session_s" => session_s,
+      "session_s2" => session_s2,
+      "session_race" => session_race,
+      "session_idem" => session_idem,
+      "session_historical" => session_historical,
+      "gap_sessions" => [gap_a, gap_b, gap_c],
+      "session_type_id" => "botster-workspaces-acceptance-session-type/workspace-acceptance",
+      "target_id" => TARGET_ID,
+    }
+    web_output = run_process!(
+      ["node", File.join(ROOT, "script", "claim_stack_web_driver.mjs")],
+      chdir: web_path,
+      env: {
+        "BOTSTER_LIVE_DATA_DIR" => data_dir,
+        "BOTSTER_WEB_PACKAGE_PATH" => web_path,
+        "BOTSTER_CLAIM_STACK_ASSIGNMENT" => JSON.generate(assignment),
+        "PATH" => ENV.fetch("PATH"),
+      },
+      output_path: File.join(evidence_dir, "web-claim.log"),
+      timeout: 900
+    )
+    web_summary = parse_web_summary(web_output)
+    assert(web_summary["completed"] == true, "web claim campaign did not complete: #{web_summary['error']}")
+
+    # Parent membership oracles for C3/C4 (DB truth, not picker-only).
+    race_refs_w1 = unique_session_refs!(workspace_session_refs(daemon, w1.fetch("id")), "W1 after race")
+    race_refs_w2 = unique_session_refs!(workspace_session_refs(daemon, w2.fetch("id")), "W2 after race")
+    race_owners = [race_refs_w1, race_refs_w2].count { |refs| refs.include?(session_race) }
+    assert(race_owners == 1, "C3 race must leave exactly one owner for session_race; w1=#{race_refs_w1} w2=#{race_refs_w2}")
+    race_count_w1 = race_refs_w1.count { |ref| ref == session_race }
+    race_count_w2 = race_refs_w2.count { |ref| ref == session_race }
+    assert(race_count_w1 + race_count_w2 == 1, "C3 must have exactly one membership row for race session")
+
+    idem_refs = unique_session_refs!(workspace_session_refs(daemon, w1.fetch("id")), "W1 after idem")
+    assert(idem_refs.count { |ref| ref == session_idem } == 1, "C4 must have exactly one membership row for session_idem")
+    assert(!race_refs_w2.include?(session_idem), "C4 session_idem must not appear on W2")
+
+    c3 = classify_race_pair(web_summary.dig("lanes", "c3", "results") || [])
+    c4 = classify_race_pair(web_summary.dig("lanes", "c4", "results") || [])
+    assert(c3.fetch("count") == 2, "C3 must record two browser claim results")
+    c3_workspaces = (web_summary.dig("lanes", "c3", "results") || []).map { |row| row["workspace_id"] }.uniq
+    assert(c3_workspaces.length == 2, "C3 must involve two workspaces: #{c3_workspaces.inspect}")
+    c3_classes = c3.fetch("classifications")
+    c3_successes = c3_classes.count { |row| row["accepted"] }
+    c3_conflicts = c3_classes.count do |row|
+      !row["accepted"] && row["error_code"].to_s == "session_already_owned"
+    end
+    assert(c3_successes == 1, "C3 must have exactly one accepted claim: #{c3_classes.inspect}")
+    assert(
+      c3_conflicts == 1,
+      "C3 must have exactly one typed session_already_owned conflict (no generic error fallback): #{c3_classes.inspect}"
+    )
+    assert(
+      web_summary.dig("lanes", "c3", "picker_reconciled_w1") == true,
+      "C3 must mandatorily reconcile W1 picker"
+    )
+    assert(
+      web_summary.dig("lanes", "c3", "picker_reconciled_w2") == true,
+      "C3 must mandatorily reconcile W2 picker"
+    )
+
+    assert(c4.fetch("request_ids").length == 2, "C4 must record two request_ids")
+    c4_classes = c4.fetch("classifications")
+    c4_valid = c4_classes.count { |row| row["accepted"] || row["idempotent"] }
+    assert(c4_valid == 2, "C4 must have two valid same-workspace outcomes (accept/idempotent): #{c4_classes.inspect}")
+    assert(
+      c4_classes.any? { |row| row["idempotent"] || row["accepted"] },
+      "C4 must include an idempotent or dual-accept same-workspace outcome: #{c4_classes.inspect}"
+    )
+
+    # C1 driver removes membership while the dialog is held open; parent only verifies absence.
+    assert(
+      web_summary.dig("lanes", "c1", "restored_after_remove") == true,
+      "C1 must prove remove→restore on the held-open picker"
+    )
+    assert(
+      web_summary.dig("lanes", "c1", "live_appear") == true,
+      "C1 must prove live appearance after dialog open"
+    )
+    assert(
+      web_summary.dig("lanes", "c1", "lifecycle_live_update") == true,
+      "C1 must prove lifecycle live update while dialog held open"
+    )
+    c1_fields = web_summary.dig("lanes", "c1", "fields_present") || {}
+    assert(c1_fields["lifecycle"] == true, "C1 must project lifecycle on the live option")
+    assert(
+      c1_fields["session_type"] == true,
+      "C1 session-type spawn must project session_type_id: #{c1_fields.inspect}"
+    )
+    # Joined option text is not a dedicated producer label.
+    unless web_summary.dig("lanes", "c1", "producer_label_before")
+      assert(
+        c1_fields["label"] == false,
+        "C1 must record label=false when Hub supplies no dedicated producer label: #{c1_fields.inspect}"
+      )
+      assert(
+        web_summary.dig("lanes", "c1", "label_live_update") == false,
+        "C1 must not claim label_live_update without a dedicated producer label"
+      )
+    end
+
+    assert(
+      web_summary.dig("lanes", "c6a", "stale_outbound_after_reconnect").to_i == 0,
+      "C6a must assert zero stale outbound claims after reconnect"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "disconnected_before_peer_claim") == true,
+      "C6a must disconnect before the peer claim"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "peer_prepared_before_disconnect") == true,
+      "C6a must prepare the peer browser before disconnect"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "s2_still_present_after_peer_claim") == true,
+      "C6a must prove S2 still on the disconnected picker after the offline peer claim"
+    )
+    c6a_closed = web_summary.dig("lanes", "c6a", "closed_evidence") || {}
+    assert(
+      c6a_closed["kind"] == "webrtc_data_channel" && c6a_closed["state"] == "closed",
+      "C6a must record an exact webrtc_data_channel closed event: #{c6a_closed.inspect}"
+    )
+    assert(
+      c6a_closed["event_index"].is_a?(Integer),
+      "C6a must record a closed transport event index: #{c6a_closed.inspect}"
+    )
+    c6a_offline = web_summary.dig("lanes", "c6a", "offline_at_peer_claim") || {}
+    assert(
+      c6a_offline["channel_still_closed"] == true,
+      "C6a must require channel_still_closed at peer claim: #{c6a_offline.inspect}"
+    )
+    c6a_recovery = web_summary.dig("lanes", "c6a", "recovery_baseline") || {}
+    assert(
+      c6a_recovery["event_count"].is_a?(Integer) && c6a_recovery["event_count"] > c6a_closed["event_index"],
+      "C6a recovery baseline must be after the closed event: closed=#{c6a_closed.inspect} recovery=#{c6a_recovery.inspect}"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "package_tool_claim") == false,
+      "C6a must not use package-tool claims for the offline peer path"
+    )
+    assert(
+      web_summary.dig("lanes", "c6a", "peer_claim_path") == "production_ui_second_browser",
+      "C6a peer claim must use a second production browser"
+    )
+    c6a_pairs = web_summary.dig("lanes", "c6a", "subscription_snapshot_pairs") || {}
+    %w[session botster-workspaces.membership].each do |family|
+      pairs = c6a_pairs[family]
+      assert(pairs.is_a?(Array) && !pairs.empty?, "C6a missing subscription/snapshot pairs for #{family}: #{c6a_pairs.inspect}")
+      pairs.each do |pair|
+        assert(pair["subscribe_subscription_id"].to_s != "", "C6a pair missing subscribe id: #{pair.inspect}")
+        snap = pair["snapshot"] || {}
+        assert(
+          snap["subscription_id"].to_s == pair["subscribe_subscription_id"].to_s,
+          "C6a snapshot subscription_id must match subscribe: #{pair.inspect}"
+        )
+        assert(
+          snap["subscription_id_exact"] == true,
+          "C6a must use real snapshot subscription_id (no fabricate): #{pair.inspect}"
+        )
+        assert(
+          !snap["generation"].nil? || !snap["snapshot_seq"].nil?,
+          "C6a ready correlation must expose generation or snapshot_seq: #{pair.inspect}"
+        )
+      end
+    end
+    assert(
+      web_summary.dig("lanes", "c6b", "stale_outbound_for_held_a").to_i == 0,
+      "C6b must assert zero stale outbound for held A"
+    )
+    assert(
+      web_summary.dig("lanes", "c6b", "held_value_unavailable_via_gap_recovery") == true,
+      "C6b must clear held A via gap recovery, not pre-drop live exclusion"
+    )
+    c6b_evidence = web_summary.dig("lanes", "c6b", "gap_evidence") || {}
+    assert(c6b_evidence["sequence_gap"] == true, "C6b must prove sequence_gap")
+    assert(c6b_evidence["resubscribe"] == true, "C6b must prove membership resubscribe")
+    assert(c6b_evidence["replacement_snapshot"] == true, "C6b must prove membership replacement snapshot")
+    c6b_pairs = c6b_evidence["subscription_snapshot_pairs"] || []
+    assert(c6b_pairs.is_a?(Array) && !c6b_pairs.empty?, "C6b must export membership subscription/snapshot pairs: #{c6b_evidence.inspect}")
+    c6b_pairs.each do |pair|
+      assert(pair["subscribe_subscription_id"].to_s != "", "C6b pair missing subscribe id: #{pair.inspect}")
+      snap = pair["snapshot"] || {}
+      assert(
+        snap["subscription_id"].to_s == pair["subscribe_subscription_id"].to_s,
+        "C6b snapshot subscription_id must match subscribe: #{pair.inspect}"
+      )
+      assert(
+        snap["subscription_id_exact"] == true,
+        "C6b must use real snapshot subscription_id (no fabricate): #{pair.inspect}"
+      )
+      assert(
+        !snap["generation"].nil? || !snap["snapshot_seq"].nil?,
+        "C6b ready correlation must expose generation or snapshot_seq: #{pair.inspect}"
+      )
+    end
+
+    # ---- C2: parent-owned TUI keyboard claim on the same clean Hub ----
+    # Consumes botster-tui claim seam from ticket_1786529885_807584 (≥ d40f28f).
+    claim_driver = File.join(tui_path, "script", "write-claim-build-receipt")
+    assert(File.executable?(claim_driver), "TUI pin lacks script/write-claim-build-receipt (need ≥ d40f28f)")
+    assert(
+      File.file?(File.join(tui_path, "crates", "botster-tui", "fixtures", "workspaces-claim-driver-v1.scenario.json")),
+      "TUI pin lacks workspaces-claim-driver fixtures"
+    )
+    # Bind the validated tui_binary bytes into the package entrypoint path apps open runs.
+    # Hub package command is package_root/target/debug/botster-tui; ancestry alone is not enough.
+    validated_tui = artifacts.fetch("tui_binary")
+    validated_tui_path = File.realpath(validated_tui.fetch("path"))
+    tui_package_bin = File.join(tui_path, "target", "debug", "botster-tui")
+    FileUtils.mkdir_p(File.dirname(tui_package_bin))
+    package_realpath = File.exist?(tui_package_bin) ? File.realpath(tui_package_bin) : nil
+    if package_realpath != validated_tui_path
+      FileUtils.rm_f(tui_package_bin)
+      begin
+        File.link(validated_tui_path, tui_package_bin)
+      rescue Errno::EXDEV, Errno::EPERM, NotImplementedError
+        FileUtils.cp(validated_tui_path, tui_package_bin)
+      end
+      File.chmod(0o755, tui_package_bin)
+    end
+    package_bin_sha = assert_sha256_match!(
+      tui_package_bin,
+      validated_tui.fetch("sha256"),
+      label: "TUI package entrypoint positive bind"
+    )
+    # Stale-binary negative control: checker must fail closed on a mismatched expected digest.
+    begin
+      assert_sha256_match!(tui_package_bin, "0" * 64, label: "TUI stale-binary negative")
+      raise "stale-binary negative control did not fail closed"
+    rescue RuntimeError => error
+      assert(
+        error.message.include?("entrypoint sha") && error.message.include?("TUI stale-binary negative"),
+        "stale-binary negative control raised unexpected error: #{error.message}"
+      )
+    end
+    tui_binary_receipt = {
+      "kind" => "tui_executable_binding",
+      "validated_tui_binary_sha256" => validated_tui.fetch("sha256"),
+      "validated_tui_binary_revision" => validated_tui.fetch("revision"),
+      "package_entrypoint_sha256" => package_bin_sha,
+      "package_entrypoint_matches_validated" => true,
+      "tui_source_revision" => tui_revision,
+      "tui_min_pin" => TUI_MIN_PIN,
+    }
+    File.write(File.join(evidence_dir, "tui-executable-binding-receipt.json"), JSON.pretty_generate(tui_binary_receipt))
+    hub_source = artifacts.fetch("hub_binary").fetch("source_checkout")
+    hub_build_target = hub_build_target_dir(hub_binary)
+    receipt_path = File.join(evidence_dir, "tui-claim-build-receipt.json")
+    session_tui = SecureRandom.uuid
+    spawn_unclaimed_session!(daemon, session_tui)
+    w_tui = create_workspace!(daemon, "Claim TUI")
+    tui_scenario_path = File.join(evidence_dir, "tui-claim.scenario.json")
+    tui_evidence_path = File.join(evidence_dir, "tui-claim.evidence.jsonl")
+    File.write(tui_scenario_path, JSON.pretty_generate({
+      "schema" => TUI_CLAIM_SCHEMA,
+      "workspace_id" => w_tui.fetch("id"),
+      "session_uuid" => session_tui,
+      "hub_source_path" => hub_source,
+      "workspaces_package_path" => workspaces_path,
+    }))
+    tui_claim_env = {
+      "BOTSTER_HUB_SOURCE_PATH" => hub_source,
+      "BOTSTER_HUB_BUILD_TARGET_DIR" => hub_build_target,
+      "BOTSTER_HUB_BIN" => hub_binary,
+      "BOTSTER_SESSION_WORKER_BIN" => worker_binary,
+      "BOTSTER_TUI_CLAIM_BUILD_RECEIPT" => receipt_path,
+      "BOTSTER_WORKSPACES_PACKAGE_PATH" => workspaces_path,
+      "BOTSTER_HUB_DATA_DIR" => data_dir,
+      "BOTSTER_LIVE_DATA_DIR" => data_dir,
+      "BOTSTER_TUI_ACCEPTANCE_SCENARIO" => tui_scenario_path,
+      "BOTSTER_TUI_ACCEPTANCE_EVIDENCE" => tui_evidence_path,
+      "PATH" => ENV.fetch("PATH"),
+    }
+    run!(claim_driver, chdir: tui_path, env: tui_claim_env)
+    assert(File.file?(receipt_path), "TUI claim build receipt was not written")
+    # Re-check package entrypoint still matches validated bytes immediately before apps open.
+    assert(
+      Digest::SHA256.file(tui_package_bin).hexdigest == validated_tui.fetch("sha256"),
+      "TUI package entrypoint drifted before apps open"
+    )
+    run_process!(
+      [hub_binary, "apps", "open", "--data-dir", data_dir, "botster-tui"],
+      chdir: tui_path,
+      env: tui_claim_env,
+      output_path: File.join(evidence_dir, "tui-claim.log"),
+      timeout: 300
+    )
+    tui_claim = parse_tui_claim_evidence!(tui_evidence_path, w_tui.fetch("id"), session_tui)
+    tui_refs = unique_session_refs!(workspace_session_refs(daemon, w_tui.fetch("id")), "TUI claim workspace")
+    assert(
+      tui_refs.count { |ref| ref == session_tui } == 1,
+      "TUI claim must leave exactly one membership for #{session_tui}: #{tui_refs.inspect}"
+    )
+
+    # Supporting consumer re-checks (section D) — separate clean Hubs by consumer design.
+    # Web lifecycle rejects BOTSTER_LIVE_DATA_DIR; TUI lifecycle owns its hub.
+    supporting = { "web_lifecycle" => nil, "tui_lifecycle" => nil }
+    begin
+      web_lifecycle_output = run_process!(
+        ["npm", "run", "smoke:workspaces-lifecycle"],
+        chdir: web_path,
+        env: {
+          "BOTSTER_HUB_BIN" => hub_binary,
+          "BOTSTER_SESSION_WORKER_BIN" => worker_binary,
+          "BOTSTER_WORKSPACES_PACKAGE_PATH" => workspaces_path,
+          "PATH" => ENV.fetch("PATH"),
+        },
+        output_path: File.join(evidence_dir, "supporting-web-lifecycle.log"),
+        timeout: 1200
+      )
+      supporting["web_lifecycle"] = {
+        "status" => "passed",
+        "marker" => web_lifecycle_output.include?("workspaces lifecycle live proof passed"),
+        "pin" => web_revision,
+      }
+      assert(supporting["web_lifecycle"]["marker"], "supporting Web lifecycle missing pass marker")
+    rescue StandardError => error
+      supporting["web_lifecycle"] = { "status" => "failed", "error" => error.message, "pin" => web_revision }
+      raise
+    end
+
+    begin
+      tui_output = run_process!(
+        [File.join(tui_path, "script", "test-live-hub"), "workspaces", "lifecycle"],
+        chdir: tui_path,
+        env: {
+          "BOTSTER_HUB_BIN" => hub_binary,
+          "BOTSTER_SESSION_WORKER_BIN" => worker_binary,
+          "BOTSTER_WORKSPACES_PACKAGE_PATH" => workspaces_path,
+          "PATH" => ENV.fetch("PATH"),
+        },
+        output_path: File.join(evidence_dir, "supporting-tui-lifecycle.log"),
+        timeout: 1200
+      )
+      supporting["tui_lifecycle"] = {
+        "status" => "passed",
+        "marker" => tui_output.include?("workspaces-acceptance: profile=Lifecycle ledger=complete") || tui_output.include?("Lifecycle"),
+        "pin" => tui_revision,
+      }
+    rescue StandardError => error
+      supporting["tui_lifecycle"] = { "status" => "failed", "error" => error.message, "pin" => tui_revision }
+      # TUI supporting failure is recorded; parent Web campaign still required. Do not swallow.
+      raise
+    end
+
+    binary_digests_after = binary_digests_before.keys.to_h do |name|
+      [name, Digest::SHA256.file(artifacts.fetch(name).fetch("path")).hexdigest]
+    end
+    assert(binary_digests_after == binary_digests_before, "a supplied runtime binary changed during acceptance")
+    assert(directory_digest(File.join(web_path, "dist")) == web_digest_before, "Web dist changed during acceptance")
+
+    summary = {
+      "schema_version" => 1,
+      "status" => "passed",
+      "shared_data_directory" => true,
+      "one_hub_process" => true,
+      "target_repository" => "botster-workspaces",
+      "frame_drop_control" => FRAME_DROP_CONTROL,
+      "reconnect_control" => RECONNECT_CONTROL,
+      "web_dependency_ticket" => "ticket_1786518263_839128",
+      "tui_dependency_ticket" => "ticket_1786529885_807584",
+      "tui_claim_schema" => TUI_CLAIM_SCHEMA,
+      "pins" => {
+        "hub" => hub_revision,
+        "web" => web_revision,
+        "tui" => tui_revision,
+        "workspaces" => workspaces_revision,
+        "minima" => {
+          "hub" => HUB_MIN_PIN,
+          "web" => WEB_MIN_PIN,
+          "tui" => TUI_MIN_PIN,
+          "workspaces" => WORKSPACES_MIN_PIN,
+        },
+      },
+      "artifacts" => artifacts.transform_values { |artifact| artifact.reject { |key, _| %w[path source_checkout].include?(key) } }
+        .merge("claim_stack_harness" => harness_provenance),
+      "binary_sha256" => binary_digests_before,
+      "web_dist_sha256" => web_digest_before,
+      "packages" => packages,
+      "web_campaign" => web_summary,
+      "tui_claim" => tui_claim,
+      "membership_oracles" => {
+        "c3_race_owner_count" => race_owners,
+        "c3_w1_refs" => race_refs_w1,
+        "c3_w2_refs" => race_refs_w2,
+        "c4_w1_has_idem" => idem_refs.include?(session_idem),
+        "c1_removed" => !workspace_session_refs(daemon, w1.fetch("id")).include?(session_s),
+        "tui_claim_membership" => tui_refs.include?(session_tui),
+      },
+      "spa_request_state" => {
+        "c3" => c3,
+        "c4" => c4,
+      },
+      "supporting_consumers" => supporting,
+      "forbidden_methods_audit" => web_summary["forbidden_methods_audit"],
+      "production_entry_point" =>
+        "Workspaces app surface → Add existing session → Available sessions entity_options " \
+        "(or advanced historical when absent) → realized botster_workspaces.add_session with " \
+        "correlated request_id → membership batch + entity_publish → generic Web entity stores " \
+        "update open pickers; TUI claim uses botster.tui.workspaces-claim-driver/v1 keyboard path on " \
+        "the same Hub; reconnect baselines replace entity stores from authoritative snapshots; " \
+        "ordered gap uses #{FRAME_DROP_CONTROL} before receiveEntityFrame.",
+      "completed" => true,
+    }
+  rescue StandardError => error
+    failure = error
+    hub_status = error.status if error.is_a?(HubExited)
+    File.write(File.join(evidence_dir, "failure.json"), JSON.pretty_generate({
+      "status" => "failed",
+      "error_class" => error.class.name,
+      "message" => error.message,
+    }))
+  ensure
+    if failure.nil? && daemon
+      begin
+        pre_shutdown_sessions = daemon.request(type: "list_sessions").fetch("sessions")
+        nonterminal = pre_shutdown_sessions.reject { |row| TERMINAL_SESSION_LIFECYCLES.include?(row["lifecycle"]) }
+        # Claim stack intentionally leaves sleep sessions running; shut them down before hub stop.
+        nonterminal.each do |row|
+          sid = row["session_id"] || row["session_uuid"]
+          begin
+            daemon.request(type: "shutdown_session", session_id: sid)
+          rescue StandardError
+            nil
+          end
+        end
+        # Re-check with a short bound.
+        Timeout.timeout(15) do
+          loop do
+            sessions = daemon.request(type: "list_sessions").fetch("sessions")
+            break if sessions.all? { |row| TERMINAL_SESSION_LIFECYCLES.include?(row["lifecycle"]) }
+
+            sleep 0.1
+          end
+        end
+      rescue StandardError => error
+        failure ||= error
+      end
+    end
+    shutdown_stdout, shutdown_stderr, shutdown_status = Open3.capture3(hub_binary, "shutdown", "--data-dir", data_dir)
+    shutdown_ok = shutdown_status.success?
+    teardown = {
+      "shutdown_ok" => shutdown_ok,
+      "shutdown_stdout" => shutdown_stdout,
+      "shutdown_stderr" => shutdown_stderr,
+    }
+    process_status = hub_status
+    reaped = !process_status.nil?
+    unless reaped
+      begin
+        reaped = Process.waitpid(hub_pid, Process::WNOHANG)
+        process_status = $? if reaped
+      rescue Errno::ECHILD
+        reaped = true
+      end
+    end
+    unless reaped
+      begin
+        Timeout.timeout(10) do
+          Process.waitpid(hub_pid)
+          process_status = $?
+        end
+      rescue Timeout::Error
+        Process.kill("TERM", hub_pid) rescue nil
+        begin
+          Process.waitpid(hub_pid)
+          process_status = $?
+        rescue Errno::ECHILD
+          nil
+        end
+      end
+    end
+    hub_status = process_status
+    hub_log.close
+    unless shutdown_ok && hub_status&.success?
+      detail = [shutdown_stdout, shutdown_stderr].reject(&:empty?).join
+      failure ||= RuntimeError.new("claim-stack Hub cleanup failed: #{detail}")
+    end
+  end
+end
+
+if failure
+  File.write(File.join(evidence_dir, "failure.json"), JSON.pretty_generate({
+    "status" => "failed",
+    "error_class" => failure.class.name,
+    "message" => failure.message,
+    "teardown" => teardown,
+  }))
+  raise failure
+end
+
+summary["teardown"] = teardown
+File.write(File.join(evidence_dir, "summary.json"), JSON.pretty_generate(summary))
+puts "script/claim_stack_acceptance: ok evidence=#{evidence_dir}"

@@ -215,6 +215,58 @@ contract source pinned by both client graphs; it need not be the newest Hub
 commit. A failure in a Hub, Web, TUI, Core, TUI-kit, or UI-contract input must
 be repaired in that owning repository rather than patched by this package.
 
+### Claim-stack acceptance
+
+The available-session claim integration profile proves the complete claim flow
+on one parent-owned clean Hub with the real `botster-workspaces` package and
+production Web dual-browser interaction. It is opt-in and uses the same
+immutable pin manifest shape as shared-stack:
+
+```sh
+script/test-hub-flow claim-stack validate-inputs /absolute/path/to/inputs.json
+script/test-hub-flow claim-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
+```
+
+Minimum consumer pins (refresh at run time; dirty checkouts fail closed):
+
+| Component | Minimum revision / control |
+| --- | --- |
+| Workspaces package | `7ab4d1334214b3ea3c8b02e9ea665a27e70c0916` |
+| Hub binary source | `de6b09982e72fd5efd04a5258f5fc645f611adbc` |
+| Web package + driver | `102d39ea6c8ae7b927006dfba109171191c7b775` (includes `armDropNextInboundEntityFrame`) |
+| TUI package + driver | `d40f28f9de2b621e50367c0f014880429eddedde` (shared-Hub claim-driver) |
+
+Parent campaign lanes (one shared `--data-dir`):
+
+- Package/Hub substrate via `script/hub_acceptance_smoke` (empty membership
+  `items == []`, entity_options authoring, membership publish, concurrent claim
+  uniqueness).
+- Production Web dual-browser claim campaign (`script/claim_stack_web_driver.mjs`):
+  entity_options select without typing an ID, SPA `request_id` correlation,
+  dual-workspace race (one owner + typed conflict), same-workspace concurrent
+  idempotent claim, historical advanced UUID recovery, in-page
+  `transportControl.closeDataChannel` reconnect, and ordered
+  `sequence_gap` via `transportControl.armDropNextInboundEntityFrame` (Web
+  ticket `ticket_1786518263_839128`).
+- Production TUI keyboard claim on the **same** Hub via
+  `botster.tui.workspaces-claim-driver/v1` (`apps open botster-tui` with
+  `BOTSTER_TUI_ACCEPTANCE_SCENARIO` / evidence, strict build receipt from
+  `script/write-claim-build-receipt`). Proves realized
+  `botster_workspaces.add_session`, membership join, and option exclusion
+  (TUI ticket `ticket_1786529885_807584`).
+- Supporting pin-matched consumer re-checks (separate clean Hubs by consumer
+  design): Web `npm run smoke:workspaces-lifecycle` and TUI
+  `script/test-live-hub workspaces lifecycle`.
+
+Forbidden: `list_sessions` as picker source, force interaction, direct action
+payloads as race/claim participants, package-tool claim as a UI substitute,
+page-reload-as-reconnect, client-store injection as a gap trigger, and
+timing-only pass criteria.
+
+Evidence lands in the supplied directory as raw logs plus `summary.json` with
+pins, membership oracles, SPA request-state, forbidden-methods audit, and the
+production entry-point statement.
+
 See [docs/workspace-domain.md](docs/workspace-domain.md) and
 [docs/capabilities.md](docs/capabilities.md) for the exact domain and authority
 contracts.

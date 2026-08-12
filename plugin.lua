@@ -1421,14 +1421,24 @@ end
 
 local function action_error(arguments, result, field_ids)
   local field_errors = {}
+  local code = type(result.error) == "table" and result.error.code or "error"
+  local message = type(result.error) == "table" and result.error.message or tostring(result.error or "action failed")
   for _, field in ipairs(result.fields or {}) do
     local id = (field_ids or {})[field] or field
-    field_errors[id] = { result.error.message }
+    field_errors[id] = { message }
   end
-  return action_result(arguments, result.error.code == "validation_failed" and "rejected" or "error", {
+  -- UiActionResult.error is a string (schema). Carry typed code in payload.error so
+  -- SPA/harness can correlate session_already_owned without message scraping.
+  return action_result(arguments, code == "validation_failed" and "rejected" or "error", {
     field_errors = field_errors,
-    form_errors = { result.error.message },
-    error = result.error.message,
+    form_errors = { message },
+    error = message,
+    payload = {
+      error = {
+        code = code,
+        message = message,
+      },
+    },
   })
 end
 

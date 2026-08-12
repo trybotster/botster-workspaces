@@ -1499,19 +1499,61 @@ assert_true(
   "empty selection keys field error to the picker when advanced is empty"
 )
 
-local delete_target = create({ name = "Disposable grouping" })
-local session_to_preserve = "66666666-6666-4666-8666-666666666666"
-assert_eq(add_session({ workspace_id = delete_target.workspace.id, session_id = session_to_preserve }).ok, true, "delete fixture membership adds")
-local spawn_call_count = #spawn_calls
-local deleted = delete({ id = delete_target.workspace.id })
-assert_eq(deleted.ok, true, "delete removes grouping")
-assert_eq(deleted.workspace.session_refs[1], session_to_preserve, "delete reports preserved membership history")
-assert_eq(database["membership:" .. session_to_preserve], nil, "delete clears membership index keys")
-assert_eq(show({ id = delete_target.workspace.id }).error.code, "workspace_not_found", "grouping record is physically removed")
-assert_eq(#spawn_calls, spawn_call_count, "delete never invokes Hub spawn or lifecycle mutation")
-assert_eq(create({ name = "Disposable grouping" }).ok, true, "delete releases name immediately")
+local function run_typed_conflict_action_error_tests()
+  -- Typed conflict must preserve session_already_owned through the UI action path.
+  -- (Session id shape validation is non-empty only on current main; do not re-impose UUID format.)
+  local typed_conflict_ws = create({ name = "Typed conflict owner" }).workspace
+  local typed_conflict_other = create({ name = "Typed conflict loser" }).workspace
+  local typed_conflict_session = "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1"
+  assert_eq(
+    add_session({ workspace_id = typed_conflict_ws.id, session_id = typed_conflict_session }).ok,
+    true,
+    "typed conflict owner claim"
+  )
+  local typed_conflict = add_action({
+    request_id = "add-typed-conflict",
+    surface_id = "workspaces",
+    action_id = "botster_workspaces.add_session",
+    node_id = "botster-workspaces-add-form-" .. typed_conflict_other.id,
+    values = {
+      ["botster-workspaces-add-workspace-id"] = typed_conflict_other.id,
+      ["botster-workspaces-add-session-id"] = typed_conflict_session,
+    },
+  })
+  assert_eq(typed_conflict.state, "error", "cross-workspace UI claim is error not accepted")
+  assert_eq(type(typed_conflict.error), "string", "UiActionResult.error remains a string")
+  assert_eq(
+    typed_conflict.payload and typed_conflict.payload.error and typed_conflict.payload.error.code or nil,
+    "session_already_owned",
+    "UI action_error preserves structured session_already_owned code in payload.error"
+  )
+  assert_eq(
+    typed_conflict.payload and typed_conflict.payload.error and typed_conflict.payload.error.message ~= nil,
+    true,
+    "UI action_error preserves structured error message in payload.error"
+  )
+end
+
+run_typed_conflict_action_error_tests()
+
+local function run_delete_and_late_fixture_tests()
+  local delete_target = create({ name = "Disposable grouping" })
+  local session_to_preserve = "66666666-6666-4666-8666-666666666666"
+  assert_eq(add_session({ workspace_id = delete_target.workspace.id, session_id = session_to_preserve }).ok, true, "delete fixture membership adds")
+  local spawn_call_count = #spawn_calls
+  local deleted = delete({ id = delete_target.workspace.id })
+  assert_eq(deleted.ok, true, "delete removes grouping")
+  assert_eq(deleted.workspace.session_refs[1], session_to_preserve, "delete reports preserved membership history")
+  assert_eq(database["membership:" .. session_to_preserve], nil, "delete clears membership index keys")
+  assert_eq(show({ id = delete_target.workspace.id }).error.code, "workspace_not_found", "grouping record is physically removed")
+  assert_eq(#spawn_calls, spawn_call_count, "delete never invokes Hub spawn or lifecycle mutation")
+  assert_eq(create({ name = "Disposable grouping" }).ok, true, "delete releases name immediately")
 
 
+
+end
+
+run_delete_and_late_fixture_tests()
 
 local function run_membership_producer_matrix_tests()
   -- Membership producer matrix needs a valid workspace_state after action fixtures.

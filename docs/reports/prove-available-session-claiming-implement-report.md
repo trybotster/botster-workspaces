@@ -13,7 +13,8 @@
 | Approved plan | `docs/plans/prove-available-session-claiming-across-hub-web-tui.md` (v4) |
 | Runtime-teardown class | **Does not apply** |
 | Workspaces HEAD | (this report commit) |
-| TUI claim pin | `96823e0b9c53a1957a7d7ab376b005a41dcc358f` (held-open lifecycle claim driver) |
+| TUI claim pin | **merged** `f2bc11fc8c0b14b57ebcf9b6ace4f1d80565720f` on `botster-tui` main (PR #52) |
+| TUI ticket | `ticket_1786559993_989665` (closed, merge confirmed) |
 
 ## Merge-block revisit (post-Verify)
 
@@ -22,7 +23,7 @@ Verify approved at `32d34a1`, then direct merge blocked. This Implement pass add
 | Blocker | Resolution |
 | --- | --- |
 | `git merge-tree` conflict in `test/plugin_runtime_test.lua` vs main `7db06a6` | Merged `origin/main`; kept structured `session_already_owned` action-error coverage; wrapped late fixtures for Lua 200-local limit; aligned smoke with main’s non-UUID session-id validation and `Historical session ID` label. |
-| Plan C2.5 TUI held-open lifecycle | TUI claim driver emits `lifecycle_live_update` after `option_present` (shutdown session; option projection changes; form not reopened; zero `PluginSurfaceRender` delta). Parent `parse_tui_claim_evidence!` requires it. Label live-update only when Hub supplies dedicated label. |
+| Plan C2.5 TUI held-open lifecycle | Routed as owning TUI ticket `ticket_1786559993_989665` + [PR #52](https://github.com/trybotster/botster-tui/pull/52), **squash-merged to main** at `f2bc11f`. Parent re-ran claim-stack on the merged pin (not a branch-only artifact). |
 
 ## Playbooks / notes applied
 
@@ -52,7 +53,7 @@ Verify approved at `32d34a1`, then direct merge blocked. This Implement pass add
 | Item | Status |
 | --- | --- |
 | Prior Hub/Web/TUI deps | closed |
-| TUI claim driver held-open lifecycle | shipped on branch pin `96823e0` (PR: botster-tui claim-held-open-lifecycle) |
+| TUI claim driver held-open lifecycle | **closed** `ticket_1786559993_989665` / merged `f2bc11f` via [PR #52](https://github.com/trybotster/botster-tui/pull/52) |
 
 ## Tests and proof
 
@@ -64,20 +65,20 @@ git merge-tree --write-tree origin/main HEAD
 # clean
 
 script/claim_stack_acceptance … EVIDENCE_DIR
-# ok evidence=/private/tmp/claim-stack-evidence-mergefix-1786559692
+# ok evidence=/private/tmp/claim-stack-evidence-merged-tui-1786560081
 # status=passed
+# TUI pin = merged main f2bc11f (not a branch tip)
 ```
 
 | Check | Result |
 | --- | --- |
 | C1 Web held-open lifecycle | passed |
-| C2 TUI keyboard claim + **C2.5 lifecycle_live_update** (reopened=false) | passed |
+| C2 TUI keyboard claim + **C2.5 lifecycle_live_update** on **merged** TUI main | passed |
 | C3–C6b | passed |
 | merge-tree vs main | clean |
 
 ## Residual risk
 
-- TUI pin is a branch SHA ahead of TUI `main` until the claim-held-open-lifecycle PR merges; claim-stack pins that exact revision + binary digest.
 - Hub still omits dedicated session `label` / `spawn_point` on the claim-stack Hub pin; label_live_update stays false when absent.
 
 ## Missing vault guidance

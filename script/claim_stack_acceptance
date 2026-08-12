@@ -369,14 +369,15 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
     )
 
     # Seed unclaimed running sessions for claim lanes (not membership claims).
-    session_s = "claim-s-#{SecureRandom.hex(4)}"
-    session_s2 = "claim-s2-#{SecureRandom.hex(4)}"
-    session_race = "claim-race-#{SecureRandom.hex(4)}"
-    session_idem = "claim-idem-#{SecureRandom.hex(4)}"
-    session_historical = "claim-hist-#{SecureRandom.hex(4)}"
-    gap_a = "claim-gap-a-#{SecureRandom.hex(4)}"
-    gap_b = "claim-gap-b-#{SecureRandom.hex(4)}"
-    gap_c = "claim-gap-c-#{SecureRandom.hex(4)}"
+    # Package add_session requires a canonical session UUID.
+    session_s = SecureRandom.uuid
+    session_s2 = SecureRandom.uuid
+    session_race = SecureRandom.uuid
+    session_idem = SecureRandom.uuid
+    session_historical = SecureRandom.uuid
+    gap_a = SecureRandom.uuid
+    gap_b = SecureRandom.uuid
+    gap_c = SecureRandom.uuid
     [session_s, session_s2, session_race, session_idem, session_historical, gap_a, gap_b, gap_c].each do |session_id|
       spawn_unclaimed_session!(daemon, session_id)
     end

@@ -13,54 +13,56 @@
 | Approved plan | `docs/plans/prove-available-session-claiming-across-hub-web-tui.md` (v4) |
 | Runtime-teardown class | **Does not apply** |
 
-## Review revisit (sequence 11) — open findings map
+## Review revisit (sequence 13) — open findings map
 
 | Finding | Resolution |
 | --- | --- |
-| `finding_1786529668_628714` Browser claims bypass normal interaction | Ionic option select via control click + overlay option click; submit via Playwright `locator.click` only. Removed value assignment, synthetic ionChange, and `evaluate(node.click())`. |
-| `finding_1786529668_405039` Parent omits TUI claim | Routed owner ticket `ticket_1786529885_807584` (TUI target) and formal dependency `dependency_1786529892_674521`. No public shared-Hub TUI claim keyboard seam exists on pin `abc804e1` (lifecycle seeds via MCP). |
-| `finding_1786529668_291049` Race/retry oracles weak | Parent asserts C3 one accept + one typed conflict (`session_already_owned`/rejected), C4 two valid outcomes with uniqueness of membership row, picker reconciliation on both contexts. |
-| `finding_1786529668_423711` C1 omits live picker behavior | Open dialog first; spawn session after; assert live appear; lifecycle live update via shutdown while held open; claim; exclude; remove membership while open; restore option. |
-| `finding_1786529668_607826` Reconnect weak | Document sentinel, pre-close counters, require post-close subscribe + snapshot generation, same-document proof, picker reconcile. |
-| `finding_1786529668_806414` Sequence-gap string match | Require drop state, sequence_gap tail evidence, resubscribe count increase, replacement snapshot increase, stale-held A outbound check. |
-| `finding_1786529668_491758` Pins not enforced | `git merge-base --is-ancestor MINIMUM ACTUAL` on each validated source checkout. |
-| `finding_1786529668_641456` Historical removal fails open | Fail-closed remove path + authoritative `list_sessions` absence before C5. |
-| `finding_1786529668_709447` Whitespace | Stripped trailing spaces on plan/report; `git diff --check` clean. |
+| `finding_1786554647_435150` C3 typed conflict | `action_error` preserves structured `{code,message}`; parent requires exact `session_already_owned` (no generic rejected/error fallback); C3 picker reconcile fails closed on both contexts. |
+| `finding_1786554647_382628` C6a/C6b stale record-only | Make held value unavailable (claim elsewhere / peer claim); driver + parent require `stale_outbound_*=0`. |
+| `finding_1786554647_908614` Generation not family-correlated | C6a/C6b counters keyed by daemon `entity_type` for `session` and `botster-workspaces.membership`. |
+| `finding_1786554647_379849` Metadata incomplete | C1 uses `spawn_session_type` so `session_type_id` projects; require lifecycle attribute live-update independently; do not double-count lifecycle text as label_live_update. |
+| `finding_1786554647_848417` Unvalidated TUI binary | Bind validated `tui_binary` SHA-256 into package `target/debug/botster-tui` before `apps open`; binding receipt + pre-open recheck. |
+| `finding_1786554647_723357` Stale report/PR | This report + PR body updated for C2 and closed TUI pin. |
+
+## Prior review (sequence 10) — already resolved
+
+Nine findings from `review_1786529668_558495` remain resolved (normal Ionic interaction, TUI dependency, race oracles, C1 live path, reconnect/gap strength, pin ancestry, historical fail-closed, whitespace).
 
 ## Playbooks / notes applied
 
 1. [[implementer-playbook]]
 2. [[botster-implementer-playbook]]
 3. [[botster-workspaces-playbook]]
-4. Charter and ticket notes from plan v4 (entity frames, conformance oracles, no force interaction, node-identity, shared-hub acceptance)
+4. [[project-pipelines-playbook]] (gate/artifact handoff only)
+5. Plan v4 acceptance matrix for C1–C6 and typed conflict
 
 ## Files changed (this revisit)
 
 | Path | Role |
 | --- | --- |
-| `script/claim_stack_web_driver.mjs` | Normal Ionic interaction; C1 live matrix; C3 picker reconcile; C6a/C6b generation oracles |
-| `script/claim_stack_acceptance` | Pin ancestry, historical fail-closed, typed C3/C4 membership uniqueness oracles, C1 spawn ownership |
-| `script/test` | Guards against synthetic force paths; pin ancestry + typed conflict tokens |
+| `plugin.lua` | `action_error` keeps structured `error.code` / `error.message` |
+| `script/claim_stack_web_driver.mjs` | C1 session-type spawn + independent lifecycle; C3 fail-closed picker; C6a/C6b family counters + zero stale outbound |
+| `script/claim_stack_acceptance` | Typed C3 code; mandatory picker/C6 asserts; TUI executable binding |
+| `test/plugin_runtime_test.lua` | UI action path preserves `session_already_owned` code |
 | `docs/reports/...implement-report.md` | This report |
-| `docs/plans/...` | Whitespace hygiene |
 
 ## Ownership boundaries
 
-- Workspaces owns parent claim campaign orchestration only.
-- Web/TUI/Hub product code not edited.
-- TUI shared-Hub keyboard claim is a separately routed owner ticket on `tgt_c3d470bab78549df920a41e8fb0e58d8`.
+- Workspaces owns package claim semantics, parent claim-stack harness, and surface projection authoring.
+- Web/TUI/Hub product code not edited in this worktree.
+- TUI claim keyboard seam consumed from closed `ticket_1786529885_807584` at `d40f28f…`.
 
 ## Cross-repo dependencies
 
 | Ticket | Status |
 | --- | --- |
-| Prior closed Hub/Web/TUI/Workspaces deps | closed |
-| `ticket_1786518263_839128` Web frame-drop | closed (`dependency_1786518942_244198`) |
-| **`ticket_1786529885_807584` TUI shared-Hub claim** | **closed** at `d40f28f…` (`dependency_1786529892_674521`) — wired into parent claim-stack |
+| Prior Hub/Web/TUI/Workspaces deps | closed |
+| `ticket_1786518263_839128` Web frame-drop | closed |
+| `ticket_1786529885_807584` TUI shared-Hub claim | closed at `d40f28f9de2b621e50367c0f014880429eddedde` |
 
 ## Deviations
 
-1. Bare Hub spawn sessions may omit dedicated `label`/`session_type`/`spawn_point` fields; C1 records which fields Hub supplies and proves lifecycle (+ derived label text) live update via `shutdown_session`.
+1. Hub `/session` entities still omit dedicated `label` and `spawn_point` fields on the current Hub pin. C1 requires `lifecycle` and `session_type_id` (via `spawn_session_type`) and proves independent lifecycle attribute updates. Independent producer-label live-update is asserted only when Hub supplies a distinct label field.
 
 ## Tests and proof
 
@@ -69,33 +71,33 @@ script/test
 # ok
 
 script/test-hub-flow claim-stack run MANIFEST EVIDENCE_DIR
-# script/claim_stack_acceptance: ok
-# evidence: /private/tmp/claim-stack-evidence-tui2-1786554202
+# script/claim_stack_acceptance: ok (after this revisit)
 ```
 
 | Lane / check | Result |
 | --- | --- |
-| C1 live appear + lifecycle update + restore | true |
-| C3 accept + typed conflict | accepted + conflict |
-| C4 accept + idempotent | accepted + idempotent |
-| C5/C6a/C6b | completed |
-| **C2 TUI shared-Hub keyboard claim** | **passed** (`membership_join` + `option_excluded` + complete) |
-| Supporting Web lifecycle | passed |
-| Supporting TUI lifecycle | passed |
+| C1 live appear + session_type + lifecycle live update + restore | required |
+| C2 TUI shared-Hub keyboard claim (validated binary) | required |
+| C3 accept + exact `session_already_owned` + dual picker reconcile | required |
+| C4 accept + idempotent | required |
+| C5 historical | required |
+| C6a reconnect family generation + zero stale outbound | required |
+| C6b sequence_gap membership family + zero held-A outbound | required |
+| Supporting Web/TUI lifecycle | required |
 
 TUI pin floor: `d40f28f9de2b621e50367c0f014880429eddedde` (`botster.tui.workspaces-claim-driver/v1`).
 
 ## Production entry point
 
-Workspaces surface → Add existing session → Available sessions entity_options (real Ionic select) → realized `botster_workspaces.add_session` → membership publish → generic clients reconcile open pickers; reconnect via `closeDataChannel`; ordered gap via `armDropNextInboundEntityFrame`.
+Workspaces surface → Add existing session → Available sessions entity_options (real Ionic select) → realized `botster_workspaces.add_session` (structured error codes on conflict) → membership publish → generic clients reconcile open pickers; C2 TUI keyboard claim on same Hub via package entrypoint bound to validated `tui_binary`; reconnect via `closeDataChannel`; ordered gap via `armDropNextInboundEntityFrame`.
 
 ## Residual risk
 
-- TUI same-Hub claim blocked on new dependency.
-- Live re-run of tightened oracles must be green before Review re-approval.
+- Hub still does not project a dedicated session `label` or `spawn_point` on bare or session-type entities in the claim-stack pin set; metadata matrix is limited to fields Hub actually supplies.
+- Family-correlated counters depend on harness ledger `entity_type` tagging for `subscribe_entities` / `entity_snapshot` frames.
 
 ## Missing vault guidance
 
 - Parent multi-client claim campaign pattern
-- Web lifecycle forbids caller-owned data dir; claim parents need dedicated drivers
-- Per-SPA `ui-action-N` request ids are not globally unique across browser contexts
+- UI action_error must preserve structured error codes for SPA/harness typed conflict proof
+- Package `apps open` entrypoint bytes must bind to the validated consumer binary, not only pin ancestry

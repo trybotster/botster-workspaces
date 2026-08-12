@@ -430,6 +430,113 @@ async function optionMetadata(form, sessionId) {
   }, sessionId);
 }
 
+// Daemon subscribe_entities entity_type values (not UiNode path forms).
+// Hub transport uses "session" for /session; package membership family is fully qualified.
+const REQUIRED_ENTITY_FAMILIES = ["session", "botster-workspaces.membership"];
+
+/** Extract entity family identifiers from a harness ledger entry. */
+function entityFamiliesFromEntry(entry) {
+  const payload = entry?.payload ?? {};
+  const nested = payload.payload ?? {};
+  const request = payload.request ?? {};
+  const families = new Set();
+  const candidates = [
+    payload.entity_type,
+    nested.entity_type,
+    request.entity_type,
+    payload.family,
+    nested.family,
+  ];
+  if (Array.isArray(request.entity_types)) {
+    for (const value of request.entity_types) candidates.push(value);
+  }
+  if (Array.isArray(request.families)) {
+    for (const value of request.families) candidates.push(value);
+  }
+  // subscribe_entities may pass subscriptions: [{ entity_type }] or entity_type at top level.
+  if (Array.isArray(request.subscriptions)) {
+    for (const sub of request.subscriptions) {
+      if (sub?.entity_type) candidates.push(sub.entity_type);
+      if (sub?.family) candidates.push(sub.family);
+    }
+  }
+  for (const value of candidates) {
+    if (typeof value === "string" && value.length > 0) families.add(value);
+  }
+  return [...families];
+}
+
+function isSubscribeEntitiesEntry(entry) {
+  return entry?.kind === "daemon_request" && entry?.payload?.type === "subscribe_entities";
+}
+
+function isEntitySnapshotEntry(entry) {
+  if (entry?.kind !== "hub_frame") return false;
+  const kind = entry.payload?.kind || entry.payload?.type || entry.payload?.payload?.type;
+  return kind === "entity_snapshot";
+}
+
+function entryTouchesRequiredFamily(entry, families = REQUIRED_ENTITY_FAMILIES) {
+  const seen = entityFamiliesFromEntry(entry);
+  if (seen.length === 0) return false;
+  return families.some((family) => seen.includes(family));
+}
+
+function familyGenerationCounters(events) {
+  const byFamily = {};
+  for (const family of REQUIRED_ENTITY_FAMILIES) {
+    byFamily[family] = { subscribe_count: 0, snapshot_count: 0, subscription_ids: new Set(), generations: new Set() };
+  }
+  for (const entry of events) {
+    const families = entityFamiliesFromEntry(entry);
+    for (const family of families) {
+      if (!byFamily[family]) continue;
+      if (isSubscribeEntitiesEntry(entry)) {
+        byFamily[family].subscribe_count += 1;
+        const subId = entry.payload?.request?.subscription_id
+          || entry.payload?.subscription_id
+          || entry.payload?.request?.id;
+        if (subId) byFamily[family].subscription_ids.add(subId);
+      }
+      if (isEntitySnapshotEntry(entry)) {
+        byFamily[family].snapshot_count += 1;
+        const gen = entry.payload?.generation
+          ?? entry.payload?.payload?.generation
+          ?? entry.payload?.snapshot_seq
+          ?? entry.payload?.payload?.snapshot_seq;
+        if (gen != null) byFamily[family].generations.add(gen);
+        const subId = entry.payload?.subscription_id || entry.payload?.payload?.subscription_id;
+        if (subId) byFamily[family].subscription_ids.add(subId);
+      }
+    }
+  }
+  // Serialize Sets for JSON evidence.
+  const serialized = {};
+  for (const [family, row] of Object.entries(byFamily)) {
+    serialized[family] = {
+      subscribe_count: row.subscribe_count,
+      snapshot_count: row.snapshot_count,
+      subscription_ids: [...row.subscription_ids],
+      generations: [...row.generations]
+    };
+  }
+  return serialized;
+}
+
+function countStaleAddOutbound(events, since, sessionId) {
+  return events.slice(since).filter((entry) => {
+    const request = entry.payload?.request;
+    if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") return false;
+    if (request?.action_id !== "botster_workspaces.add_session") return false;
+    const values = request.values ?? {};
+    const resolved = values.session_id
+      || values.session_id_advanced
+      || values["botster-workspaces-add-session-id"]
+      || values["botster-workspaces-add-session-id-advanced"];
+    return resolved === sessionId;
+  });
+}
+
 async function run() {
   const appUrl = await waitForAppUrl();
   await waitForHttpOk(appUrl);
@@ -450,48 +557,91 @@ async function run() {
     if (beforeLiveOptions.includes(assignment.session_s)) {
       throw new Error(`C1: session_s present before live spawn: ${assignment.session_s}`);
     }
+    // Prefer session-type spawn so Hub projects session_type_id on /session when available.
+    const sessionTypeId = assignment.session_type_id
+      || "botster-workspaces-acceptance-session-type/workspace-acceptance";
+    const targetId = assignment.target_id || "workspaces-acceptance";
+    const spawnMode = "spawn_session_type";
+    // Require session-type spawn so /session projects session_type_id. Bare spawn cannot
+    // satisfy the metadata matrix and must not silently weaken this lane.
     await sendDaemonRequest(socketPath, {
-      type: "spawn",
+      type: "spawn_session_type",
+      session_type_id: sessionTypeId,
       session_id: assignment.session_s,
-      command: "sleep 3600"
+      request: {
+        target_id: targetId,
+        context: {
+          branch_name: "claim-stack-c1-meta",
+          prompt: "claim stack C1 metadata",
+          workspace_id: assignment.workspace_w1
+        }
+      }
     });
     await waitForOption(p1, form, assignment.session_s, 60_000);
     const metadata = await optionMetadata(form, assignment.session_s);
     if (!metadata?.value) {
       throw new Error(`C1: option metadata missing after live appear: ${JSON.stringify(metadata)}`);
     }
-    // Record which of the four display fields Hub projected (assert presence when supplied).
+    // Projected fields: assert every field Hub supplies. lifecycle is always expected on live sessions.
     const fieldsPresent = {
-      label: Boolean(metadata.label),
-      lifecycle: Boolean(metadata.lifecycle) || /running|exited|starting|stopping/i.test(metadata.label || ""),
+      label: Boolean(metadata.label && metadata.label.length > 0),
+      lifecycle: Boolean(metadata.lifecycle),
       session_type: Boolean(metadata.session_type),
       spawn_point: Boolean(metadata.spawn_point)
     };
-    // Live lifecycle update while dialog held open (no reopen): shutdown transitions running → exited.
+    if (!fieldsPresent.lifecycle) {
+      throw new Error(`C1: Hub session entity did not project lifecycle: ${JSON.stringify(metadata)}`);
+    }
+    if (spawnMode === "spawn_session_type" && !fieldsPresent.session_type) {
+      throw new Error(
+        `C1: session-type spawn did not project session_type_id on the option: ${JSON.stringify(metadata)}`
+      );
+    }
+    if (fieldsPresent.session_type && metadata.session_type !== sessionTypeId && spawnMode === "spawn_session_type") {
+      // Accept fully-qualified match only; do not invent display aliases.
+      throw new Error(
+        `C1: projected session_type ${metadata.session_type} != spawn session_type_id ${sessionTypeId}`
+      );
+    }
+    // Independent lifecycle live update while dialog held open (no reopen).
+    const lifecycleBefore = metadata.lifecycle;
     const labelBefore = metadata.label;
     await sendDaemonRequest(socketPath, { type: "shutdown_session", session_id: assignment.session_s });
     await p1.waitForFunction(
-      ({ formId, sessionId, before }) => {
+      ({ formId, sessionId, lifecycleBeforeValue }) => {
         const match = [...globalThis.document.querySelectorAll(
           `form[data-ui-node-id='${formId}'] [data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option`
         )].find((option) => (option.value ?? option.getAttribute("value")) === sessionId);
         if (!match) return false;
-        const text = (match.textContent || "").trim();
         const lifecycle = match.getAttribute("data-lifecycle") || "";
-        // Lifecycle/label live update: text or attribute must change from pre-shutdown snapshot.
-        return text !== before || /exited|ended|failed|stopping/i.test(`${text} ${lifecycle}`);
+        // Require the lifecycle attribute itself to change (not only derived label text).
+        return lifecycle
+          && lifecycle !== lifecycleBeforeValue
+          && /exited|ended|failed|stopping/i.test(lifecycle);
       },
       {
         formId: `botster-workspaces-add-form-${assignment.workspace_w1}`,
         sessionId: assignment.session_s,
-        before: labelBefore
+        lifecycleBeforeValue: lifecycleBefore
       },
       { timeout: 45_000 }
     );
     const metadataAfterLifecycle = await optionMetadata(form, assignment.session_s);
-    // Restart a running session for claim (claim accepts historical/exited uuid; prefer running).
-    // Re-spawn same uuid is not allowed; claim the exited session (still in /session) or spawn S live.
-    // Claim uses the still-present option after lifecycle change.
+    if (!metadataAfterLifecycle?.lifecycle || metadataAfterLifecycle.lifecycle === lifecycleBefore) {
+      throw new Error(
+        `C1: lifecycle did not live-update independently: before=${lifecycleBefore} after=${JSON.stringify(metadataAfterLifecycle)}`
+      );
+    }
+    // Label live-update is only claimed when Hub supplies a distinct producer label field that
+    // changes without relying on the lifecycle attribute. Bare/session-type entities typically
+    // omit a dedicated label; do not double-count lifecycle-derived option text as label proof.
+    const labelLiveUpdate = Boolean(
+      fieldsPresent.label
+      && metadataAfterLifecycle?.label
+      && metadataAfterLifecycle.label !== labelBefore
+      && metadataAfterLifecycle.lifecycle !== labelBefore
+    );
+    // Claim uses the still-present option after lifecycle change (ended sessions remain claimable).
     await selectSession(p1, form, assignment.session_s);
     const c1Claim = await submitAdd(p1, form, assignment.workspace_w1, assignment.session_s, "C1 claim");
     const c1Accepted = c1Claim?.result?.accepted === true
@@ -555,11 +705,15 @@ async function run() {
     summary.lanes.c1 = {
       claim: c1Claim,
       live_appear: true,
+      spawn_mode: spawnMode,
+      session_type_id: sessionTypeId,
       fields_present: fieldsPresent,
       metadata_present: metadata,
       metadata_after_lifecycle: metadataAfterLifecycle,
       lifecycle_live_update: true,
-      label_live_update: (metadataAfterLifecycle?.label || "") !== labelBefore,
+      // Only true when a non-lifecycle producer label field changed independently.
+      label_live_update: labelLiveUpdate,
+      label_live_update_required: fieldsPresent.label && Boolean(assignment.require_label_live_update),
       excluded_after_claim: true,
       stale_submit_blocked: true,
       restored_after_remove: true,
@@ -608,19 +762,33 @@ async function run() {
     if (workspaces.size !== 2) {
       throw new Error(`C3 expected two workspaces; got ${JSON.stringify([...workspaces])}`);
     }
-    // Picker reconciliation without surface refresh: excluded race uuid on both contexts.
-    const reconA = await openAddDialog(raceA, assignment.workspace_w1).then(async (form) => {
+    // Picker reconciliation without surface refresh: both dialogs must open and exclude race uuid.
+    let reconA;
+    let reconB;
+    try {
+      const formReconA = await openAddDialog(raceA, assignment.workspace_w1);
       await raceA.waitForTimeout(500);
-      return readSelectOptions(form);
-    }).catch(() => null);
-    const reconB = await openAddDialog(raceB, assignment.workspace_w2).then(async (form) => {
+      reconA = await readSelectOptions(formReconA);
+    } catch (error) {
+      throw new Error(`C3 W1 picker reconciliation failed closed: ${error.message}`);
+    }
+    try {
+      const formReconB = await openAddDialog(raceB, assignment.workspace_w2);
       await raceB.waitForTimeout(500);
-      return readSelectOptions(form);
-    }).catch(() => null);
-    if (Array.isArray(reconA) && reconA.includes(assignment.session_race)) {
+      reconB = await readSelectOptions(formReconB);
+    } catch (error) {
+      throw new Error(`C3 W2 picker reconciliation failed closed: ${error.message}`);
+    }
+    if (!Array.isArray(reconA)) {
+      throw new Error(`C3 W1 picker options unreadable: ${JSON.stringify(reconA)}`);
+    }
+    if (!Array.isArray(reconB)) {
+      throw new Error(`C3 W2 picker options unreadable: ${JSON.stringify(reconB)}`);
+    }
+    if (reconA.includes(assignment.session_race)) {
       throw new Error(`C3 W1 picker still lists race session after claim: ${JSON.stringify(reconA)}`);
     }
-    if (Array.isArray(reconB) && reconB.includes(assignment.session_race)) {
+    if (reconB.includes(assignment.session_race)) {
       throw new Error(`C3 W2 picker still lists race session after claim: ${JSON.stringify(reconB)}`);
     }
     summary.lanes.c3 = {
@@ -632,8 +800,8 @@ async function run() {
         workspace_id: entry.workspace_id,
         session_uuid: entry.session_uuid
       })),
-      picker_reconciled_w1: Array.isArray(reconA) ? !reconA.includes(assignment.session_race) : false,
-      picker_reconciled_w2: Array.isArray(reconB) ? !reconB.includes(assignment.session_race) : false
+      picker_reconciled_w1: true,
+      picker_reconciled_w2: true
     };
 
     // ---- C4: same-workspace concurrent dual context ----
@@ -779,83 +947,186 @@ async function run() {
       globalThis.__CLAIM_STACK_DOCUMENT_SENTINEL__ = marker;
       return marker;
     });
-    const preClose = await recon.evaluate(() => {
+    const preClose = await recon.evaluate((requiredFamilies) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      const subscribeCount = events.filter((entry) =>
-        entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities"
-      ).length;
-      const snapshotCount = events.filter((entry) =>
-        entry.kind === "hub_frame"
-        && (entry.payload?.kind === "entity_snapshot" || entry.payload?.type === "entity_snapshot"
-          || entry.payload?.payload?.type === "entity_snapshot")
-      ).length;
+      const familyOf = (entry) => {
+        const payload = entry?.payload ?? {};
+        const nested = payload.payload ?? {};
+        const request = payload.request ?? {};
+        const out = new Set();
+        for (const value of [
+          payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
+        ]) {
+          if (typeof value === "string" && value) out.add(value);
+        }
+        if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
+        if (Array.isArray(request.subscriptions)) {
+          for (const sub of request.subscriptions) {
+            if (sub?.entity_type) out.add(sub.entity_type);
+          }
+        }
+        return [...out];
+      };
+      const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, { subscribe_count: 0, snapshot_count: 0 }]));
+      for (const entry of events) {
+        const families = familyOf(entry);
+        const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
+        const isSnap = entry.kind === "hub_frame" && (
+          entry.payload?.kind === "entity_snapshot"
+          || entry.payload?.type === "entity_snapshot"
+          || entry.payload?.payload?.type === "entity_snapshot"
+        );
+        for (const family of families) {
+          if (!byFamily[family]) continue;
+          if (isSub) byFamily[family].subscribe_count += 1;
+          if (isSnap) byFamily[family].snapshot_count += 1;
+        }
+      }
       return {
         event_count: events.length,
-        subscribe_count: subscribeCount,
-        snapshot_count: snapshotCount
+        by_family: byFamily
       };
-    });
+    }, REQUIRED_ENTITY_FAMILIES);
     await recon.waitForFunction(
       () => typeof globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl?.closeDataChannel === "function",
       null,
       { timeout: 20_000 }
     );
+    // Claim S2 from another path during reconnect so the held selection becomes unavailable.
+    await sendDaemonRequest(socketPath, {
+      type: "plugin_mcp_call_tool",
+      name: "botster_workspaces.add_session",
+      arguments: {
+        workspace_id: assignment.workspace_w1,
+        session_id: assignment.session_s2
+      }
+    });
     const closed = await recon.evaluate(() =>
       globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__.transportControl.closeDataChannel()
     );
     if (!closed) {
       throw new Error("C6a closeDataChannel returned false");
     }
-    // Require post-close generation: new subscribe_entities and entity_snapshot after preClose index.
-    await recon.waitForFunction(
-      ({ sinceEventCount, priorSubscribe, priorSnapshot }) => {
+    // Post-close generation must advance for each required family (/session + membership).
+    const postCloseFamilies = await recon.waitForFunction(
+      ({ sinceEventCount, priorByFamily, requiredFamilies }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-        if (events.length <= sinceEventCount) return false;
+        if (events.length <= sinceEventCount) return null;
         const tail = events.slice(sinceEventCount);
-        const subscribeCount = events.filter((entry) =>
-          entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities"
-        ).length;
-        const snapshotCount = events.filter((entry) =>
-          entry.kind === "hub_frame"
-          && (entry.payload?.kind === "entity_snapshot" || entry.payload?.type === "entity_snapshot"
-            || entry.payload?.payload?.type === "entity_snapshot")
-        ).length;
+        const familyOf = (entry) => {
+          const payload = entry?.payload ?? {};
+          const nested = payload.payload ?? {};
+          const request = payload.request ?? {};
+          const out = new Set();
+          for (const value of [
+            payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
+          ]) {
+            if (typeof value === "string" && value) out.add(value);
+          }
+          if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
+          if (Array.isArray(request.subscriptions)) {
+            for (const sub of request.subscriptions) {
+              if (sub?.entity_type) out.add(sub.entity_type);
+            }
+          }
+          return [...out];
+        };
+        const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, {
+          subscribe_count: 0,
+          snapshot_count: 0,
+          subscription_ids: [],
+          snapshot_seqs: []
+        }]));
+        for (const entry of events) {
+          const families = familyOf(entry);
+          const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
+          const isSnap = entry.kind === "hub_frame" && (
+            entry.payload?.kind === "entity_snapshot"
+            || entry.payload?.type === "entity_snapshot"
+            || entry.payload?.payload?.type === "entity_snapshot"
+          );
+          for (const family of families) {
+            if (!byFamily[family]) continue;
+            if (isSub) {
+              byFamily[family].subscribe_count += 1;
+              const sid = entry.payload?.request?.subscription_id || entry.payload?.subscription_id;
+              if (sid) byFamily[family].subscription_ids.push(sid);
+            }
+            if (isSnap) {
+              byFamily[family].snapshot_count += 1;
+              const seq = entry.payload?.snapshot_seq
+                ?? entry.payload?.payload?.snapshot_seq
+                ?? entry.payload?.generation
+                ?? entry.payload?.payload?.generation;
+              if (seq != null) byFamily[family].snapshot_seqs.push(seq);
+            }
+          }
+        }
         const lifecycleTail = tail.some((entry) => entry.kind === "webrtc_lifecycle");
-        return subscribeCount > priorSubscribe
-          && snapshotCount > priorSnapshot
-          && lifecycleTail;
+        const allAdvanced = requiredFamilies.every((family) =>
+          byFamily[family].subscribe_count > (priorByFamily[family]?.subscribe_count ?? 0)
+          && byFamily[family].snapshot_count > (priorByFamily[family]?.snapshot_count ?? 0)
+        );
+        if (!allAdvanced || !lifecycleTail) return null;
+        return { by_family: byFamily, lifecycle_tail: true };
       },
       {
         sinceEventCount: preClose.event_count,
-        priorSubscribe: preClose.subscribe_count,
-        priorSnapshot: preClose.snapshot_count
+        priorByFamily: preClose.by_family,
+        requiredFamilies: REQUIRED_ENTITY_FAMILIES
       },
       { timeout: 60_000 }
-    );
+    ).then((handle) => handle.jsonValue());
     const sameDocument = await recon.evaluate((marker) =>
       globalThis.__CLAIM_STACK_DOCUMENT_SENTINEL__ === marker
     , documentSentinel);
     if (!sameDocument) {
       throw new Error("C6a document reloaded; reconnect must be in-page");
     }
-    await waitForOption(recon, reconForm, assignment.session_s2, 45_000);
-    // Stale draft selection must not successfully claim after reconnect without revalidation.
+    // Held S2 must disappear from options after membership claim + replacement snapshots.
+    await recon.waitForFunction(
+      ({ formId, sessionId }) => {
+        const formNode = globalThis.document.querySelector(`form[data-ui-node-id='${formId}']`);
+        if (!formNode) return true;
+        const options = [...formNode.querySelectorAll(
+          "[data-ui-node-id='botster-workspaces-add-session-id'] ion-select-option"
+        )];
+        return !options.some((option) => (option.value ?? option.getAttribute("value")) === sessionId);
+      },
+      {
+        formId: `botster-workspaces-add-form-${assignment.workspace_w2}`,
+        sessionId: assignment.session_s2
+      },
+      { timeout: 45_000 }
+    ).catch(async () => {
+      const options = await readSelectOptions(reconForm);
+      throw new Error(
+        `C6a: held session still projected after reconnect exclusion: ${JSON.stringify(options)}`
+      );
+    });
+    // Stale held selection must emit zero successful claim outbound after replacement snapshot.
     const reconSubmit = reconForm.locator("ion-button[data-action-id='botster_workspaces.add_session']");
     const reconStaleSince = await harnessEventCount(recon);
     await reconSubmit.click({ timeout: 5_000 }).catch(() => {});
-    await recon.waitForTimeout(500);
+    await recon.waitForTimeout(800);
     const reconStale = await recon.evaluate(({ since, sessionId }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).filter((entry) => {
         const request = entry.payload?.request;
         if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") return false;
         if (request?.action_id !== "botster_workspaces.add_session") return false;
         const values = request.values ?? {};
-        const resolved = values.session_id || values.session_id_advanced;
+        const resolved = values.session_id
+          || values.session_id_advanced
+          || values["botster-workspaces-add-session-id"]
+          || values["botster-workspaces-add-session-id-advanced"];
         return resolved === sessionId;
       }),
     { since: reconStaleSince, sessionId: assignment.session_s2 });
-    // After reconnect, a held draft may still submit if still valid; require no successful accept
-    // for a value that was cleared invalid. Prefer zero outbound stale claims when form invalid.
+    if (reconStale.length !== 0) {
+      throw new Error(
+        `C6a stale held selection emitted claim outbound after reconnect: count=${reconStale.length}`
+      );
+    }
     summary.lanes.c6a = {
       control: "transportControl.closeDataChannel",
       closed: true,
@@ -863,9 +1134,11 @@ async function run() {
       document_sentinel_survived: true,
       pre_close: preClose,
       post_close_generation: true,
+      post_close_families: postCloseFamilies,
       authoritative_snapshot_after_close: true,
       options_reconciled: true,
-      stale_outbound_after_reconnect: reconStale.length
+      held_value_unavailable: true,
+      stale_outbound_after_reconnect: 0
     };
 
     // ---- C6b ordered sequence_gap via armDropNextInboundEntityFrame ----
@@ -880,18 +1153,43 @@ async function run() {
     const gapForm1 = await openAddDialog(gapP1, assignment.workspace_w2);
     await waitForOption(gapP1, gapForm1, gapSessions[0]);
     await selectSession(gapP1, gapForm1, gapSessions[0]); // A held stale candidate
-    const gapBaseline = await gapP1.evaluate(() => {
+    const gapBaseline = await gapP1.evaluate((requiredFamilies) => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
-      return {
-        event_count: events.length,
-        subscribe_count: events.filter((e) => e.kind === "daemon_request" && e.payload?.type === "subscribe_entities").length,
-        snapshot_count: events.filter((e) =>
-          e.kind === "hub_frame"
-          && (e.payload?.kind === "entity_snapshot" || e.payload?.type === "entity_snapshot"
-            || e.payload?.payload?.type === "entity_snapshot")
-        ).length
+      const familyOf = (entry) => {
+        const payload = entry?.payload ?? {};
+        const nested = payload.payload ?? {};
+        const request = payload.request ?? {};
+        const out = new Set();
+        for (const value of [
+          payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
+        ]) {
+          if (typeof value === "string" && value) out.add(value);
+        }
+        if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
+        if (Array.isArray(request.subscriptions)) {
+          for (const sub of request.subscriptions) {
+            if (sub?.entity_type) out.add(sub.entity_type);
+          }
+        }
+        return [...out];
       };
-    });
+      const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, { subscribe_count: 0, snapshot_count: 0 }]));
+      for (const entry of events) {
+        const families = familyOf(entry);
+        const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
+        const isSnap = entry.kind === "hub_frame" && (
+          entry.payload?.kind === "entity_snapshot"
+          || entry.payload?.type === "entity_snapshot"
+          || entry.payload?.payload?.type === "entity_snapshot"
+        );
+        for (const family of families) {
+          if (!byFamily[family]) continue;
+          if (isSub) byFamily[family].subscribe_count += 1;
+          if (isSnap) byFamily[family].snapshot_count += 1;
+        }
+      }
+      return { event_count: events.length, by_family: byFamily };
+    }, REQUIRED_ENTITY_FAMILIES);
     let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, gapSessions[0]);
     await selectSession(gapP2, gapForm2, gapSessions[0]);
@@ -922,54 +1220,118 @@ async function run() {
     await selectSession(gapP2, gapForm2, gapSessions[2]);
     await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapSessions[2], "C6b gap C");
     const gapEvidence = await gapP1.waitForFunction(
-      ({ sinceEventCount, priorSubscribe, priorSnapshot }) => {
+      ({ sinceEventCount, priorByFamily, requiredFamilies, membershipFamily }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
         const tail = events.slice(sinceEventCount);
+        const familyOf = (entry) => {
+          const payload = entry?.payload ?? {};
+          const nested = payload.payload ?? {};
+          const request = payload.request ?? {};
+          const out = new Set();
+          for (const value of [
+            payload.entity_type, nested.entity_type, request.entity_type, payload.family, nested.family
+          ]) {
+            if (typeof value === "string" && value) out.add(value);
+          }
+          if (Array.isArray(request.entity_types)) for (const v of request.entity_types) if (v) out.add(v);
+          if (Array.isArray(request.subscriptions)) {
+            for (const sub of request.subscriptions) {
+              if (sub?.entity_type) out.add(sub.entity_type);
+            }
+          }
+          return [...out];
+        };
         const gapHit = tail.some((entry) => {
           const text = JSON.stringify(entry);
           return text.includes("sequence_gap")
             || entry.payload?.reason === "sequence_gap"
             || entry.payload?.payload?.reason === "sequence_gap";
         });
-        const subscribeCount = events.filter((e) =>
-          e.kind === "daemon_request" && e.payload?.type === "subscribe_entities"
-        ).length;
-        const snapshotCount = events.filter((e) =>
-          e.kind === "hub_frame"
-          && (e.payload?.kind === "entity_snapshot" || e.payload?.type === "entity_snapshot"
-            || e.payload?.payload?.type === "entity_snapshot")
-        ).length;
-        if (!gapHit || subscribeCount <= priorSubscribe || snapshotCount <= priorSnapshot) return null;
+        const byFamily = Object.fromEntries(requiredFamilies.map((f) => [f, {
+          subscribe_count: 0,
+          snapshot_count: 0,
+          subscription_ids: [],
+          snapshot_seqs: []
+        }]));
+        for (const entry of events) {
+          const families = familyOf(entry);
+          const isSub = entry.kind === "daemon_request" && entry.payload?.type === "subscribe_entities";
+          const isSnap = entry.kind === "hub_frame" && (
+            entry.payload?.kind === "entity_snapshot"
+            || entry.payload?.type === "entity_snapshot"
+            || entry.payload?.payload?.type === "entity_snapshot"
+          );
+          for (const family of families) {
+            if (!byFamily[family]) continue;
+            if (isSub) {
+              byFamily[family].subscribe_count += 1;
+              const sid = entry.payload?.request?.subscription_id || entry.payload?.subscription_id;
+              if (sid) byFamily[family].subscription_ids.push(sid);
+            }
+            if (isSnap) {
+              byFamily[family].snapshot_count += 1;
+              const seq = entry.payload?.snapshot_seq
+                ?? entry.payload?.payload?.snapshot_seq
+                ?? entry.payload?.generation
+                ?? entry.payload?.payload?.generation;
+              if (seq != null) byFamily[family].snapshot_seqs.push(seq);
+            }
+          }
+        }
+        // Membership family must resubscribe and replace after the armed drop (primary gap family).
+        const membershipAdvanced =
+          byFamily[membershipFamily].subscribe_count > (priorByFamily[membershipFamily]?.subscribe_count ?? 0)
+          && byFamily[membershipFamily].snapshot_count > (priorByFamily[membershipFamily]?.snapshot_count ?? 0);
+        // Session family must also show a post-gap replacement snapshot when it was subscribed.
+        const sessionFamily = "session";
+        const sessionWasSubscribed = (priorByFamily[sessionFamily]?.subscribe_count ?? 0) > 0
+          || byFamily[sessionFamily].subscribe_count > 0;
+        const sessionAdvanced = !sessionWasSubscribed || (
+          byFamily[sessionFamily].subscribe_count > (priorByFamily[sessionFamily]?.subscribe_count ?? 0)
+          && byFamily[sessionFamily].snapshot_count > (priorByFamily[sessionFamily]?.snapshot_count ?? 0)
+        );
+        if (!gapHit || !membershipAdvanced || !sessionAdvanced) return null;
         return {
           sequence_gap: true,
-          resubscribe: subscribeCount > priorSubscribe,
-          replacement_snapshot: snapshotCount > priorSnapshot,
+          resubscribe: true,
+          replacement_snapshot: true,
+          by_family: byFamily,
+          membership_family: membershipFamily,
           tail_count: tail.length
         };
       },
       {
         sinceEventCount: gapBaseline.event_count,
-        priorSubscribe: gapBaseline.subscribe_count,
-        priorSnapshot: gapBaseline.snapshot_count
+        priorByFamily: gapBaseline.by_family,
+        requiredFamilies: REQUIRED_ENTITY_FAMILIES,
+        membershipFamily: "botster-workspaces.membership"
       },
       { timeout: 60_000 }
     ).then((handle) => handle.jsonValue());
-    // Stale held A must not successfully claim after gap resync.
+    // Held A was claimed by peer; must emit zero outbound claim for A after gap resync.
     const gapStaleSince = await harnessEventCount(gapP1);
     await gapForm1.locator("ion-button[data-action-id='botster_workspaces.add_session']")
       .click({ timeout: 5_000 })
       .catch(() => {});
-    await gapP1.waitForTimeout(500);
+    await gapP1.waitForTimeout(800);
     const gapStaleOutbound = await gapP1.evaluate(({ since, sessionId }) =>
       (globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? []).slice(since).filter((entry) => {
         const request = entry.payload?.request;
         if (entry.kind !== "daemon_request" || entry.payload?.type !== "plugin_surface_action") return false;
         if (request?.action_id !== "botster_workspaces.add_session") return false;
         const values = request.values ?? {};
-        const resolved = values.session_id || values.session_id_advanced;
+        const resolved = values.session_id
+          || values.session_id_advanced
+          || values["botster-workspaces-add-session-id"]
+          || values["botster-workspaces-add-session-id-advanced"];
         return resolved === sessionId;
       }),
     { since: gapStaleSince, sessionId: gapSessions[0] });
+    if (gapStaleOutbound.length !== 0) {
+      throw new Error(
+        `C6b stale held A emitted claim outbound after sequence_gap resync: count=${gapStaleOutbound.length}`
+      );
+    }
     summary.lanes.c6b = {
       control: "transportControl.armDropNextInboundEntityFrame",
       filter: { entity_type: "botster-workspaces.membership" },
@@ -977,7 +1339,7 @@ async function run() {
       arm,
       drop_state: dropState,
       gap_evidence: gapEvidence,
-      stale_outbound_for_held_a: gapStaleOutbound.length
+      stale_outbound_for_held_a: 0
     };
 
     summary.completed = true;

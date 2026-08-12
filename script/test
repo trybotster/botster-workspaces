@@ -481,4 +481,45 @@ assert(
   )
 end
 
+
+# C2.5 TUI oracle negative controls (mirror parse_tui_claim_evidence! fail-closed rules).
+def c2_5_oracle_accepts?(records)
+  option_present_idx = records.index { |row| row["kind"] == "option_present" }
+  lifecycle_idx = records.index { |row| row["kind"] == "lifecycle_live_update" }
+  add_idx = records.index do |row|
+    row["kind"] == "dispatched_action" && row.dig("payload", "action_id") == "botster_workspaces.add_session"
+  end
+  return false if option_present_idx.nil? || lifecycle_idx.nil? || add_idx.nil?
+  lifecycle = records[lifecycle_idx]
+  return false unless lifecycle.dig("payload", "reopened") == false
+  return false unless lifecycle.dig("payload", "surface_render_delta") == 0
+  return false unless option_present_idx < lifecycle_idx && lifecycle_idx < add_idx
+  true
+end
+
+good_c2_5 = [
+  { "kind" => "option_present", "payload" => {} },
+  { "kind" => "lifecycle_live_update", "payload" => { "reopened" => false, "surface_render_delta" => 0 } },
+  { "kind" => "dispatched_action", "payload" => { "action_id" => "botster_workspaces.add_session" } },
+]
+assert(c2_5_oracle_accepts?(good_c2_5), "C2.5 positive control must accept ordered zero-delta evidence")
+
+nonzero_delta = Marshal.load(Marshal.dump(good_c2_5))
+nonzero_delta[1]["payload"]["surface_render_delta"] = 1
+assert(!c2_5_oracle_accepts?(nonzero_delta), "C2.5 oracle must fail closed on nonzero surface_render_delta")
+
+wrong_order = [
+  { "kind" => "lifecycle_live_update", "payload" => { "reopened" => false, "surface_render_delta" => 0 } },
+  { "kind" => "option_present", "payload" => {} },
+  { "kind" => "dispatched_action", "payload" => { "action_id" => "botster_workspaces.add_session" } },
+]
+assert(!c2_5_oracle_accepts?(wrong_order), "C2.5 oracle must fail closed when lifecycle precedes option_present")
+
+add_before_lifecycle = [
+  { "kind" => "option_present", "payload" => {} },
+  { "kind" => "dispatched_action", "payload" => { "action_id" => "botster_workspaces.add_session" } },
+  { "kind" => "lifecycle_live_update", "payload" => { "reopened" => false, "surface_render_delta" => 0 } },
+]
+assert(!c2_5_oracle_accepts?(add_before_lifecycle), "C2.5 oracle must fail closed when add_session precedes lifecycle")
+
 puts "script/test: ok"

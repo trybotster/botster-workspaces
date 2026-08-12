@@ -13,20 +13,19 @@
 | Approved plan | `docs/plans/prove-available-session-claiming-across-hub-web-tui.md` (v4) |
 | Runtime-teardown class | **Does not apply** |
 
-## Review revisit (sequence 13) — open findings map
+## Review revisit (sequence 15) — open findings map
 
 | Finding | Resolution |
 | --- | --- |
-| `finding_1786554647_435150` C3 typed conflict | `action_error` preserves structured `{code,message}`; parent requires exact `session_already_owned` (no generic rejected/error fallback); C3 picker reconcile fails closed on both contexts. |
-| `finding_1786554647_382628` C6a/C6b stale record-only | Make held value unavailable (claim elsewhere / peer claim); driver + parent require `stale_outbound_*=0`. |
-| `finding_1786554647_908614` Generation not family-correlated | C6a/C6b counters keyed by daemon `entity_type` for `session` and `botster-workspaces.membership`. |
-| `finding_1786554647_379849` Metadata incomplete | C1 uses `spawn_session_type` so `session_type_id` projects; require lifecycle attribute live-update independently; do not double-count lifecycle text as label_live_update. |
-| `finding_1786554647_848417` Unvalidated TUI binary | Bind validated `tui_binary` SHA-256 into package `target/debug/botster-tui` before `apps open`; binding receipt + pre-open recheck. |
-| `finding_1786554647_723357` Stale report/PR | This report + PR body updated for C2 and closed TUI pin. |
+| `finding_1786556015_658761` C6a package-tool before disconnect | Close data channel first; peer claims S2 via second production browser while offline; recon subscription/snapshot pairs remove S2. |
+| `finding_1786556015_455384` C6b invalidates before drop | Warm membership; arm drop; peer-claim held A (dropped); gap-trigger C; gap recovery clears A. |
+| `finding_1786556015_140462` Snapshots not sub-correlated | Export subscribe_id → later family-matched entity_snapshot pairs; parent asserts pairs. |
+| `finding_1786556015_304715` C1 joined text as label | Dedicated producer label tracking; `label=false` / `label_live_update=false` when Hub omits label. |
+| `finding_1786556015_646464` TUI negative control tautology | `assert_sha256_match!` fails closed on fabricated digest. |
 
-## Prior review (sequence 10) — already resolved
+## Prior reviews — resolved
 
-Nine findings from `review_1786529668_558495` remain resolved (normal Ionic interaction, TUI dependency, race oracles, C1 live path, reconnect/gap strength, pin ancestry, historical fail-closed, whitespace).
+Sequence 13 (typed conflict, TUI bind, etc.) and sequence 10 (normal Ionic, race oracles, pins) findings remain resolved.
 
 ## Playbooks / notes applied
 
@@ -40,10 +39,8 @@ Nine findings from `review_1786529668_558495` remain resolved (normal Ionic inte
 
 | Path | Role |
 | --- | --- |
-| `plugin.lua` | `action_error` keeps structured `error.code` / `error.message` |
-| `script/claim_stack_web_driver.mjs` | C1 session-type spawn + independent lifecycle; C3 fail-closed picker; C6a/C6b family counters + zero stale outbound |
-| `script/claim_stack_acceptance` | Typed C3 code; mandatory picker/C6 asserts; TUI executable binding |
-| `test/plugin_runtime_test.lua` | UI action path preserves `session_already_owned` code |
+| `script/claim_stack_web_driver.mjs` | C6a disconnect-first peer claim; C6b arm-before-held-claim; sub/snapshot pairs; C1 producer-label |
+| `script/claim_stack_acceptance` | Pair asserts; TUI digest checker negative control |
 | `docs/reports/...implement-report.md` | This report |
 
 ## Ownership boundaries

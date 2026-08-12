@@ -416,6 +416,14 @@ async function run() {
     const metadata = await optionMetadata(form, assignment.session_s);
     await selectSession(form, assignment.session_s);
     const c1Claim = await submitAdd(p1, form, assignment.workspace_w1, assignment.session_s, "C1 claim");
+    console.log(`claim-stack-debug c1Claim ${JSON.stringify(c1Claim)}`);
+    // Authoritative membership check via daemon (not list_sessions picker path).
+    const membershipAfterClaim = await sendDaemonRequest(socketPath, {
+      type: "plugin_mcp_call_tool",
+      name: "botster_workspaces.show",
+      arguments: { id: assignment.workspace_w1 }
+    });
+    console.log(`claim-stack-debug membershipAfterClaim ${JSON.stringify(membershipAfterClaim)}`);
     // Dialog clears on accepted claim; wait for form gone then re-open for exclusion proof.
     await p1.locator(`form[data-ui-node-id='botster-workspaces-add-form-${assignment.workspace_w1}']`)
       .waitFor({ state: "detached", timeout: 30_000 })

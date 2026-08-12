@@ -261,14 +261,16 @@ def action_classification(entry)
   accepted = result["accepted"] == true || plugin["state"] == "accepted"
   state = plugin["state"] || result["state"] || result["status"]
   idempotent = payload["idempotent"] == true || plugin["idempotent"] == true || result["idempotent"] == true
-  # Prefer structured error.code from action_error (code+message table). Do not invent
-  # codes from free-text form_errors; C3 requires the typed session_already_owned code.
-  error_code = dig_code(result["error"]) ||
-    dig_code(plugin["error"]) ||
-    dig_code(payload["error"]) ||
+  # Prefer structured payload.error.code from action_error. UiActionResult.error is a
+  # string; do not invent codes from free-text form_errors.
+  error_code = dig_code(payload["error"]) ||
+    dig_code(plugin.dig("payload", "error")) ||
+    dig_code(result.dig("result", "payload", "error")) ||
     dig_code(plugin["error_code"]) ||
     result["code"]
   error_text = [
+    error_message(payload["error"]),
+    error_message(plugin.dig("payload", "error")),
     error_message(plugin["error"]),
     Array(plugin["form_errors"]).join(" "),
     result["reason"],

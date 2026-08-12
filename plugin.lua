@@ -1371,14 +1371,17 @@ local function action_error(arguments, result, field_ids)
     local id = (field_ids or {})[field] or field
     field_errors[id] = { message }
   end
-  -- Preserve structured error.code for SPA/harness typed conflict correlation.
-  -- Message-only error strings drop session_already_owned and force generic fallbacks.
+  -- UiActionResult.error is a string (schema). Carry typed code in payload.error so
+  -- SPA/harness can correlate session_already_owned without message scraping.
   return action_result(arguments, code == "validation_failed" and "rejected" or "error", {
     field_errors = field_errors,
     form_errors = { message },
-    error = {
-      code = code,
-      message = message,
+    error = message,
+    payload = {
+      error = {
+        code = code,
+        message = message,
+      },
     },
   })
 end

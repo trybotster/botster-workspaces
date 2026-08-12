@@ -1344,15 +1344,16 @@ local typed_conflict = add_action({
   },
 })
 assert_eq(typed_conflict.state, "error", "cross-workspace UI claim is error not accepted")
+assert_eq(type(typed_conflict.error), "string", "UiActionResult.error remains a string")
 assert_eq(
-  type(typed_conflict.error) == "table" and typed_conflict.error.code or nil,
+  typed_conflict.payload and typed_conflict.payload.error and typed_conflict.payload.error.code or nil,
   "session_already_owned",
-  "UI action_error preserves structured session_already_owned code"
+  "UI action_error preserves structured session_already_owned code in payload.error"
 )
 assert_eq(
-  type(typed_conflict.error) == "table" and typed_conflict.error.message ~= nil,
+  typed_conflict.payload and typed_conflict.payload.error and typed_conflict.payload.error.message ~= nil,
   true,
-  "UI action_error preserves structured error message"
+  "UI action_error preserves structured error message in payload.error"
 )
 
 local delete_target = create({ name = "Disposable grouping" })

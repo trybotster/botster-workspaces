@@ -1197,20 +1197,27 @@ async function run() {
       throw new Error("C6b requires assignment.gap_sessions with three unclaimed session UUIDs");
     }
     const heldA = gapSessions[0];
-    const gapTrigger = gapSessions[1];
+    const warmupX = gapSessions[1];
+    const gapTrigger = gapSessions[2];
     const gapP1 = await bootstrapClient(browser, appUrl, "gapP1");
     const gapP2 = await bootstrapClient(browser, appUrl, "gapP2");
     await selectWorkspace(gapP1, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
-    // Peer claims into W1 so membership exclude frames are cross-workspace fanout to gapP1's W2 picker.
-    await selectWorkspace(gapP2, assignment.workspace_w1, assignment.workspace_w1_name || "Claim W1");
+    await selectWorkspace(gapP2, assignment.workspace_w2, assignment.workspace_w2_name || "Claim W2");
     const gapForm1 = await openAddDialog(gapP1, assignment.workspace_w2);
     await waitForOption(gapP1, gapForm1, heldA);
-    await selectSession(gapP1, gapForm1, heldA); // held stale candidate
+    await selectSession(gapP1, gapForm1, heldA); // held stale candidate (not claimed yet)
+    // Warm membership traffic so both peers share an active membership subscription path.
+    let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
+    await waitForOption(gapP2, gapForm2, warmupX);
+    await selectSession(gapP2, gapForm2, warmupX);
+    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, warmupX, "C6b membership warmup X");
+    // Confirm held A is still selected/available on gapP1 after the unrelated warmup claim.
+    await waitForOption(gapP1, gapForm1, heldA, 30_000);
     const gapBaseline = await gapP1.evaluate(() => {
       const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
       return { event_count: events.length };
     });
-    // Arm BEFORE the peer claims the held value so exclusion is delivered only via gap recovery.
+    // Arm BEFORE the peer claims the held value so that invalidating membership is dropped.
     const arm = await gapP1.evaluate(() => {
       const control = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.transportControl;
       if (!control?.armDropNextInboundEntityFrame) {
@@ -1219,19 +1226,21 @@ async function run() {
       if (typeof control.disarmDropNextInboundEntityFrame === "function") {
         control.disarmDropNextInboundEntityFrame();
       }
-      return control.armDropNextInboundEntityFrame({
-        entity_type: "botster-workspaces.membership",
-        frame_types: ["entity_upsert", "entity_patch", "entity_remove"]
-      });
+      return control.armDropNextInboundEntityFrame({ entity_type: "botster-workspaces.membership" });
     });
     if (!arm?.ok) {
       throw new Error(`C6b armDropNextInboundEntityFrame failed: ${JSON.stringify(arm)}`);
     }
-    // Peer claims held A on W1 — membership upsert must fan out to gapP1 and be dropped there.
-    let gapForm2 = await openAddDialog(gapP2, assignment.workspace_w1);
+    // Peer claims held A — this membership frame must be dropped on gapP1 (not applied live).
+    gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, heldA);
     await selectSession(gapP2, gapForm2, heldA);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w1, heldA, "C6b drop peer-claim held A");
+    const peerClaimA = await submitAdd(gapP2, gapForm2, assignment.workspace_w2, heldA, "C6b drop peer-claim held A");
+    const peerAAccepted = peerClaimA?.result?.accepted === true
+      || peerClaimA?.result?.result?.plugin_action_result?.state === "accepted";
+    if (!peerAAccepted) {
+      throw new Error(`C6b peer claim of held A was not accepted: ${JSON.stringify(peerClaimA.result)}`);
+    }
     // Wait for the armed drop to consume the membership frame for the held-A claim.
     const dropState = await gapP1.waitForFunction(
       () => {
@@ -1250,13 +1259,25 @@ async function run() {
           ?.getDropNextInboundEntityFrameState
           ?.() ?? null
       );
-      throw new Error(`C6b expected dropped membership frame for held A: ${JSON.stringify(state)}`);
+      const options = await readSelectOptions(gapForm1);
+      throw new Error(
+        `C6b expected dropped membership frame for held A: state=${JSON.stringify(state)} options=${JSON.stringify(options)}`
+      );
     });
+    // Held A must still appear on gapP1 until gap recovery (drop prevented live exclusion).
+    {
+      const optionsAfterDrop = await readSelectOptions(gapForm1);
+      if (!optionsAfterDrop.includes(heldA)) {
+        throw new Error(
+          `C6b held A cleared before gap recovery (live path leaked past drop): ${JSON.stringify(optionsAfterDrop)}`
+        );
+      }
+    }
     // Later membership change triggers sequence_gap on the armed client.
-    gapForm2 = await openAddDialog(gapP2, assignment.workspace_w1);
+    gapForm2 = await openAddDialog(gapP2, assignment.workspace_w2);
     await waitForOption(gapP2, gapForm2, gapTrigger);
     await selectSession(gapP2, gapForm2, gapTrigger);
-    await submitAdd(gapP2, gapForm2, assignment.workspace_w1, gapTrigger, "C6b gap trigger claim");
+    await submitAdd(gapP2, gapForm2, assignment.workspace_w2, gapTrigger, "C6b gap trigger claim");
     const gapEvidence = await gapP1.waitForFunction(
       ({ sinceEventCount, membershipFamily }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
@@ -1374,7 +1395,7 @@ async function run() {
     summary.lanes.c6b = {
       control: "transportControl.armDropNextInboundEntityFrame",
       filter: { entity_type: "botster-workspaces.membership" },
-      chronology: "hold_A_arm_drop_peer_claim_A_gap_trigger_B",
+      chronology: "hold_A_warmup_X_arm_drop_peer_claim_A_gap_trigger_C",
       arm,
       drop_state: dropState,
       gap_evidence: gapEvidence,

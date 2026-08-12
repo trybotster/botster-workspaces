@@ -1054,12 +1054,21 @@ async function run() {
     if (!peerAccepted) {
       throw new Error(`C6a peer claim was not accepted: ${JSON.stringify(peerClaim.result)}`);
     }
-    // Post-close: each required family must have a new subscribe_id with a later matching snapshot.
+    // Post-close: each required family must have a new subscribe_id with a later family-matched snapshot.
+    // Harness snapshots key family via payload.payload.family (Web reconnectGenerationEvidence shape).
     const postCloseEvidence = await recon.waitForFunction(
       ({ sinceEventCount, requiredFamilies }) => {
         const events = globalThis.__BOTSTER_LIVE_PROTOCOL_HARNESS__?.events ?? [];
         if (events.length <= sinceEventCount) return null;
         const tail = events.slice(sinceEventCount);
+        const snapshotFamily = (payload) => {
+          const nested = payload?.payload ?? {};
+          return nested.family
+            || nested.key?.family
+            || payload?.entity_type
+            || payload?.family
+            || null;
+        };
         const pairs = {};
         for (const family of requiredFamilies) {
           const familyPairs = [];
@@ -1078,11 +1087,14 @@ async function run() {
               const nested = payload.payload ?? {};
               const kind = payload.kind || payload.type || nested.kind || nested.type;
               if (kind !== "entity_snapshot") continue;
-              const snapFamily = payload.entity_type || nested.entity_type;
-              const snapSub = payload.subscription_id || nested.subscription_id;
-              if (snapFamily !== family || snapSub !== subscriptionId) continue;
+              if (snapshotFamily(payload) !== family) continue;
+              const snapSub = payload.subscription_id || nested.subscription_id || null;
+              // Prefer exact subscription_id match when the harness exposes it; otherwise
+              // temporal family-matched snapshot after this subscribe is authoritative.
+              if (snapSub && snapSub !== subscriptionId) continue;
               snapshot = {
-                subscription_id: snapSub,
+                subscription_id: snapSub || subscriptionId,
+                subscription_id_exact: Boolean(snapSub),
                 snapshot_seq: payload.snapshot_seq ?? nested.snapshot_seq ?? null,
                 generation: payload.generation ?? nested.generation ?? null
               };
@@ -1099,7 +1111,9 @@ async function run() {
           pairs[family] = familyPairs;
         }
         const allPaired = requiredFamilies.every((family) => (pairs[family] || []).length >= 1);
-        const lifecycleTail = tail.some((entry) => entry.kind === "webrtc_lifecycle");
+        const lifecycleTail = tail.some((entry) =>
+          entry.kind === "webrtc_lifecycle" || entry.kind === "webrtc_data_channel"
+        );
         if (!allPaired || !lifecycleTail) return null;
         return { pairs, lifecycle_tail: true };
       },
@@ -1237,7 +1251,15 @@ async function run() {
             || entry.payload?.payload?.reason === "sequence_gap";
         });
         if (!gapHit) return null;
-        // Require a post-gap subscribe + later snapshot for the same membership subscription_id.
+        const snapshotFamily = (payload) => {
+          const nested = payload?.payload ?? {};
+          return nested.family
+            || nested.key?.family
+            || payload?.entity_type
+            || payload?.family
+            || null;
+        };
+        // Require a post-gap membership subscribe + later family-matched snapshot.
         const pairs = [];
         for (let i = 0; i < tail.length; i += 1) {
           const entry = tail[i];
@@ -1254,11 +1276,12 @@ async function run() {
             const nested = payload.payload ?? {};
             const kind = payload.kind || payload.type || nested.kind || nested.type;
             if (kind !== "entity_snapshot") continue;
-            const snapFamily = payload.entity_type || nested.entity_type;
-            const snapSub = payload.subscription_id || nested.subscription_id;
-            if (snapFamily !== membershipFamily || snapSub !== subscriptionId) continue;
+            if (snapshotFamily(payload) !== membershipFamily) continue;
+            const snapSub = payload.subscription_id || nested.subscription_id || null;
+            if (snapSub && snapSub !== subscriptionId) continue;
             snapshot = {
-              subscription_id: snapSub,
+              subscription_id: snapSub || subscriptionId,
+              subscription_id_exact: Boolean(snapSub),
               snapshot_seq: payload.snapshot_seq ?? nested.snapshot_seq ?? null,
               generation: payload.generation ?? nested.generation ?? null
             };

@@ -599,6 +599,12 @@ Dir.mktmpdir("bwcs-", temporary_root) do |fixture_root|
       File.file?(File.join(tui_path, "crates", "botster-tui", "fixtures", "workspaces-claim-driver-v1.scenario.json")),
       "TUI pin lacks workspaces-claim-driver fixtures"
     )
+    # Installed package runnable entrypoint is package_root/target/debug/botster-tui.
+    tui_package_bin = File.join(tui_path, "target", "debug", "botster-tui")
+    assert(
+      File.executable?(tui_package_bin),
+      "TUI package path lacks target/debug/botster-tui for apps open (build into package_root/target)"
+    )
     hub_source = artifacts.fetch("hub_binary").fetch("source_checkout")
     hub_build_target = hub_build_target_dir(hub_binary)
     receipt_path = File.join(evidence_dir, "tui-claim-build-receipt.json")

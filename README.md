@@ -42,18 +42,26 @@ The package declares one app surface and one navigation item, both named
 `workspaces`. The stable Hub surface path is
 `/packages/botster-workspaces/surfaces/workspaces`.
 
-The initial index contains a contextual **New workspace** action, workspace
-rows, and an empty state. Forms are materialized only after an accepted plugin
-action sets scoped client-local presentation state. Selecting a row reveals the
-detail presentation on the same route and remains stable across rerenders.
+The host owns the page title and route chrome. The plugin renders one plain
+content stack without a second **Workspaces** title or **Workspace actions**
+toolbar. The initial index contains a contextual **New workspace** action,
+workspace rows, and an empty state. The complete row opens its workspace, so
+the list does not add a redundant **Open** button.
 
-Detail preserves every referenced session ID and exposes:
+Forms are materialized only after an accepted plugin action sets scoped
+client-local presentation state. Selecting a row reveals one detail section on
+the same route and remains stable across rerenders.
 
-- Spawn
-- rename
-- delete
-- Add or move an existing session
-- remove membership
+The detail toolbar separates session actions from workspace management:
+
+- **Spawn session** stays visible as the primary session action.
+- **Add session** and **Move session** are secondary session actions.
+- **Workspace settings** contains rename and delete controls.
+- **Remove** removes a session from the workspace grouping.
+
+The selected row renders the workspace name once. The detail starts with the
+Sessions section. Compact lifecycle groups replace nested full-page sections
+for Current, Ended, and Unavailable sessions.
 
 **Add existing session** authors an Available sessions picker bound to Hub
 `/session` through `entity_options`, excluding every session ID present in

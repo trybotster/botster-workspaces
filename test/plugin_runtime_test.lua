@@ -565,24 +565,26 @@ assert_eq(spawn_schema.properties.template_id, nil, "spawn schema publishes no s
 
 local empty_surface = handler(spec, "workspaces_surface")({})
 assert_eq(empty_surface.id, "botster-workspaces-app", "stable app surface renders")
+assert_eq(empty_surface.type, "stack", "host-owned page chrome is not repeated by a plugin panel")
+assert_eq(empty_surface.props.direction, "vertical", "app surface uses one vertical content stack")
+assert_eq(find_node(empty_surface, "botster-workspaces-toolbar"), nil, "app omits redundant Workspace actions toolbar")
 local initial_materialized = materialize(empty_surface, {})
 local initial_forms = {}
 collect_type(initial_materialized, "form", initial_forms)
 assert_eq(#initial_forms, 0, "contextual forms are absent before an accepted open action")
-assert_true(find_node(initial_materialized, "botster-workspaces-new"), "empty index has New workspace action")
-assert_true(find_node(initial_materialized, "botster-workspaces-empty"), "empty index has empty state")
-assert_eq(
-  find_node(initial_materialized, "botster-workspaces-empty-create").props.label,
-  "New workspace",
-  "empty state has an explicitly labelled sibling action"
-)
+assert_eq(find_node(initial_materialized, "botster-workspaces-new"), nil, "empty index avoids a duplicate top action")
+local initial_empty_state = find_node(initial_materialized, "botster-workspaces-empty")
+assert_true(initial_empty_state, "empty index has empty state")
+assert_eq(initial_empty_state.props.primary_action, nil, "empty state does not rely on an unlabeled action")
+local empty_create_button = find_node(initial_materialized, "botster-workspaces-empty-create")
+assert_true(empty_create_button, "empty index has a labeled create action")
+assert_eq(empty_create_button.props.label, "New workspace", "empty create action keeps product copy")
 
 local open = handler(spec, "open_workspace_presentation_action")
-local new_button = find_node(empty_surface, "botster-workspaces-new")
 local presentation_state = {}
-local opened_create = open(action_arguments(new_button.props.action, "request-open-create"))
+local opened_create = open(action_arguments(empty_create_button.props.action, "request-open-create"))
 assert_eq(opened_create.state, "accepted", "New workspace action is accepted")
-assert_eq(opened_create.action_id, new_button.props.action.id, "dispatch uses rendered action id")
+assert_eq(opened_create.action_id, empty_create_button.props.action.id, "dispatch uses rendered action id")
 apply_presentation(presentation_state, opened_create)
 local create_visible = materialize(empty_surface, presentation_state)
 assert_true(find_node(create_visible, "botster-workspaces-create-form"), "accepted set reveals create dialog")
@@ -955,27 +957,51 @@ collect_type(closed_surface, "form", closed_forms)
 assert_eq(#closed_forms, 0, "no form materializes before an accepted open action")
 
 local first_row = find_node(surface, "botster-workspaces-row-" .. renamed.workspace.id)
-assert_true(first_row.props.action, "workspace row carries selection action metadata")
-local selected = open(action_arguments(first_row.props.action, "request-select-workspace"))
-assert_eq(selected.action_id, first_row.props.action.id, "row dispatch uses rendered action id")
+assert_true(first_row.props.activation, "workspace row carries activation metadata")
+assert_eq(first_row.props.action, nil, "workspace row does not render a redundant Open action")
+local selected = open(action_arguments(first_row.props.activation, "request-select-workspace"))
+assert_eq(selected.action_id, first_row.props.activation.id, "row dispatch uses rendered action id")
 apply_presentation(presentation_state, selected)
 local selected_surface = materialize(surface, presentation_state)
 assert_true(find_node(selected_surface, "botster-workspaces-selected-" .. renamed.workspace.id), "selection reveals same-route detail")
 
 local rerendered = materialize(handler(spec, "workspaces_surface")({}), presentation_state)
-assert_true(find_node(rerendered, "botster-workspaces-selected-" .. renamed.workspace.id), "selected workspace stays stable across rerender")
-assert_true(find_node(rerendered, "botster-workspaces-spawn-" .. renamed.workspace.id), "detail exposes Spawn")
-assert_true(find_node(rerendered, "botster-workspaces-rename-" .. renamed.workspace.id), "detail exposes rename")
-assert_true(find_node(rerendered, "botster-workspaces-delete-" .. renamed.workspace.id), "detail exposes delete")
-assert_true(find_node(rerendered, "botster-workspaces-add-" .. renamed.workspace.id), "detail exposes Add existing session")
-assert_true(find_node(rerendered, "botster-workspaces-move-" .. renamed.workspace.id), "detail exposes Move existing session")
-assert_true(
-  find_node(
-    rerendered,
-    "botster-workspaces-remove-current-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
-  ),
-  "detail exposes lifecycle-bound remove membership"
-)
+do
+  local selected_detail = find_node(rerendered, "botster-workspaces-selected-" .. renamed.workspace.id)
+  assert_true(selected_detail, "selected workspace stays stable across rerender")
+  assert_eq(selected_detail.type, "section", "workspace detail uses one section instead of nested panels")
+  assert_eq(selected_detail.props.title, "Sessions", "workspace detail does not repeat the selected workspace name")
+  local detail_stack = find_node(selected_detail, "botster-workspaces-detail-" .. renamed.workspace.id)
+  assert_eq(detail_stack.type, "stack", "session groups use one compact detail stack")
+  assert_eq(
+    find_node(detail_stack, "botster-workspaces-sessions-current-" .. renamed.workspace.id).type,
+    "form_section",
+    "session groups avoid full-page nested section rendering"
+  )
+  local detail_toolbar = find_node(selected_detail, "botster-workspaces-detail-toolbar-" .. renamed.workspace.id)
+  assert_true(detail_toolbar, "workspace detail has one action toolbar")
+  assert_eq(detail_toolbar.props.label, nil, "detail toolbar does not add another visible heading")
+  local spawn_detail_button = find_node(rerendered, "botster-workspaces-spawn-" .. renamed.workspace.id)
+  assert_true(spawn_detail_button, "detail exposes Spawn")
+  assert_eq(spawn_detail_button.props.toolbar_overflow, "never", "primary Spawn action stays visible")
+  assert_true(find_node(rerendered, "botster-workspaces-settings-" .. renamed.workspace.id), "detail exposes workspace settings")
+  assert_eq(find_node(rerendered, "botster-workspaces-rename-" .. renamed.workspace.id), nil, "rename is not a peer session action")
+  assert_eq(find_node(rerendered, "botster-workspaces-delete-" .. renamed.workspace.id), nil, "delete is not a peer session action")
+  assert_true(find_node(rerendered, "botster-workspaces-add-" .. renamed.workspace.id), "detail exposes Add existing session")
+  assert_true(find_node(rerendered, "botster-workspaces-move-" .. renamed.workspace.id), "detail exposes Move existing session")
+  assert_true(
+    find_node(
+      rerendered,
+      "botster-workspaces-remove-current-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
+    ),
+    "detail exposes lifecycle-bound remove membership"
+  )
+
+  presentation_state["workspace-dialog"] = "settings:" .. renamed.workspace.id
+  local settings_dialog = materialize(handler(spec, "workspaces_surface")({}), presentation_state)
+  assert_true(find_node(settings_dialog, "botster-workspaces-rename-form-" .. renamed.workspace.id), "workspace settings expose rename")
+  assert_true(find_node(settings_dialog, "botster-workspaces-delete-form-" .. renamed.workspace.id), "workspace settings expose delete")
+end
 
 presentation_state["workspace-dialog"] = "add:" .. renamed.workspace.id
 local add_dialog = materialize(handler(spec, "workspaces_surface")({}), presentation_state)
@@ -1145,7 +1171,7 @@ if os.getenv("BOTSTER_WORKSPACES_TEST_REVERT_SPAWN_ACTION") == "1" then
   spawn_button.props.action.id = "botster_workspaces.open"
 end
 assert_eq(spawn_button.id, "botster-workspaces-spawn-" .. renamed.workspace.id, "Spawn keeps its authored node id")
-assert_eq(spawn_button.props.label, "Spawn", "Spawn keeps visible product copy")
+assert_eq(spawn_button.props.label, "Spawn session", "Spawn uses explicit product copy")
 assert_eq(spawn_button.props.action.id, "botster_workspaces.open_spawn", "Spawn exposes semantic action identity")
 assert_true(spawn_button.props.action.id ~= "botster_workspaces.open", "Spawn no longer advertises the generic opener")
 assert_eq(spawn_button.props.action.payload.selected_workspace, renamed.workspace.id, "Spawn payload keeps workspace identity")
@@ -1192,7 +1218,7 @@ assert_eq(create_name.props.description, "A short name for related sessions.", "
 local delete_warning = find_node(surface, "botster-workspaces-delete-warning-" .. renamed.workspace.id)
 assert_true(delete_warning, "delete dialog states the non-destructive scope")
 assert_true(
-  delete_warning.props.text:find("workspace list", 1, true)
+  delete_warning.props.text:find("workspace grouping", 1, true)
     and delete_warning.props.text:find("stay", 1, true),
   "delete warning keeps grouping-only product language"
 )

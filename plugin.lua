@@ -1630,7 +1630,7 @@ local function text_node(id, text, tone)
   return { type = "text", id = id, props = props }
 end
 
-local function button_node(id, label, action_id, payload, tone)
+local function button_node(id, label, action_id, payload, tone, options)
   local props = {
     label = label,
     action = {
@@ -1640,6 +1640,9 @@ local function button_node(id, label, action_id, payload, tone)
   }
   if tone then
     props.tone = tone
+  end
+  for key, value in pairs(options or {}) do
+    props[key] = value
   end
   return { type = "button", id = id, props = props }
 end
@@ -1821,9 +1824,9 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
   local dialogs = {
     dialog_if(
       "workspace-dialog",
-      "rename:" .. workspace.id,
-      "botster-workspaces-rename-dialog-" .. workspace.id,
-      "Rename workspace",
+      "settings:" .. workspace.id,
+      "botster-workspaces-settings-dialog-" .. workspace.id,
+      "Workspace settings",
       {
         form_node(
           "botster-workspaces-rename-form-" .. workspace.id,
@@ -1839,24 +1842,24 @@ local function workspace_dialogs(workspace, rows, targets, session_types_by_targ
           },
           { workspace_id = workspace.id }
         ),
-      }
-    ),
-    dialog_if(
-      "workspace-dialog",
-      "delete:" .. workspace.id,
-      "botster-workspaces-delete-dialog-" .. workspace.id,
-      "Delete workspace",
-      {
-        text_node(
-          "botster-workspaces-delete-warning-" .. workspace.id,
-          "Deletes only this workspace list. Sessions and their Git worktrees stay."
-        ),
-        form_node(
-          "botster-workspaces-delete-form-" .. workspace.id,
-          "botster_workspaces.delete",
+        form_section(
+          "botster-workspaces-delete-section-" .. workspace.id,
           "Delete workspace",
-          {},
-          { workspace_id = workspace.id }
+          {
+            text_node(
+              "botster-workspaces-delete-warning-" .. workspace.id,
+              "Delete this workspace grouping. Sessions and Git worktrees stay available.",
+              "danger"
+            ),
+            form_node(
+              "botster-workspaces-delete-form-" .. workspace.id,
+              "botster_workspaces.delete",
+              "Delete workspace",
+              {},
+              { workspace_id = workspace.id }
+            ),
+          },
+          "This action cannot be undone."
         ),
       }
     ),
@@ -2127,21 +2130,19 @@ end
 
 local function session_group(workspace, group, title, aria_label, children)
   return {
-    type = "section",
+    type = "form_section",
     id = "botster-workspaces-sessions-" .. group .. "-" .. workspace.id,
     props = {
       title = title,
     },
-    slots = {
-      body = {
-        {
-          type = "list",
-          id = "botster-workspaces-session-list-" .. group .. "-" .. workspace.id,
-          props = {
-            aria_label = aria_label,
-          },
-          children = children,
+    children = {
+      {
+        type = "list",
+        id = "botster-workspaces-session-list-" .. group .. "-" .. workspace.id,
+        props = {
+          aria_label = aria_label,
         },
+        children = children,
       },
     },
   }
@@ -2190,41 +2191,6 @@ local function session_groups(workspace)
 end
 
 local function workspace_detail(workspace)
-  local actions = {
-    button_node(
-      "botster-workspaces-spawn-" .. workspace.id,
-      "Spawn",
-      "botster_workspaces.open_spawn",
-      { selected_workspace = workspace.id, dialog = "spawn-target:" .. workspace.id }
-    ),
-    button_node(
-      "botster-workspaces-rename-" .. workspace.id,
-      "Rename",
-      "botster_workspaces.open",
-      { selected_workspace = workspace.id, dialog = "rename:" .. workspace.id }
-    ),
-    button_node(
-      "botster-workspaces-delete-" .. workspace.id,
-      "Delete",
-      "botster_workspaces.open",
-      { selected_workspace = workspace.id, dialog = "delete:" .. workspace.id },
-      "danger"
-    ),
-    button_node(
-      "botster-workspaces-add-" .. workspace.id,
-      "Add existing session",
-      "botster_workspaces.open",
-      { selected_workspace = workspace.id, dialog = "add:" .. workspace.id }
-    ),
-    button_node(
-      "botster-workspaces-move-" .. workspace.id,
-      "Move existing session",
-      "botster_workspaces.open",
-      { selected_workspace = workspace.id, dialog = "move:" .. workspace.id }
-    ),
-  }
-  -- Dialogs live at the surface root (see workspaces_surface), not under this
-  -- panel, so overlays sit on the existing index/detail view.
   return {
     ["$kind"] = "presentation_if",
     predicate = {
@@ -2233,24 +2199,66 @@ local function workspace_detail(workspace)
       value = workspace.id,
     },
     node = {
-      type = "panel",
+      type = "section",
       id = "botster-workspaces-selected-" .. workspace.id,
       props = {
-        title = workspace.name,
+        title = "Sessions",
+        description = "Current and past sessions grouped for this work.",
       },
       slots = {
-        body = {
+        toolbar = {
           {
-            type = "section",
-            id = "botster-workspaces-detail-" .. workspace.id,
+            type = "toolbar",
+            id = "botster-workspaces-detail-toolbar-" .. workspace.id,
             props = {
-              title = workspace.name,
-              description = "Sessions grouped for this work. Ended sessions stay here until you remove them.",
+              density = "compact",
             },
             slots = {
-              actions = actions,
-              body = session_groups(workspace),
+              commands = {
+                button_node(
+                  "botster-workspaces-settings-" .. workspace.id,
+                  "Workspace settings",
+                  "botster_workspaces.open",
+                  { selected_workspace = workspace.id, dialog = "settings:" .. workspace.id },
+                  nil,
+                  { variant = "subtle", toolbar_overflow = "never" }
+                ),
+              },
+              actions = {
+                button_node(
+                  "botster-workspaces-spawn-" .. workspace.id,
+                  "Spawn session",
+                  "botster_workspaces.open_spawn",
+                  { selected_workspace = workspace.id, dialog = "spawn-target:" .. workspace.id },
+                  "accent",
+                  { variant = "emphasized", toolbar_overflow = "never" }
+                ),
+                button_node(
+                  "botster-workspaces-add-" .. workspace.id,
+                  "Add session",
+                  "botster_workspaces.open",
+                  { selected_workspace = workspace.id, dialog = "add:" .. workspace.id },
+                  nil,
+                  { variant = "subtle", toolbar_overflow = "auto" }
+                ),
+                button_node(
+                  "botster-workspaces-move-" .. workspace.id,
+                  "Move session",
+                  "botster_workspaces.open",
+                  { selected_workspace = workspace.id, dialog = "move:" .. workspace.id },
+                  nil,
+                  { variant = "subtle", toolbar_overflow = "auto" }
+                ),
+              },
             },
+          },
+        },
+        body = {
+          {
+            type = "stack",
+            id = "botster-workspaces-detail-" .. workspace.id,
+            props = { direction = "vertical", gap = "md" },
+            children = session_groups(workspace),
           },
         },
       },
@@ -2273,7 +2281,9 @@ local function workspace_index(rows)
       "botster-workspaces-empty-create",
       "New workspace",
       "botster_workspaces.open",
-      { dialog = "create" }
+      { dialog = "create" },
+      "accent",
+      { variant = "emphasized" }
     )
   else
     for _, row in ipairs(rows) do
@@ -2282,7 +2292,7 @@ local function workspace_index(rows)
         id = "botster-workspaces-row-" .. row.id,
         props = {
           value = row.id,
-          action = {
+          activation = {
             id = "botster_workspaces.open",
             payload = { selected_workspace = row.id },
           },
@@ -2294,7 +2304,7 @@ local function workspace_index(rows)
           meta = {
             text_node(
               "botster-workspaces-row-count-" .. row.id,
-              tostring(row.session_count) .. " sessions",
+              tostring(row.session_count) .. (row.session_count == 1 and " session" or " sessions"),
               "muted"
             ),
           },
@@ -2338,10 +2348,26 @@ workspaces_surface = function()
       error = session_type_error,
     }
   end
-  local body = {
-    workspace_index(rows),
-    create_dialog(),
-  }
+  local body = {}
+  if #rows > 0 then
+    body[#body + 1] = {
+      type = "inline",
+      id = "botster-workspaces-create-actions",
+      props = { justify = "end" },
+      children = {
+        button_node(
+          "botster-workspaces-new",
+          "New workspace",
+          "botster_workspaces.open",
+          { dialog = "create" },
+          "accent",
+          { variant = "emphasized" }
+        ),
+      },
+    }
+  end
+  body[#body + 1] = workspace_index(rows)
+  body[#body + 1] = create_dialog()
   for _, workspace in ipairs(state.workspaces) do
     body[#body + 1] = workspace_detail(workspace)
     -- Dialogs are surface-root siblings so overlay presentation is not nested
@@ -2353,34 +2379,10 @@ workspaces_surface = function()
     end
   end
   return {
-    type = "panel",
+    type = "stack",
     id = "botster-workspaces-app",
-    props = {
-      title = "Workspaces",
-    },
-    slots = {
-      toolbar = {
-        {
-          type = "toolbar",
-          id = "botster-workspaces-toolbar",
-          props = {
-            label = "Workspace actions",
-            density = "compact",
-          },
-          slots = {
-            actions = {
-              button_node(
-                "botster-workspaces-new",
-                "New workspace",
-                "botster_workspaces.open",
-                { dialog = "create" }
-              ),
-            },
-          },
-        },
-      },
-      body = body,
-    },
+    props = { direction = "vertical", gap = "md" },
+    children = body,
   }
 end
 

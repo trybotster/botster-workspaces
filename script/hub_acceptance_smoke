@@ -8,8 +8,8 @@ ROOT = File.expand_path("..", __dir__)
 PACKAGE = "botster-workspaces"
 SURFACE = "workspaces"
 PROTOCOL = "botster-hub-daemon-v1"
-PROTOCOL_VERSION = 6
-CONFORMANCE_FIXTURE_REVISION = 35
+PROTOCOL_VERSION = 7
+CONFORMANCE_FIXTURE_REVISION = 37
 SESSION_TYPE_FEATURE = "session_type_entity_subscriptions"
 LEGACY_MANIFEST_PACKAGE = "botster-workspaces-legacy-manifest-negative"
 LEGACY_MANIFEST_SESSION_TYPE_ID = "#{LEGACY_MANIFEST_PACKAGE}/legacy-acceptance"
@@ -27,7 +27,7 @@ end
 
 # The Hub deserializes DaemonHello.compatibility with field-level defaults but no
 # per-field defaults inside DaemonCompatibilityRequirement, so a present block is
-# only accepted when it carries the exact protocol-6 shape.
+# only accepted when it carries the exact current protocol shape.
 def compatibility_requirement(client_name, required_features)
   {
     protocol: PROTOCOL,
@@ -331,11 +331,11 @@ assert(
 
 initial_surface = render_surface(socket)
 types = collect_types(initial_surface)
-assert(types["panel"].positive?, "surface missing panel")
-assert(types["toolbar"].positive?, "surface missing toolbar")
+assert(initial_surface["type"] == "stack", "surface root must defer page chrome to the host")
+assert(!find_node(initial_surface, "botster-workspaces-toolbar"), "surface retained redundant Workspace actions toolbar")
 assert(types["list"].positive?, "surface missing workspace list")
-new_button = find_node(initial_surface, "botster-workspaces-new")
-assert(new_button, "surface missing contextual New workspace control")
+new_button = find_node(initial_surface, "botster-workspaces-empty-create")
+assert(new_button, "empty surface missing labeled New workspace control")
 new_action = new_button.dig("props", "action")
 assert(new_action && new_action["id"], "New workspace control has no action metadata")
 
@@ -382,7 +382,9 @@ assert(workspace_id, "workspace id missing")
 populated_surface = render_surface(socket)
 row = find_node(populated_surface, "botster-workspaces-row-#{workspace_id}")
 assert(row, "post-create surface missing workspace row")
-row_action = row.dig("props", "action")
+row_action = row.dig("props", "activation")
+assert(row.dig("props", "action").nil?, "workspace row retained redundant Open action")
+assert(row_action && row_action["id"], "workspace row has no activation metadata")
 selected = action(
   socket,
   id: row_action.fetch("id"),
@@ -771,7 +773,7 @@ spawn_buttons = find_nodes_by_action_id(populated_surface, "botster_workspaces.o
 assert(spawn_buttons.length == 1, "selected workspace must expose exactly one semantic Spawn opener")
 spawn_button = spawn_buttons.fetch(0)
 spawn_action = spawn_button.dig("props", "action")
-assert(spawn_button.dig("props", "label") == "Spawn", "semantic Spawn opener changed visible copy")
+assert(spawn_button.dig("props", "label") == "Spawn session", "semantic Spawn opener changed visible copy")
 assert(spawn_button.fetch("id") == "botster-workspaces-spawn-#{workspace_id}", "semantic Spawn opener changed authored node id")
 assert(spawn_action.fetch("id") != "botster_workspaces.open", "semantic Spawn opener retained generic action identity")
 opened_spawn = action(

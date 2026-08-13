@@ -208,6 +208,10 @@ assert(operations.dig("spawn", "caller_supplied_session_id") == false, "spawn mu
 
 surface_contract = contract.fetch("surface")
 assert(surface_contract["id"] == "workspaces", "fixture must preserve stable route")
+assert(surface_contract["root_kind"] == "stack", "fixture must avoid duplicate host page chrome")
+assert(surface_contract["host_owns_page_title"] == true, "fixture must assign the page title to the host")
+assert(surface_contract["row_activation"] == true, "fixture must make each workspace row the open target")
+assert(surface_contract["workspace_settings_group"] == %w[rename delete], "fixture must group workspace settings")
 assert(surface_contract["initial_form_count"] == 0, "initial surface must contain no visible form")
 assert(
   surface_contract["detail_actions"].sort == %w[add_session delete move_session remove_session rename spawn],
@@ -234,7 +238,7 @@ assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", 
   "README.md" => [
     "Contextual session grouping",
     "New workspace",
-    "Add or move an existing session",
+    "Workspace settings",
     "session_types.list",
     "session_types.ensure_worktree_and_spawn",
     "session_type_id",

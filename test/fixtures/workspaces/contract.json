@@ -132,6 +132,10 @@
   "surface": {
     "id": "workspaces",
     "stable_route": true,
+    "root_kind": "stack",
+    "host_owns_page_title": true,
+    "row_activation": true,
+    "workspace_settings_group": ["rename", "delete"],
     "initial_form_count": 0,
     "presentation_keys": [
       "selected-workspace",

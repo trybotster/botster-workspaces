@@ -113,22 +113,26 @@ does not attempt forbidden session rollback.
 
 ## Contextual Surface
 
-The package has one stable `workspaces` app route. Its initial index contains
-New workspace, rows, and an empty state with no visible form.
+The package has one stable `workspaces` app route. The host owns the route title
+and page chrome. The plugin root is one vertical content stack. Its initial
+index contains New workspace, activating rows, and an empty state with no
+visible form. Rows do not add a separate Open action.
 
 Accepted action results author scoped presentation operations:
 
 - `selected-workspace` selects detail on the stable route.
-- `workspace-dialog` reveals contextual create, rename, delete, membership, and
-  target-first Spawn dialogs.
+- `workspace-dialog` reveals contextual create, workspace settings,
+  membership, and target-first Spawn dialogs.
 
 Rejected forms retain values and errors without presentation or replacement
 effects. Accepted mutations clear their dialog and provide an owner-authored
 replacement tree. Shared clients apply these generic contracts without
 workspace-specific code.
 
-Detail preserves referenced session IDs and exposes Spawn, rename, delete,
-Add/Move existing session, and remove membership.
+Detail preserves referenced session IDs. One toolbar exposes Spawn, Add, and
+Move as session actions. A separate Workspace settings command contains rename
+and delete controls. The selected row authors the workspace name once. The
+detail uses compact lifecycle groups instead of nested page sections.
 
 ## Lifecycle Projection
 

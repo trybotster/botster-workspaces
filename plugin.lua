@@ -1101,6 +1101,81 @@ local function remove_session(arguments)
   return attempt()
 end
 
+local TERMINAL_SESSION_STATES = {
+  closed = true,
+  deleted = true,
+  ended = true,
+  exited = true,
+  failed = true,
+  stopped = true,
+}
+
+local function lifecycle_field(info, key)
+  if info == nil then
+    return nil
+  end
+  local ok, value = pcall(function()
+    return info[key]
+  end)
+  return ok and value or nil
+end
+
+local function session_id_from_lifecycle(info)
+  return trim(
+    lifecycle_field(info, "session_uuid")
+      or lifecycle_field(info, "session_id")
+      or lifecycle_field(info, "id")
+  )
+end
+
+local function session_has_ended(info)
+  local lifecycle_class = trim(lifecycle_field(info, "lifecycle_class"))
+  if lifecycle_class then
+    return lifecycle_class == "ended"
+  end
+  local lifecycle = trim(lifecycle_field(info, "lifecycle"))
+  if lifecycle and TERMINAL_SESSION_STATES[lifecycle] then
+    return true
+  end
+  local status = trim(lifecycle_field(info, "status"))
+  return status ~= nil and TERMINAL_SESSION_STATES[status] == true
+end
+
+local function prune_session_reference(session_id)
+  local state, load_error = load_state()
+  if load_error then
+    return load_error
+  end
+  local workspace = workspace_by_session(state, session_id)
+  if not workspace then
+    return { ok = true, pruned = false }
+  end
+  local result = remove_session({ workspace_id = workspace.id, session_id = session_id })
+  if result.ok then
+    result.pruned = true
+    result.reason = "session_ended"
+  end
+  return result
+end
+
+local function log_prune_error(session_id, result)
+  if type(log) == "table" and type(log.warn) == "function" then
+    local message = result and result.error and result.error.message or "unknown error"
+    log.warn("[botster-workspaces] failed to prune ended session " .. tostring(session_id) .. ": " .. message)
+  end
+end
+
+local function handle_session_lifecycle(info, force_ended)
+  local session_id = session_id_from_lifecycle(info)
+  if not session_id or (not force_ended and not session_has_ended(info)) then
+    return
+  end
+  local result = prune_session_reference(session_id)
+  if not result.ok then
+    log_prune_error(session_id, result)
+  end
+end
+
 -- Workspaces group sessions; they do not own Git. List every enabled Hub spawn
 -- point. Managed-worktree spawn is used only when the selected target is git.
 local function spawn_targets()
@@ -1384,6 +1459,9 @@ local function available_session_options_source()
       "lifecycle",
       "session_type_id",
       "session_uuid",
+    },
+    where = {
+      lifecycle_class = "current",
     },
     exclude = {
       source = "/botster-workspaces.membership",
@@ -2156,18 +2234,16 @@ local function session_groups(workspace)
         id = "botster-workspaces-sessions-empty-" .. workspace.id,
         props = {
           title = "No sessions yet",
-          description = "Spawn a new session, or add an existing Hub session id.",
+          description = "Spawn a new session or add an available session.",
         },
       },
     }
   end
 
   local current = {}
-  local ended = {}
   local unavailable = {}
   for _, session_id in ipairs(workspace.session_refs) do
     current[#current + 1] = lifecycle_binding(workspace, session_id, "current")
-    ended[#ended + 1] = lifecycle_binding(workspace, session_id, "ended")
     unavailable[#unavailable + 1] = lifecycle_binding(
       workspace,
       session_id,
@@ -2179,7 +2255,6 @@ local function session_groups(workspace)
 
   return {
     session_group(workspace, "current", "Current", "Current workspace sessions", current),
-    session_group(workspace, "ended", "Ended", "Ended workspace sessions", ended),
     session_group(
       workspace,
       "unavailable",
@@ -2203,7 +2278,7 @@ local function workspace_detail(workspace)
       id = "botster-workspaces-selected-" .. workspace.id,
       props = {
         title = "Sessions",
-        description = "Current and past sessions grouped for this work.",
+        description = "Active sessions grouped for this work.",
       },
       slots = {
         toolbar = {
@@ -2385,6 +2460,13 @@ workspaces_surface = function()
     children = body,
   }
 end
+
+events.on("agent_status_changed", function(info)
+  handle_session_lifecycle(info, false)
+end)
+events.on("process_exited", function(info)
+  handle_session_lifecycle(info, true)
+end)
 
 return botster.register({
   handlers = {

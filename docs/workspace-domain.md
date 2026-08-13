@@ -27,8 +27,9 @@ Same-workspace reclaims are idempotent pure no-ops when the membership key
 already exists. Move computes the complete source and destination state and
 persists it once as an ownership upsert (not remove+upsert). Remove deletes only
 the reference and membership key. Delete of a workspace range-releases every
-membership key it owned. Missing, unavailable, or ended sessions remain
-deliberate history until the user explicitly moves or removes them.
+membership key it owned. A confirmed ended session releases its membership
+automatically. Missing, unavailable, and indeterminate sessions remain grouped
+until the user removes them or the Hub confirms their terminal state.
 
 The `botster-workspaces.workspace` entity read model publishes the grouping
 fields plus a derived session count. It references Hub identities without
@@ -79,7 +80,7 @@ creation time.
 
 Delete physically removes the grouping record and releases its name and
 memberships. It never terminates sessions or removes worktrees, branches, or
-repositories.
+repositories. A confirmed ended session releases its membership automatically.
 
 ## Atomic Spawn
 
@@ -140,19 +141,19 @@ The detail tree projects each stored session ID against the canonical Hub `/sess
 entity family with exact `session_uuid` and `lifecycle_class` filters:
 
 - `current` renders under Current.
-- `ended` renders under Ended.
 - `indeterminate`, or an absent canonical row, renders under Unavailable.
 
 The structural tree is rendered once. Authoritative entity snapshots and
 ordered upsert, patch, and remove frames reconcile membership presentation in
 generic clients without polling, `list_sessions`, or a surface refresh. The
-Current, Ended, and Unavailable headings therefore remain present
+Current and Unavailable headings therefore remain present
 for every non-empty workspace even when a group currently realizes no rows;
 an empty group is expected structural presentation rather than a refresh fault.
 The workspace record remains the exact five-field reference record; lifecycle
 classes and availability are never copied into `plugin.db` or the plugin-owned
-workspace entity family. Every reference remains until an explicit move or
-remove, including ended and absent sessions.
+workspace entity family. A Hub lifecycle event atomically removes a confirmed
+ended reference and its membership key. An indeterminate or absent reference
+stays until the Hub confirms its terminal state or the user removes it.
 
 ## Persistence
 

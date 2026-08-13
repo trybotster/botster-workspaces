@@ -40,7 +40,7 @@ Dir.mktmpdir("botster-workspaces-ui-contract") do |dir|
 
   payload = JSON.parse(File.read(surfaces_path))
   abort_with("expected empty, populated, and 16-reference app surface payloads") unless payload.is_a?(Array) && payload.length == 3
-  abort_with("16-reference surface must expose exactly 64 canonical bindings") unless bind_list_count(payload.fetch(2)) == 64
+  abort_with("16-reference surface must expose exactly 48 live-session bindings") unless bind_list_count(payload.fetch(2)) == 48
 
   File.write(File.join(dir, "Cargo.toml"), <<~TOML)
     [package]

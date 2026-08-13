@@ -949,9 +949,17 @@ assert(
 )
 assert(
   find_node(post_action_surface, "botster-workspaces-remove-absent-#{workspace_id}-#{unknown_session_id}"),
-  "single surface render did not author legible absent-reference history"
+  "single surface render did not author a legible unavailable reference"
 )
 
+ended_membership_socket, ended_membership_snapshot = open_membership_entity_subscription(
+  socket_path,
+  "workspaces-ended-membership-#{Process.pid}"
+)
+assert(
+  ended_membership_snapshot.fetch("items").any? { |item| item["session_uuid"] == session_id },
+  "membership baseline omitted the session before shutdown"
+)
 request(socket, { type: "shutdown_session", session_id: session_id })
 ended_frame = wait_for_entity_frame(entity_socket, "ended session entity") do |frame|
   frame["type"] == "entity_patch" &&
@@ -959,10 +967,14 @@ ended_frame = wait_for_entity_frame(entity_socket, "ended session entity") do |f
     frame.dig("patch", "lifecycle_class") == "ended"
 end
 assert(ended_frame.fetch("snapshot_seq") > current_frame.fetch("snapshot_seq"), "ended patch was not ordered after current")
+ended_membership_remove = wait_for_entity_frame(ended_membership_socket, "ended membership removal") do |frame|
+  frame["type"] == "entity_remove" && frame["id"] == session_id
+end
 assert(
-  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(session_id),
-  "ended session entity update removed workspace history"
+  !call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(session_id),
+  "ended session retained workspace membership"
 )
+ended_membership_socket.close
 
 request(socket, { type: "shutdown_session", session_id: removed_session_id })
 wait_for_entity_frame(entity_socket, "second ended session entity") do |frame|
@@ -975,8 +987,8 @@ removed_frame = wait_for_entity_frame(entity_socket, "removed session entity") d
   frame["type"] == "entity_remove" && frame["id"] == removed_session_id
 end
 assert(
-  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(removed_session_id),
-  "removed session entity silently discarded the workspace reference"
+  !call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(removed_session_id),
+  "second ended session retained workspace membership"
 )
 
 entity_socket.close
@@ -995,13 +1007,14 @@ reconnect_items.each do |item|
 end
 assert(
   reconnect_items.any? { |item| item["session_uuid"] == session_id && item["lifecycle_class"] == "ended" },
-  "reconnect baseline did not rehydrate retained ended session"
+  "Hub reconnect baseline lost the ended session entity"
 )
 assert(
   reconnect_items.none? { |item| item["session_uuid"] == removed_session_id },
   "reconnect baseline retained explicitly removed session entity"
 )
 assert(removed_frame.fetch("snapshot_seq") > ended_frame.fetch("snapshot_seq"), "remove frame was not ordered after lifecycle patch")
+assert(ended_membership_remove["snapshot_seq"].positive?, "membership removal has an ordered sequence")
 
 delete_form = find_node(post_action_surface, "botster-workspaces-delete-form-#{workspace_id}")
 assert(delete_form, "spawned workspace is missing the rendered Delete form")
@@ -1023,7 +1036,7 @@ after_delete_socket, after_delete_snapshot = open_session_entity_subscription(
 )
 assert(
   after_delete_snapshot.fetch("items").any? { |item| item["session_uuid"] == session_id },
-  "workspace delete terminated retained ended Hub session"
+  "workspace membership cleanup terminated the ended Hub session"
 )
 after_delete_socket.close
 worktrees_after_delete = request(socket, { type: "list_worktrees" }).fetch("worktrees")

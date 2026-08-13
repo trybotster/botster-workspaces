@@ -14,6 +14,12 @@ local spawn_mode = "success"
 local spawn_rejection_kind = "branch_in_use"
 local spawn_rejection_message = "branch is already checked out"
 local next_spawn_uuid = "11111111-1111-4111-8111-111111111111"
+local event_handlers = {}
+events = {
+  on = function(event, handler)
+    event_handlers[event] = handler
+  end,
+}
 
 local function copy(value)
   if type(value) ~= "table" then
@@ -819,6 +825,47 @@ assert_eq(
   "restart preserves the opaque Hub session id"
 )
 
+do
+  local lifecycle_session = "66666666-6666-4666-8666-666666666666"
+  assert_eq(
+    add_session({ workspace_id = renamed.workspace.id, session_id = lifecycle_session }).ok,
+    true,
+    "lifecycle fixture joins workspace"
+  )
+  local before_current = #show({ id = renamed.workspace.id }).workspace.session_refs
+  event_handlers.agent_status_changed({
+    session_uuid = lifecycle_session,
+    lifecycle_class = "current",
+  })
+  assert_eq(
+    #show({ id = renamed.workspace.id }).workspace.session_refs,
+    before_current,
+    "current lifecycle keeps workspace membership"
+  )
+  local publish_before_ended = #publish_calls
+  event_handlers.agent_status_changed({
+    session_uuid = lifecycle_session,
+    lifecycle_class = "ended",
+  })
+  assert_eq(database["membership:" .. lifecycle_session], nil, "ended lifecycle deletes membership key")
+  assert_eq(
+    #show({ id = renamed.workspace.id }).workspace.session_refs,
+    before_current - 1,
+    "ended lifecycle removes workspace reference"
+  )
+  assert_eq(#publish_calls, publish_before_ended + 1, "ended lifecycle publishes membership removal")
+  assert_eq(publish_calls[#publish_calls].type, "entity_remove", "ended lifecycle publishes entity_remove")
+
+  local exited_session = "77777777-7777-4777-8777-777777777777"
+  assert_eq(
+    add_session({ workspace_id = renamed.workspace.id, session_id = exited_session }).ok,
+    true,
+    "process exit fixture joins workspace"
+  )
+  event_handlers.process_exited({ session_id = exited_session })
+  assert_eq(database["membership:" .. exited_session], nil, "process exit deletes membership key")
+end
+
 local git_without_branch = spawn({
   workspace_id = renamed.workspace.id,
   target_id = "tgt_git",
@@ -1015,6 +1062,7 @@ assert_true(add_select.props.options_source, "picker uses options_source")
 assert_eq(add_select.props.options_source["$kind"], "entity_options", "picker uses entity_options kind")
 assert_eq(add_select.props.options_source.source, "/session", "picker sources Hub /session")
 assert_eq(add_select.props.options_source.value_field, "session_uuid", "picker value is session_uuid")
+assert_eq(add_select.props.options_source.where.lifecycle_class, "current", "picker offers only current sessions")
 assert_eq(
   table.concat(add_select.props.options_source.display_fields, ","),
   "label,session_uuid,lifecycle,lifecycle_class,session_type_id,spawn_point",
@@ -1054,11 +1102,11 @@ presentation_state["workspace-dialog"] = nil
 
 local lifecycle_bindings = {}
 collect_bind_lists(surface, lifecycle_bindings)
-assert_eq(#lifecycle_bindings, 12, "each stored reference authors exactly four canonical session bindings")
+assert_eq(#lifecycle_bindings, 9, "each stored reference authors three live-session bindings")
 for _, binding in ipairs(lifecycle_bindings) do
   assert_eq(binding.source, "/session", "lifecycle bindings use the canonical Hub session family")
 end
-for _, group in ipairs({ "current", "ended", "indeterminate" }) do
+for _, group in ipairs({ "current", "indeterminate" }) do
   local expected_id = "botster-workspaces-session-" .. group .. "-" .. renamed.workspace.id .. "-" .. persisted_spawn_uuid
   local binding
   for _, candidate in ipairs(lifecycle_bindings) do
@@ -1086,7 +1134,6 @@ for _, group in ipairs({ "current", "ended", "indeterminate" }) do
 end
 for group, presentation in pairs({
   current = { title = "Current", aria_label = "Current workspace sessions" },
-  ended = { title = "Ended", aria_label = "Ended workspace sessions" },
   unavailable = {
     title = "Unavailable",
     aria_label = "Unavailable workspace sessions",
@@ -1136,7 +1183,7 @@ local scale_detail = find_node(scale_surface, "botster-workspaces-detail-" .. sc
 assert_true(scale_detail, "16-reference workspace detail is authored")
 local scale_bindings = {}
 collect_bind_lists(scale_detail, scale_bindings)
-assert_eq(#scale_bindings, 64, "16 references author no more than 64 bindings")
+assert_eq(#scale_bindings, 48, "16 references author no more than 48 bindings")
 local scale_ids = {}
 collect_node_ids(scale_detail, scale_ids)
 local seen_scale_ids = {}
@@ -1148,7 +1195,7 @@ for index = 1, 16 do
   local session_id = string.format("90000000-0000-4000-8000-%012d", index)
   local remove = find_node(
     scale_detail,
-    "botster-workspaces-remove-ended-" .. scale_workspace.id .. "-" .. session_id
+    "botster-workspaces-remove-current-" .. scale_workspace.id .. "-" .. session_id
   )
   assert_true(remove, "scale row keeps an actionable literal descendant")
   assert_eq(remove.props.action.payload.session_id, session_id, "scale action preserves its literal session id")

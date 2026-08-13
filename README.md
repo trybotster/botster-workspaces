@@ -60,8 +60,7 @@ The detail toolbar separates session actions from workspace management:
 - **Remove** removes a session from the workspace grouping.
 
 The selected row renders the workspace name once. The detail starts with the
-Sessions section. Compact lifecycle groups replace nested full-page sections
-for Current, Ended, and Unavailable sessions.
+Sessions section. Compact groups show Current and Unavailable sessions.
 
 **Add existing session** authors an Available sessions picker bound to Hub
 `/session` through `entity_options`, excluding every session ID present in
@@ -73,13 +72,13 @@ field remains for sessions absent from current Hub entity state; when both
 fields are set, the advanced value wins. Membership claim and remove still
 publish live membership entity frames for open pickers.
 
-Detail groups each stored reference as **Current**, **Ended**, or
-**Unavailable** by binding the stable surface tree directly to the Hub-owned
-`/session` entity family. Snapshot, upsert, patch, and remove frames therefore
-move rows without polling, an imperative session-list refresh, or a surface
-rerender. Ended, indeterminate, and absent session ids remain deliberate
-workspace history until the user explicitly moves or removes them. The package
-does not persist, compute, or guess lifecycle truth.
+Detail groups each stored reference as **Current** or **Unavailable** by binding
+the stable surface tree directly to the Hub-owned `/session` entity family.
+Snapshot, upsert, patch, and remove frames move rows without polling or an
+imperative session-list refresh. A confirmed ended lifecycle removes the
+workspace reference and membership key. Indeterminate and absent sessions stay
+grouped because absence does not prove that a session ended. The package does
+not persist or guess lifecycle truth.
 
 Spawn is target-first and stays thin for the common case:
 

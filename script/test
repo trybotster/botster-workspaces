@@ -227,11 +227,13 @@ assert(
 lifecycle_contract = surface_contract.fetch("lifecycle_grouping")
 assert(lifecycle_contract["source"] == "/session", "fixture must use the canonical session entity family")
 assert(
-  lifecycle_contract["groups"] == %w[current ended indeterminate absent],
+  lifecycle_contract["groups"] == %w[current indeterminate absent],
   "fixture must define canonical lifecycle and absence groups"
 )
 assert(lifecycle_contract["persists_lifecycle"] == false, "fixture must not persist lifecycle truth")
-assert(lifecycle_contract["bindings_per_reference_max"] == 4, "fixture must bound binding growth")
+assert(lifecycle_contract["removes_ended_memberships"] == true, "fixture must remove confirmed ended memberships")
+assert(lifecycle_contract["retains_unavailable_refs"] == true, "fixture must retain unavailable references")
+assert(lifecycle_contract["bindings_per_reference_max"] == 3, "fixture must bound binding growth")
 assert(contract.dig("entity_family", "name") == "botster-workspaces.workspace", "fixture must name entity family")
 
 {

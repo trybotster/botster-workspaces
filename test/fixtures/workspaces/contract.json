@@ -159,7 +159,6 @@
       "classification_field": "lifecycle_class",
       "groups": [
         "current",
-        "ended",
         "indeterminate",
         "absent"
       ],
@@ -170,8 +169,9 @@
         "entity_remove"
       ],
       "persists_lifecycle": false,
-      "retains_ended_and_unavailable_refs": true,
-      "bindings_per_reference_max": 4
+      "removes_ended_memberships": true,
+      "retains_unavailable_refs": true,
+      "bindings_per_reference_max": 3
     }
   },
   "entity_family": {

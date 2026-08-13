@@ -3,6 +3,7 @@ target/
 node_modules/
 .env
 mise.local.toml
+.botster/
 *.log
 log/
 tmp/

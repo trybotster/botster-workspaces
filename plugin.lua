@@ -1165,15 +1165,27 @@ local function log_prune_error(session_id, result)
   end
 end
 
-local function handle_session_lifecycle(info, force_ended)
+local function handle_session_lifecycle(info)
   local session_id = session_id_from_lifecycle(info)
-  if not session_id or (not force_ended and not session_has_ended(info)) then
+  if not session_id or not session_has_ended(info) then
     return
   end
   local result = prune_session_reference(session_id)
   if not result.ok then
     log_prune_error(session_id, result)
   end
+end
+
+local function handle_session_family(frame)
+  local frame_type = lifecycle_field(frame, "type")
+  if frame_type == "snapshot_chunk" then
+    for _, session in ipairs(lifecycle_field(frame, "items") or {}) do
+      handle_session_lifecycle(session)
+    end
+  elseif frame_type == "entity_upsert" then
+    handle_session_lifecycle(lifecycle_field(frame, "entity"))
+  end
+  -- Entity removal does not confirm that a session ended. Keep its membership.
 end
 
 -- Workspaces group sessions; they do not own Git. List every enabled Hub spawn
@@ -2461,12 +2473,7 @@ workspaces_surface = function()
   }
 end
 
-events.on("agent_status_changed", function(info)
-  handle_session_lifecycle(info, false)
-end)
-events.on("process_exited", function(info)
-  handle_session_lifecycle(info, true)
-end)
+events.on("hub", "session_family", handle_session_family)
 
 return botster.register({
   handlers = {

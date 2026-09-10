@@ -16,8 +16,8 @@ local spawn_rejection_message = "branch is already checked out"
 local next_spawn_uuid = "11111111-1111-4111-8111-111111111111"
 local event_handlers = {}
 events = {
-  on = function(event, handler)
-    event_handlers[event] = handler
+  on = function(owner, event, handler)
+    event_handlers[owner .. "/" .. event] = handler
   end,
 }
 
@@ -833,9 +833,12 @@ do
     "lifecycle fixture joins workspace"
   )
   local before_current = #show({ id = renamed.workspace.id }).workspace.session_refs
-  event_handlers.agent_status_changed({
-    session_uuid = lifecycle_session,
-    lifecycle_class = "current",
+  event_handlers["hub/session_family"]({
+    type = "entity_upsert",
+    entity = {
+      session_uuid = lifecycle_session,
+      lifecycle_class = "current",
+    },
   })
   assert_eq(
     #show({ id = renamed.workspace.id }).workspace.session_refs,
@@ -843,9 +846,14 @@ do
     "current lifecycle keeps workspace membership"
   )
   local publish_before_ended = #publish_calls
-  event_handlers.agent_status_changed({
-    session_uuid = lifecycle_session,
-    lifecycle_class = "ended",
+  event_handlers["hub/session_family"]({
+    type = "snapshot_chunk",
+    items = {
+      {
+        session_uuid = lifecycle_session,
+        lifecycle_class = "ended",
+      },
+    },
   })
   assert_eq(database["membership:" .. lifecycle_session], nil, "ended lifecycle deletes membership key")
   assert_eq(
@@ -856,14 +864,63 @@ do
   assert_eq(#publish_calls, publish_before_ended + 1, "ended lifecycle publishes membership removal")
   assert_eq(publish_calls[#publish_calls].type, "entity_remove", "ended lifecycle publishes entity_remove")
 
-  local exited_session = "77777777-7777-4777-8777-777777777777"
   assert_eq(
-    add_session({ workspace_id = renamed.workspace.id, session_id = exited_session }).ok,
+    add_session({ workspace_id = renamed.workspace.id, session_id = lifecycle_session }).ok,
     true,
-    "process exit fixture joins workspace"
+    "upsert fixture joins workspace"
   )
-  event_handlers.process_exited({ session_id = exited_session })
-  assert_eq(database["membership:" .. exited_session], nil, "process exit deletes membership key")
+  local publish_before_retained = #publish_calls
+  for _, lifecycle_class in ipairs({ "current", "indeterminate" }) do
+    event_handlers["hub/session_family"]({
+      type = "snapshot_chunk",
+      items = { { session_uuid = lifecycle_session, lifecycle_class = lifecycle_class } },
+    })
+    assert_eq(
+      database["membership:" .. lifecycle_session] ~= nil,
+      true,
+      lifecycle_class .. " snapshot keeps workspace membership"
+    )
+  end
+  event_handlers["hub/session_family"]({ type = "snapshot_chunk", items = {} })
+  event_handlers["hub/session_family"]({ type = "snapshot_end" })
+  assert_eq(database["membership:" .. lifecycle_session] ~= nil, true, "absent snapshot keeps workspace membership")
+  assert_eq(#publish_calls, publish_before_retained, "retained membership publishes no removal")
+
+  event_handlers["hub/session_family"]({
+    type = "entity_upsert",
+    entity = { session_uuid = lifecycle_session, lifecycle_class = "ended" },
+  })
+  assert_eq(database["membership:" .. lifecycle_session], nil, "ended upsert deletes membership key")
+  assert_eq(
+    #show({ id = renamed.workspace.id }).workspace.session_refs,
+    before_current - 1,
+    "ended upsert removes workspace reference"
+  )
+  assert_eq(#publish_calls, publish_before_retained + 1, "ended upsert publishes membership removal")
+  event_handlers["hub/session_family"]({ type = "entity_remove", id = lifecycle_session })
+  assert_eq(#publish_calls, publish_before_retained + 1, "repeated removal publishes no duplicate")
+
+  local removed_session = "77777777-7777-4777-8777-777777777777"
+  assert_eq(
+    add_session({ workspace_id = renamed.workspace.id, session_id = removed_session }).ok,
+    true,
+    "removed session fixture joins workspace"
+  )
+  local publish_before_removed = #publish_calls
+  local references_before_removed = #show({ id = renamed.workspace.id }).workspace.session_refs
+  event_handlers["hub/session_family"]({ type = "entity_remove", id = removed_session })
+  assert_eq(database["membership:" .. removed_session] ~= nil, true, "entity removal keeps membership key")
+  assert_eq(
+    #show({ id = renamed.workspace.id }).workspace.session_refs,
+    references_before_removed,
+    "entity removal keeps workspace reference"
+  )
+  assert_eq(#publish_calls, publish_before_removed, "entity removal publishes no membership removal")
+  assert_eq(
+    remove_session({ workspace_id = renamed.workspace.id, session_id = removed_session }).ok,
+    true,
+    "user can remove the unavailable session reference"
+  )
 end
 
 local git_without_branch = spawn({

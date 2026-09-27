@@ -2473,7 +2473,10 @@ workspaces_surface = function()
   }
 end
 
-events.on("hub", "session_family", handle_session_family)
+local subscribed = botster.events.on({ owner = "hub", name = "session_family" }, handle_session_family)
+if not subscribed.ok then
+  error("session_family subscription refused: " .. subscribed.error.message, 0)
+end
 
 return botster.register({
   handlers = {

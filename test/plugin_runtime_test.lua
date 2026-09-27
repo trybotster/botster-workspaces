@@ -15,11 +15,6 @@ local spawn_rejection_kind = "branch_in_use"
 local spawn_rejection_message = "branch is already checked out"
 local next_spawn_uuid = "11111111-1111-4111-8111-111111111111"
 local event_handlers = {}
-events = {
-  on = function(owner, event, handler)
-    event_handlers[owner .. "/" .. event] = handler
-  end,
-}
 
 local function copy(value)
   if type(value) ~= "table" then
@@ -56,6 +51,12 @@ local function apply_set(request)
 end
 
 botster = {
+  events = {
+    on = function(spec, handler)
+      event_handlers[spec.owner .. "/" .. spec.name] = handler
+      return { ok = true }
+    end,
+  },
   entity_publish = function(frame)
     publish_calls[#publish_calls + 1] = copy(frame)
     return {

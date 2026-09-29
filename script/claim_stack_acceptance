@@ -214,13 +214,14 @@ def membership_keys(daemon)
   # Prefer tool shape; fall back to list via show.
   result = snapshot["plugin_tool_result"] || snapshot
   items = result["items"] || result.dig("snapshot", "items") || []
-  Array(items).map { |item| item["session_uuid"] || item["id"] }.compact
+  Array(items).map { |item| item["session_id"] }.compact
 end
 
 def workspace_session_refs(daemon, workspace_id)
   shown = daemon.call_tool("botster_workspaces.show", { id: workspace_id })
   workspace = shown["workspace"] || shown
-  Array(workspace["session_refs"])
+  # session_refs are { hub_id, session_id }; this Hub is the only hub.
+  Array(workspace["session_refs"]).map { |ref| ref["session_id"] }
 end
 
 def remove_membership!(daemon, workspace_id, session_uuid)

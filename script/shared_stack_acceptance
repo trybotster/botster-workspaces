@@ -340,7 +340,7 @@ end
 def assert_single_owner!(daemon, expected_session_ids)
   counts = Hash.new(0)
   workspace_rows(daemon).each do |workspace|
-    Array(workspace["session_refs"]).each { |session_id| counts[session_id] += 1 }
+    Array(workspace["session_refs"]).each { |ref| counts[ref["session_id"]] += 1 }
   end
   assert(counts.values.all? { |count| count == 1 }, "a session belongs to more than one workspace")
   expected_session_ids.each do |session_id|

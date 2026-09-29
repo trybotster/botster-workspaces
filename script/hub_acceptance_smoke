@@ -471,7 +471,7 @@ assert(
   options_source.dig("exclude", "source") == "/botster-workspaces.membership",
   "picker must exclude membership family"
 )
-assert(options_source.dig("exclude", "value_field") == "session_uuid", "exclude value_field must be session_uuid")
+assert(options_source.dig("exclude", "value_field") == "session_id", "exclude value_field must be session_id")
 assert(
   add_select.dig("slots", "options").nil? || add_select.dig("slots", "options").empty?,
   "entity_options select must not ship static select_option children"
@@ -509,7 +509,7 @@ added_action = action(
 )
 assert(added_action["state"] == "accepted", "Add session action was not accepted")
 assert(
-  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs") == [membership_session_id],
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").map { |ref| ref["session_id"] } == [membership_session_id],
   "Add session action did not persist membership"
 )
 
@@ -545,7 +545,7 @@ assert(
   "Move session action did not clear source membership"
 )
 assert(
-  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs") == [membership_session_id],
+  call_tool(socket, "botster_workspaces.show", { id: destination_workspace_id }).dig("workspace", "session_refs").map { |ref| ref["session_id"] } == [membership_session_id],
   "Move session action did not persist destination membership"
 )
 
@@ -608,11 +608,11 @@ assert(held_membership_baseline["type"] == "entity_snapshot", "held membership b
 assert(held_membership_baseline["entity_type"] == "botster-workspaces.membership", "held membership family mismatch")
 assert(held_membership_baseline["items"].is_a?(Array), "held membership baseline items must be an array")
 assert(
-  held_membership_baseline["items"].none? { |item| item["session_uuid"].to_s.empty? || item["id"].to_s.start_with?("__") },
+  held_membership_baseline["items"].none? { |item| item["session_id"].to_s.empty? || item["id"].to_s.start_with?("__") },
   "membership snapshot must not include sentinel rows"
 )
 assert(
-  held_membership_baseline["items"].any? { |item| item["session_uuid"] == producer_seed_session_id },
+  held_membership_baseline["items"].any? { |item| item["session_id"] == producer_seed_session_id },
   "held membership baseline must include the seed claim"
 )
 
@@ -633,18 +633,22 @@ if producer_claim.key?("membership_publish")
   )
 end
 assert(
-  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(producer_session_id),
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").map { |ref| ref["session_id"] }.include?(producer_session_id),
   "producer check 1: claim must persist membership"
 )
 claim_upsert = wait_for_entity_frame(held_membership_socket, "producer claim entity_upsert") do |frame|
   frame["type"] == "entity_upsert" &&
     frame["entity_type"] == "botster-workspaces.membership" &&
-    frame["id"] == producer_session_id
+    frame["id"].to_s.end_with?("/#{producer_session_id}")
 end
 assert(claim_upsert["snapshot_seq"].is_a?(Integer), "producer check 2: upsert must carry snapshot_seq")
-assert(claim_upsert.dig("entity", "session_uuid") == producer_session_id, "producer check 2: upsert entity session_uuid")
+assert(claim_upsert.dig("entity", "session_id") == producer_session_id, "producer check 2: upsert entity session_id")
+assert(claim_upsert.dig("entity", "hub_id").is_a?(String), "producer check 2: upsert entity hub_id")
 assert(claim_upsert.dig("entity", "workspace_id") == workspace_id, "producer check 2: upsert entity workspace_id")
-assert(claim_upsert.dig("entity", "id") == producer_session_id, "producer check 2: upsert entity id equals session_uuid")
+assert(
+  claim_upsert.dig("entity", "id") == "#{claim_upsert.dig("entity", "hub_id")}/#{producer_session_id}",
+  "producer check 2: upsert entity id is <hub_id>/<session_id>"
+)
 assert(!claim_upsert.dig("entity", "lifecycle"), "producer check 2: membership must not copy Hub lifecycle")
 
 stale_add = call_tool(
@@ -667,7 +671,7 @@ if IO.select([held_membership_socket], nil, nil, 0.4)
   assert(
     false_state.nil? || !(
       false_state["type"] == "entity_upsert" &&
-      false_state["id"] == producer_session_id &&
+      false_state["id"].to_s.end_with?("/#{producer_session_id}") &&
       false_state.dig("entity", "workspace_id") == destination_workspace_id
     ),
     "producer check 5: conflict loser must not publish false ownership: #{false_state.inspect}"
@@ -707,13 +711,13 @@ producer_remove = call_tool(
 )
 assert(producer_remove["ok"] == true, "producer check 3: production remove must commit")
 assert(
-  !call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(producer_session_id),
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").none? { |ref| ref["session_id"] == producer_session_id },
   "producer check 3: remove must drop membership"
 )
 claim_remove = wait_for_entity_frame(held_membership_socket, "producer remove entity_remove") do |frame|
   frame["type"] == "entity_remove" &&
     frame["entity_type"] == "botster-workspaces.membership" &&
-    frame["id"] == producer_session_id
+    frame["id"].to_s.end_with?("/#{producer_session_id}")
 end
 assert(claim_remove["snapshot_seq"].is_a?(Integer), "producer check 4: remove must carry snapshot_seq")
 assert(
@@ -729,7 +733,7 @@ seed_remove = call_tool(
 )
 assert(seed_remove["ok"] == true, "producer seed remove must commit")
 wait_for_entity_frame(held_membership_socket, "producer seed entity_remove") do |frame|
-  frame["type"] == "entity_remove" && frame["id"] == producer_seed_session_id
+  frame["type"] == "entity_remove" && frame["id"].to_s.end_with?("/#{producer_seed_session_id}")
 end
 held_membership_socket.close
 
@@ -856,7 +860,7 @@ spawned = spawned_action.fetch("payload")
 assert(spawned["ok"] == true, "real atomic Hub spawn payload failed: #{spawned}")
 session_id = spawned.fetch("session_id")
 assert(session_id == spawned.dig("hub_result", "session_id"), "workspace did not persist returned Hub UUID")
-assert(spawned.fetch("workspace").fetch("session_refs").count(session_id) == 1, "returned UUID not persisted exactly once")
+assert(spawned.fetch("workspace").fetch("session_refs").count { |ref| ref["session_id"] == session_id } == 1, "returned UUID not persisted exactly once")
 
 current_frame = wait_for_entity_frame(entity_socket, "current session entity") do |frame|
   frame["type"] == "entity_upsert" &&
@@ -874,7 +878,10 @@ assert(worktrees.any? { |worktree| worktree["worktree_id"] == worktree_id }, "ma
 
 request(socket, { type: "reload_package", package_name: PACKAGE })
 after_restart = call_tool(socket, "botster_workspaces.show", { id: workspace_id })
-assert(after_restart.fetch("workspace").fetch("session_refs").include?(session_id), "restart lost returned UUID membership")
+assert(
+  after_restart.fetch("workspace").fetch("session_refs").any? { |ref| ref["session_id"] == session_id },
+  "restart lost returned UUID membership"
+)
 
 membership_before_failure = after_restart.fetch("workspace").fetch("session_refs")
 failed_spawn = call_tool(socket, "botster_workspaces.spawn", {
@@ -957,7 +964,7 @@ ended_membership_socket, ended_membership_snapshot = open_membership_entity_subs
   "workspaces-ended-membership-#{Process.pid}"
 )
 assert(
-  ended_membership_snapshot.fetch("items").any? { |item| item["session_uuid"] == session_id },
+  ended_membership_snapshot.fetch("items").any? { |item| item["session_id"] == session_id },
   "membership baseline omitted the session before shutdown"
 )
 request(socket, { type: "shutdown_session", session_id: session_id })
@@ -968,10 +975,10 @@ ended_frame = wait_for_entity_frame(entity_socket, "ended session entity") do |f
 end
 assert(ended_frame.fetch("snapshot_seq") > current_frame.fetch("snapshot_seq"), "ended patch was not ordered after current")
 ended_membership_remove = wait_for_entity_frame(ended_membership_socket, "ended membership removal") do |frame|
-  frame["type"] == "entity_remove" && frame["id"] == session_id
+  frame["type"] == "entity_remove" && frame["id"].to_s.end_with?("/#{session_id}")
 end
 assert(
-  !call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(session_id),
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").none? { |ref| ref["session_id"] == session_id },
   "ended session retained workspace membership"
 )
 ended_membership_socket.close
@@ -987,7 +994,7 @@ removed_frame = wait_for_entity_frame(entity_socket, "removed session entity") d
   frame["type"] == "entity_remove" && frame["id"] == removed_session_id
 end
 assert(
-  !call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").include?(removed_session_id),
+  call_tool(socket, "botster_workspaces.show", { id: workspace_id }).dig("workspace", "session_refs").none? { |ref| ref["session_id"] == removed_session_id },
   "second ended session retained workspace membership"
 )
 

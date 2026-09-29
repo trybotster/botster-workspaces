@@ -185,8 +185,17 @@ local function local_hub_id()
   return identified.value.hub_id, nil
 end
 
--- The one place a tool's hub_id is resolved. Nil means the local hub.
-local function resolve_hub(hub_id)
+-- The one place a tool's hub_id is resolved. It takes the raw argument: nil
+-- means the local hub; anything else must be a non-blank string, so a
+-- malformed hub_id is refused and never falls back to the local hub.
+local function resolve_hub(raw_hub_id)
+  local hub_id = nil
+  if raw_hub_id ~= nil then
+    hub_id = trim(raw_hub_id)
+    if hub_id == nil then
+      return nil, error_result("validation_failed", "hub_id must be a non-blank string", { "hub_id" })
+    end
+  end
   local local_id, identity_error = local_hub_id()
   if identity_error then
     return nil, identity_error
@@ -883,7 +892,7 @@ local function add_session(arguments)
   if #missing > 0 then
     return error_result("validation_failed", "Add session needs a workspace and a valid session id.", missing)
   end
-  local ref, ref_error = session_ref(session_id, trim(arguments.hub_id))
+  local ref, ref_error = session_ref(session_id, arguments.hub_id)
   if ref_error then
     return ref_error
   end
@@ -986,7 +995,7 @@ local function move_session(arguments)
   if #missing > 0 then
     return error_result("validation_failed", "Move session needs a destination workspace and a valid session id.", missing)
   end
-  local ref, ref_error = session_ref(session_id, trim(arguments.hub_id))
+  local ref, ref_error = session_ref(session_id, arguments.hub_id)
   if ref_error then
     return ref_error
   end
@@ -1095,7 +1104,7 @@ local function remove_session(arguments)
       { "workspace_id", "session_id" }
     )
   end
-  local ref, ref_error = session_ref(session_id, trim(arguments.hub_id))
+  local ref, ref_error = session_ref(session_id, arguments.hub_id)
   if ref_error then
     return ref_error
   end
@@ -2553,7 +2562,7 @@ local function agent_list_workspaces(arguments)
   if rejected then
     return error_result("unknown_field", "list_workspaces does not accept field: " .. rejected, { rejected })
   end
-  local hub_id, hub_error = resolve_hub(trim((arguments or {}).hub_id))
+  local hub_id, hub_error = resolve_hub((arguments or {}).hub_id)
   if hub_error then
     return hub_error
   end
@@ -2567,7 +2576,7 @@ local function agent_rename_workspace(arguments)
   if rejected then
     return error_result("unknown_field", "rename_workspace does not accept field: " .. rejected, { rejected })
   end
-  local _, hub_error = resolve_hub(trim(arguments.hub_id))
+  local _, hub_error = resolve_hub(arguments.hub_id)
   if hub_error then
     return hub_error
   end
@@ -2585,7 +2594,7 @@ local function agent_move_session(arguments)
   if not workspace_id then
     return error_result("validation_failed", "move_agent_workspace needs workspace_id", { "workspace_id" })
   end
-  local ref, ref_error = session_ref(trim(arguments.session_id), trim(arguments.hub_id))
+  local ref, ref_error = session_ref(trim(arguments.session_id), arguments.hub_id)
   if ref_error then
     return ref_error
   end

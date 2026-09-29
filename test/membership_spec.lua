@@ -112,3 +112,34 @@ kit.test("move_agent_workspace adds, then moves", function(t)
     .error.code, "remote_hub_unsupported")
   t:eq(ws.call(t, p, "move_agent_workspace", { session_id = "session-a" }).error.code, "validation_failed")
 end)
+
+-- Review of d6ee4c9: a malformed hub_id is refused and never means the local hub.
+kit.test("a malformed hub_id is refused by every tool and changes nothing", function(t)
+  local p = t:load(".")
+  local hub_id = ws.hub_id(t, p)
+  local a = ws.create(t, p, "Alpha")
+  local b = ws.create(t, p, "Beta")
+  add(t, p, a, "session-a")
+  local before_a = ws.workspace(t, p, a)
+  local before_b = ws.workspace(t, p, b)
+  for _, bad in ipairs({ false, 42, { hub = "x" }, "   " }) do
+    local calls = {
+      { "botster_workspaces.add_session", { workspace_id = b, session_id = "session-b", hub_id = bad } },
+      { "botster_workspaces.move_session", { destination_workspace_id = b, session_id = "session-a", hub_id = bad } },
+      { "botster_workspaces.remove_session", { workspace_id = a, session_id = "session-a", hub_id = bad } },
+      { "move_agent_workspace", { session_id = "session-a", workspace_id = b, hub_id = bad } },
+      { "rename_workspace", { workspace_id = a, new_name = "Gamma", hub_id = bad } },
+      { "list_workspaces", { hub_id = bad } },
+    }
+    for _, call in ipairs(calls) do
+      local r = ws.call(t, p, call[1], call[2])
+      t:eq(r.ok, false)
+      t:eq(r.error.code, "validation_failed")
+      t:eq(r.fields, { "hub_id" })
+    end
+  end
+  t:eq(ws.workspace(t, p, a), before_a)
+  t:eq(ws.workspace(t, p, b), before_b)
+  t:eq(p:db_get(ws.key(hub_id, "session-a")).workspace_id, a)
+  t:eq(p:db_get(ws.key(hub_id, "session-b")), nil)
+end)

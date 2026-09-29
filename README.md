@@ -159,132 +159,13 @@ BOTSTER_UI_CONTRACT_PATH=/path/to/botster-hub/crates/botster-ui-contract \
 The second command validates the owner-authored tree against the exact Hub
 `botster-ui-contract` artifact. There is no Core-backed fallback.
 
-For real package behavior, start a current Hub from a fresh data directory,
-install and enable this checkout, then run:
+For real package behavior with a session worker, run the end-to-end specs
+against a candidate Hub (see "Testing").
 
-```sh
-script/hub_acceptance_smoke /path/to/current-hub.sock
-```
-
-That smoke crosses the registered package, plugin worker, atomic managed-Git
-spawn, persistence/restart, canonical session-entity lifecycle reconciliation,
-surface render, and non-destructive delete paths.
-
-After the repository-documented consumer modes are available, run the
-package-specific Web lifecycle smoke from `botster-web` with this checkout:
-
-```sh
-BOTSTER_HUB_BIN=/path/to/botster-hub \
-BOTSTER_SESSION_WORKER_BIN=/path/to/botster-session-worker \
-BOTSTER_WORKSPACES_PACKAGE_PATH="$PWD" \
-  npm run smoke:workspaces-lifecycle
-```
-
-Run the corresponding documented Workspaces lifecycle mode from `botster-tui`
-with the same Hub, worker, and package provenance. These modes must exercise
-the real owner-authored tree through each generic renderer; repository-local
-source or fixture inspection is not a substitute.
-
-### Shared-stack acceptance
-
-The final browser/TUI profile uses one parent-owned Hub process and one fresh
-data directory. It installs and enables Web, TUI, Workspaces, and the
-repository-owned session-type fixture once, then drives both installed
-clients against the same durable Hub state. Supply an explicit immutable input
-manifest and a new absolute evidence directory:
-
-```sh
-script/test-hub-flow shared-stack validate-inputs /absolute/path/to/inputs.json
-script/test-hub-flow shared-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
-```
-
-`script/test-hub-flow` fails closed with usage for any unrecognized argument
-shape. The runtime profile prefers the short `/private/tmp` root when present
-because the Hub uses a Unix-domain socket; it validates the resolved socket
-path against a conservative platform limit before starting Hub and reports a
-clear error if the fallback temporary root is too long.
-
-The version 1 manifest contains exactly `schema_version` and `artifacts`.
-`hub_binary`, `session_worker_binary`, and `tui_binary` name executable files
-with SHA-256 digests, full source revisions, and clean absolute
-source-checkout paths. Each executable entry contains exactly `kind`, `path`,
-`sha256`, `source_checkout`, and `revision`. The checkout entries contain
-exactly `kind`, `path`, and `revision` and name clean absolute Git roots:
-`core_source`, `web_package`, `tui_package`, `tui_kit_source`,
-`workspaces_package`, `ui_contract_source`, `web_driver_source`, and
-`tui_driver_source`. Repeating a checkout for its package and driver is
-intentional: the manifest states both roles explicitly and the validator
-requires one exact revision for each.
-
-The run writes raw Hub, Web, and TUI logs, the assigned TUI scenario and JSONL
-ledger, owner-boundary output, and `summary.json`. The summary records the
-exact clean shared-stack harness revision alongside every supplied artifact.
-It proves browser
-create/select/Spawn through the production renderer and transport, keyboard
-Spawn through the production TUI frame and hit map, the missing-branch,
-existing-branch, and exact-worktree states, pushed lifecycle reconciliation,
-typed non-destructive collisions, one-workspace ownership, grouping-only
-deletion, terminal teardown with zero surviving sessions, and Hub-owned
-UI-contract provenance. The expensive cross-repository
-profile is deliberately opt-in and is not part of `script/test`.
-
-The validator never infers sibling paths, accepts dirty checkouts, or treats a
-mutable branch name as a revision. The supplied Hub revision must be the exact
-contract source pinned by both client graphs; it need not be the newest Hub
-commit. A failure in a Hub, Web, TUI, Core, TUI-kit, or UI-contract input must
-be repaired in that owning repository rather than patched by this package.
-
-### Claim-stack acceptance
-
-The available-session claim integration profile proves the complete claim flow
-on one parent-owned clean Hub with the real `botster-workspaces` package and
-production Web dual-browser interaction. It is opt-in and uses the same
-immutable pin manifest shape as shared-stack:
-
-```sh
-script/test-hub-flow claim-stack validate-inputs /absolute/path/to/inputs.json
-script/test-hub-flow claim-stack run /absolute/path/to/inputs.json /absolute/path/to/new-evidence
-```
-
-Minimum consumer pins (refresh at run time; dirty checkouts fail closed):
-
-| Component | Minimum revision / control |
-| --- | --- |
-| Workspaces package | `7ab4d1334214b3ea3c8b02e9ea665a27e70c0916` |
-| Hub binary source | `de6b09982e72fd5efd04a5258f5fc645f611adbc` |
-| Web package + driver | `102d39ea6c8ae7b927006dfba109171191c7b775` (includes `armDropNextInboundEntityFrame`) |
-| TUI package + driver | `d40f28f9de2b621e50367c0f014880429eddedde` (shared-Hub claim-driver) |
-
-Parent campaign lanes (one shared `--data-dir`):
-
-- Package/Hub substrate via `script/hub_acceptance_smoke` (empty membership
-  `items == []`, entity_options authoring, membership publish, concurrent claim
-  uniqueness).
-- Production Web dual-browser claim campaign (`script/claim_stack_web_driver.mjs`):
-  entity_options select without typing an ID, SPA `request_id` correlation,
-  dual-workspace race (one owner + typed conflict), same-workspace concurrent
-  idempotent claim, historical advanced UUID recovery, in-page
-  `transportControl.closeDataChannel` reconnect, and ordered
-  `sequence_gap` via `transportControl.armDropNextInboundEntityFrame` (Web
-  ticket `ticket_1786518263_839128`).
-- Production TUI keyboard claim on the **same** Hub via
-  `botster.tui.workspaces-claim-driver/v1` (`apps open botster-tui` with
-  `BOTSTER_TUI_ACCEPTANCE_SCENARIO` / evidence, strict build receipt from
-  `script/write-claim-build-receipt`). Proves realized
-  `botster_workspaces.add_session`, membership join, and option exclusion
-  (TUI ticket `ticket_1786529885_807584`).
-- Supporting pin-matched consumer re-checks (separate clean Hubs by consumer
-  design): Web `npm run smoke:workspaces-lifecycle` and TUI
-  `script/test-live-hub workspaces lifecycle`.
-
-Forbidden: `list_sessions` as picker source, force interaction, direct action
-payloads as race/claim participants, package-tool claim as a UI substitute,
-page-reload-as-reconnect, client-store injection as a gap trigger, and
-timing-only pass criteria.
-
-Evidence lands in the supplied directory as raw logs plus `summary.json` with
-pins, membership oracles, SPA request-state, forbidden-methods audit, and the
-production entry-point statement.
+The Web and TUI clients prove their own workspaces flows from their own
+repositories with this checkout (`npm run smoke:workspaces-lifecycle` in
+`botster-web`, `script/test-live-hub workspaces lifecycle` in `botster-tui`).
+This repository keeps no cross-repository acceptance harness.
 
 See [docs/workspace-domain.md](docs/workspace-domain.md) and
 [docs/capabilities.md](docs/capabilities.md) for the exact domain and authority
@@ -292,15 +173,21 @@ contracts.
 
 ## Testing
 
-`script/test` checks the manifest, the contract fixture, the docs, and the
-acceptance-script inputs. It then runs the behaviour specs in `test/*_spec.lua`
-with the Botster plugin test kit, which loads this package into a real Hub
-runtime (no API fakes):
+`script/test` checks the manifest, the contract fixture, and the docs. It then
+runs the behaviour specs in `test/*_spec.lua` with the Botster plugin test kit,
+which loads this package into a real Hub runtime (no API fakes):
 
 ```sh
 cargo install --locked --git https://github.com/trybotster/botster-hub --rev <pin> botster-plugin-test-kit
 BOTSTER_PLUGIN_TEST=botster-plugin-test script/test
 ```
 
-The in-process kit starts no session worker. A completed spawn is proven by the
-real-Hub acceptance scripts, not by the specs.
+The in-process kit starts no session worker. `script/test-e2e` runs
+`test/e2e/*_spec.lua` against a real `botster-hub` process with a session
+worker (`botster-plugin-test --e2e`), which proves a completed spawn. It needs
+the candidate binaries that the Hub's own gate builds:
+
+```sh
+BOTSTER_HUB_BIN=... BOTSTER_SESSION_WORKER_BIN=... BOTSTER_CANDIDATE_MANIFEST=... \
+  BOTSTER_PLUGIN_TEST=botster-plugin-test script/test-e2e
+```

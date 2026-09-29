@@ -2615,9 +2615,40 @@ local function agent_move_session(arguments)
   return add_session(target)
 end
 
+-- botster-orchestrator announces a spawn that asked for a workspace. The
+-- spawn has already succeeded, so a claim that fails leaves the session
+-- ungrouped and is logged, never raised.
+local function handle_session_spawned(payload)
+  local session_id = type(payload) == "table" and trim(payload.session_id) or nil
+  local hub_id = type(payload) == "table" and trim(payload.hub_id) or nil
+  local workspace_id = type(payload) == "table" and trim(payload.workspace_id) or nil
+  local result = add_session({ workspace_id = workspace_id, session_id = session_id, hub_id = hub_id })
+  if not result.ok then
+    botster.log.warn({
+      message = "spawned session was not added to its workspace",
+      fields = {
+        hub_id = tostring(hub_id),
+        session_id = tostring(session_id),
+        workspace_id = tostring(workspace_id),
+        code = result.error and result.error.code or "unknown",
+      },
+    })
+  end
+end
+
 local subscribed = botster.events.on({ owner = "hub", name = "session_family" }, handle_session_family)
 if not subscribed.ok then
   error("session_family subscription refused: " .. subscribed.error.message, 0)
+end
+
+-- Needs Hub gap P10: the subscription is admitted before botster-orchestrator
+-- loads, and binds when its contract registers.
+local spawned_subscription = botster.events.on(
+  { owner = "botster-orchestrator", name = "session_spawned" },
+  handle_session_spawned
+)
+if not spawned_subscription.ok then
+  error("session_spawned subscription refused: " .. spawned_subscription.error.message, 0)
 end
 
 return botster.register({

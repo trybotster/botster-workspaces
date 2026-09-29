@@ -49,7 +49,7 @@ Drop reasons:
 | S11, S13 | persist or publish failure after spawn | dropped: fake-inject + no-worker | |
 | S12 | spawn action | dropped: no-worker | the spawn dialog's targets are covered by surface_spec "spawn dialog offers admitted spawn targets" |
 | F1-F6 | session-family pruning | events_spec "current keeps / ended pruned", "missing or removed keeps" | production frames via the kit |
-| F7 | session_spawned | not in this delivery | the placement event is parked until Hub gap P10 (a subscription to another package's event fails the load unless the producer is active) |
+| F7 | session_spawned | events_spec (four specs) | new behaviour; the fake never fired it |
 | E1-E4 | membership frames | membership_spec "publish upsert and remove frames" | rows carry `{hub_id, session_id}` |
 | E5 | multi-delete range | workspace_spec "delete removes only the grouping" | index keys cleared; frame ordering not asserted |
 | E6 | provider snapshot | membership_spec "publish upsert and remove frames" | snapshot frame first |

@@ -1,7 +1,49 @@
--- Event input: the Hub session family.
+-- Event input: botster-orchestrator.session_spawned and the Hub session family.
 -- Run: botster-plugin-test --plugin . test/events_spec.lua
 local kit = require("botster.test")
 local ws = require("support")
+
+local PRODUCER = "test/fixtures/orchestrator-producer"
+
+local function spawned(t, producer, payload)
+  local emitted = producer:call_tool("producer.emit", payload)
+  t:eq(emitted.ok, true)
+  t:eq(emitted.result.ok, true)
+end
+
+-- W1 subscription: the claim completes inside the producer's step.
+kit.test("session_spawned claims membership across packages in one step", function(t)
+  local producer = t:load(PRODUCER)
+  local p = t:load(".")
+  local a = ws.create(t, p, "Alpha")
+  local hub_id = ws.hub_id(t, p)
+  spawned(t, producer, { hub_id = hub_id, session_id = "session-a", workspace_id = a })
+  t:eq(ws.workspace(t, p, a).session_refs, { ws.ref(hub_id, "session-a") })
+  t:eq(p:db_get(ws.key(hub_id, "session-a")).workspace_id, a)
+end)
+
+kit.test("session_spawned for an unknown workspace leaves the session ungrouped and logs", function(t)
+  local producer = t:load(PRODUCER)
+  local p = t:load(".")
+  local hub_id = ws.hub_id(t, p)
+  spawned(t, producer, { hub_id = hub_id, session_id = "session-a", workspace_id = "ws_missing_9" })
+  t:eq(p:db_get(ws.key(hub_id, "session-a")), nil)
+  t:match(p:logs(), { { level = "warn", message = "spawned session was not added to its workspace" } })
+end)
+
+kit.test("session_spawned from another hub is not claimed", function(t)
+  local producer = t:load(PRODUCER)
+  local p = t:load(".")
+  local a = ws.create(t, p, "Alpha")
+  spawned(t, producer, { hub_id = "hub-elsewhere", session_id = "session-a", workspace_id = a })
+  t:eq(#ws.workspace(t, p, a).session_refs, 0)
+  t:match(p:logs(), { { level = "warn", message = "spawned session was not added to its workspace" } })
+end)
+
+kit.test("botster-workspaces loads without botster-orchestrator", function(t)
+  local p = t:load(".")
+  t:eq(ws.call(t, p, "botster_workspaces.list", {}).ok, true)
+end)
 
 -- F1-F6: the session family prunes ended sessions and keeps the rest.
 local function grouped(t, p, ids)

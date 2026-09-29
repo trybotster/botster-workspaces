@@ -277,6 +277,8 @@ scanned_files = %w[
   test/fixtures/shared-stack-owner-session-type/plugin.lua
   test/fixtures/shared-stack-owner-session-type/bin/session.sh
   test/fixtures/workspaces/contract.json
+  test/fixtures/orchestrator-producer/botster-package.json
+  test/fixtures/orchestrator-producer/plugin.lua
   test/support.lua
   test/workspace_spec.lua
   test/membership_spec.lua

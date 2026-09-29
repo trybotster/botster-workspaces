@@ -40,6 +40,11 @@ A session reference is `{ hub_id, session_id }`. Every tool that takes a
 session accepts an optional `hub_id`, which defaults to the local hub. Another
 hub is refused with `remote_hub_unsupported` until hub routing exists.
 
+When botster-orchestrator spawns a session with a `workspace_id`, it emits
+`botster-orchestrator.session_spawned` `{ hub_id, session_id, workspace_id }`.
+This package subscribes and adds the session to that workspace. A failed claim
+leaves the session ungrouped and logs a warning.
+
 One session reference belongs to at most one workspace, enforced by durable
 `membership:<hub_id>/<session_id>` keys and published through the
 `botster-workspaces.membership` entity family after committed claims and

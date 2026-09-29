@@ -22,6 +22,17 @@ kit.test("session_spawned claims membership across packages in one step", functi
   t:eq(p:db_get(ws.key(hub_id, "session-a")).workspace_id, a)
 end)
 
+-- P10: the subscription is admitted before its producer loads and binds when
+-- botster-orchestrator loads, whatever the load order.
+kit.test("session_spawned claims membership when botster-workspaces loads before botster-orchestrator", function(t)
+  local p = t:load(".")
+  local producer = t:load(PRODUCER)
+  local a = ws.create(t, p, "Alpha")
+  local hub_id = ws.hub_id(t, p)
+  spawned(t, producer, { hub_id = hub_id, session_id = "session-a", workspace_id = a })
+  t:eq(ws.workspace(t, p, a).session_refs, { ws.ref(hub_id, "session-a") })
+end)
+
 kit.test("session_spawned for an unknown workspace leaves the session ungrouped and logs", function(t)
   local producer = t:load(PRODUCER)
   local p = t:load(".")

@@ -2641,8 +2641,8 @@ if not subscribed.ok then
   error("session_family subscription refused: " .. subscribed.error.message, 0)
 end
 
--- Needs Hub gap P10: the subscription is admitted before botster-orchestrator
--- loads, and binds when its contract registers.
+-- The subscription is admitted before botster-orchestrator loads, and binds
+-- when its contract registers (Hub P10), so load order does not matter.
 local spawned_subscription = botster.events.on(
   { owner = "botster-orchestrator", name = "session_spawned" },
   handle_session_spawned

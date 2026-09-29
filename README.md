@@ -178,9 +178,11 @@ runs the behaviour specs in `test/*_spec.lua` with the Botster plugin test kit,
 which loads this package into a real Hub runtime (no API fakes):
 
 ```sh
-cargo install --locked --git https://github.com/trybotster/botster-hub --rev <pin> botster-plugin-test-kit
+cargo install --locked --git https://github.com/trybotster/botster-hub --rev 035fc2cd193f698c1a2eeb7025fcc3e2afbcaec7 botster-plugin-test-kit
 BOTSTER_PLUGIN_TEST=botster-plugin-test script/test
 ```
+
+That Hub commit (`botster.hub.identity()` and the kit are on it) is the one these specs were last run against. Raise the pin when a newer Hub commit passes.
 
 The in-process kit starts no session worker. `script/test-e2e` runs
 `test/e2e/*_spec.lua` against a real `botster-hub` process with a session

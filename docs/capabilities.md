@@ -16,7 +16,7 @@ authority.
 ## Plugin-Owned State
 
 The plugin owns exact workspace records, unique names, single-owner session
-membership (including the durable `membership:<session_uuid>` index and the
+membership (including the durable `membership:<hub_id>/<session_id>` index and the
 `botster-workspaces.membership` entity family), grouping CRUD, entity read
 models, and owner-authored workspace UiNode actions.
 

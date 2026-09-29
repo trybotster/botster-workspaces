@@ -28,8 +28,20 @@ The public plugin tools are:
 - `botster_workspaces.spawn`
 - `botster_workspaces.entity_snapshot`
 
-One session ID belongs to at most one workspace, enforced by durable
-`membership:<session_id>` keys and published through the
+Agents use three tools with agent-facing argument names. Each one runs the same
+code as the matching `botster_workspaces.*` tool:
+
+- `list_workspaces`
+- `rename_workspace` (`workspace_id`, `new_name`)
+- `move_agent_workspace` (`session_id`, `workspace_id`): moves a grouped
+  session, or adds an ungrouped one
+
+A session reference is `{ hub_id, session_id }`. Every tool that takes a
+session accepts an optional `hub_id`, which defaults to the local hub. Another
+hub is refused with `remote_hub_unsupported` until hub routing exists.
+
+One session reference belongs to at most one workspace, enforced by durable
+`membership:<hub_id>/<session_id>` keys and published through the
 `botster-workspaces.membership` entity family after committed claims and
 removals. Add rejects an existing owner; move removes the source membership and adds the destination membership
 in one `plugin_db` write; remove changes only grouping. Deleting a workspace
@@ -65,7 +77,7 @@ Sessions section. Compact groups show Current and Unavailable sessions.
 **Add existing session** authors an Available sessions picker bound to Hub
 `/session` through `entity_options`, excluding every session ID present in
 `/botster-workspaces.membership`. Option labels prefer Hub `label` when present
-and fall back to `session_uuid`; optional `lifecycle`, `lifecycle_class`,
+and fall back to the Hub's `session_uuid` field; optional `lifecycle`, `lifecycle_class`,
 `session_type_id`, and `spawn_point` fields are projected when present and never
 copied into `plugin.db`. An always-visible advanced **Historical session ID**
 field remains for sessions absent from current Hub entity state; when both
@@ -277,3 +289,18 @@ production entry-point statement.
 See [docs/workspace-domain.md](docs/workspace-domain.md) and
 [docs/capabilities.md](docs/capabilities.md) for the exact domain and authority
 contracts.
+
+## Testing
+
+`script/test` checks the manifest, the contract fixture, the docs, and the
+acceptance-script inputs. It then runs the behaviour specs in `test/*_spec.lua`
+with the Botster plugin test kit, which loads this package into a real Hub
+runtime (no API fakes):
+
+```sh
+cargo install --locked --git https://github.com/trybotster/botster-hub --rev <pin> botster-plugin-test-kit
+BOTSTER_PLUGIN_TEST=botster-plugin-test script/test
+```
+
+The in-process kit starts no session worker. A completed spawn is proven by the
+real-Hub acceptance scripts, not by the specs.

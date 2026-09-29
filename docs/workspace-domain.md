@@ -13,15 +13,16 @@ updated_at
 ```
 
 `name` is trimmed, non-empty, and unique across records that exist.
-`session_refs` is an ordered, duplicate-free array of non-empty Hub session
-IDs. Session IDs are opaque and do not require UUID syntax. Old or additional
+`session_refs` is an ordered, duplicate-free array of session references
+`{ hub_id, session_id }`. Session IDs are opaque and do not require UUID syntax.
+Hub IDs contain no `/`. Old or additional
 record fields fail closed with `legacy_workspace_schema`. There is no
 compatibility reader.
 
 ## Membership Invariant
 
-A session ID belongs to at most one workspace. Membership is enforced through
-create-only `membership:<session_id>` keys in `plugin.db` alongside
+A session reference belongs to at most one workspace. Membership is enforced
+through create-only `membership:<hub_id>/<session_id>` keys in `plugin.db` alongside
 `workspace_state.session_refs`. Add rejects an existing owner and identifies it.
 Same-workspace reclaims are idempotent pure no-ops when the membership key
 already exists. Move computes the complete source and destination state and
@@ -41,10 +42,10 @@ Claimed sessions also publish through the plugin-owned
 `botster-workspaces.membership` family with exact rows:
 
 ```text
-{ id, session_uuid, workspace_id }
+{ id, hub_id, session_id, workspace_id }
 ```
 
-where `id = session_uuid`. Rows carry no Hub lifecycle, label, or spawn fields.
+where `id = "<hub_id>/<session_id>"`. Rows carry no Hub lifecycle, label, or spawn fields.
 
 After a successful membership mutation batch, the package publishes ordered
 `entity_upsert` / `entity_remove` frames via `botster.entity_publish`. Sequence
@@ -66,7 +67,7 @@ Add existing session authors one `ui.select` with
 - `value_field = "session_uuid"`
 - `display_fields = label, session_uuid, lifecycle, lifecycle_class,
   session_type_id, spawn_point`
-- `exclude.source = "/botster-workspaces.membership"`
+- `exclude.source = "/botster-workspaces.membership"`, `exclude.value_field = "session_id"`
 
 There are no static `select_option` children on that control. An always-visible
 advanced historical session ID field (`session_id_advanced`) sits below the picker

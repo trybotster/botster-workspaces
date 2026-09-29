@@ -7,22 +7,47 @@ local MEMBERSHIP_ENTITY_FAMILY = "botster-workspaces.membership"
 local SURFACE_ID = "workspaces"
 
 local MEMBERSHIP_PAYLOAD_KEYS = {
-  session_uuid = true,
+  hub_id = true,
+  session_id = true,
   workspace_id = true,
+}
+
+-- A session reference is { hub_id, session_id }. Its string form
+-- "<hub_id>/<session_id>" keys plugin_db records and entity rows.
+local SESSION_REF_KEYS = {
+  hub_id = true,
+  session_id = true,
 }
 
 local MEMBERSHIP_SEQ_PAYLOAD_KEYS = {
   next_seq = true,
 }
 
-local function membership_key(session_uuid)
-  return MEMBERSHIP_KEY_PREFIX .. session_uuid
+local function ref_key(ref)
+  return ref.hub_id .. "/" .. ref.session_id
 end
 
-local function membership_record(session_uuid, workspace_id)
+local function same_ref(left, right)
+  return left.hub_id == right.hub_id and left.session_id == right.session_id
+end
+
+local function membership_key(ref)
+  return MEMBERSHIP_KEY_PREFIX .. ref_key(ref)
+end
+
+local function membership_payload(ref, workspace_id)
   return {
-    id = session_uuid,
-    session_uuid = session_uuid,
+    hub_id = ref.hub_id,
+    session_id = ref.session_id,
+    workspace_id = workspace_id,
+  }
+end
+
+local function membership_record(ref, workspace_id)
+  return {
+    id = ref_key(ref),
+    hub_id = ref.hub_id,
+    session_id = ref.session_id,
     workspace_id = workspace_id,
   }
 end
@@ -144,6 +169,47 @@ local function valid_session_id(value)
   return id ~= nil and id == value
 end
 
+-- Hub ids never contain "/", so the string form splits unambiguously.
+local function valid_ref(ref)
+  return exact_keys(ref, SESSION_REF_KEYS)
+    and valid_session_id(ref.hub_id)
+    and not ref.hub_id:find("/", 1, true)
+    and valid_session_id(ref.session_id)
+end
+
+local function local_hub_id()
+  local identified = botster.hub.identity()
+  if identified.ok ~= true then
+    return nil, error_result(identified.error.kind, identified.error.message)
+  end
+  return identified.value.hub_id, nil
+end
+
+-- The one place a tool's hub_id is resolved. Nil means the local hub.
+local function resolve_hub(hub_id)
+  local local_id, identity_error = local_hub_id()
+  if identity_error then
+    return nil, identity_error
+  end
+  if hub_id ~= nil and hub_id ~= local_id then
+    return nil, error_result("remote_hub_unsupported", "only the local hub is supported: " .. local_id)
+  end
+  return local_id, nil
+end
+
+-- Builds a reference from a tool's session_id and optional hub_id. Only the
+-- local hub is supported; hub routing changes this function, not its callers.
+local function session_ref(session_id, hub_id)
+  local local_id, hub_error = resolve_hub(hub_id)
+  if hub_error then
+    return nil, hub_error
+  end
+  if not valid_session_id(session_id) then
+    return nil, error_result("validation_failed", "a valid session id is required", { "session_id" })
+  end
+  return { hub_id = local_id, session_id = session_id }, nil
+end
+
 local function validate_state(state)
   if not exact_keys(state, STATE_KEYS)
     or type(state.next_workspace) ~= "number"
@@ -173,11 +239,11 @@ local function validate_state(state)
       return error_result("legacy_workspace_schema", "workspace data contains duplicate names")
     end
     names[workspace.name] = true
-    for _, session_id in ipairs(workspace.session_refs) do
-      if not valid_session_id(session_id) or memberships[session_id] then
+    for _, ref in ipairs(workspace.session_refs) do
+      if not valid_ref(ref) or memberships[ref_key(ref)] then
         return error_result("legacy_workspace_schema", "workspace data contains invalid or duplicate session references")
       end
-      memberships[session_id] = workspace.id
+      memberships[ref_key(ref)] = workspace.id
     end
   end
   return nil
@@ -208,12 +274,12 @@ local function load_state()
   return copy(state), nil, result.record.revision or 0
 end
 
-local function get_membership(session_uuid)
+local function get_membership(ref)
   local plugin_db = plugin_db_capability()
   if not plugin_db or type(plugin_db.get) ~= "function" then
     return nil, 0
   end
-  local ok, result = pcall(plugin_db.get, { key = membership_key(session_uuid) })
+  local ok, result = pcall(plugin_db.get, { key = membership_key(ref) })
   if not ok then
     return nil, nil, error_result("membership_read_failed", "failed to read membership index")
   end
@@ -223,8 +289,8 @@ local function get_membership(session_uuid)
   local payload = result.record.payload
   if type(payload) ~= "table"
     or not exact_keys(payload, MEMBERSHIP_PAYLOAD_KEYS)
-    or not valid_session_id(payload.session_uuid)
-    or payload.session_uuid ~= session_uuid
+    or not valid_ref({ hub_id = payload.hub_id, session_id = payload.session_id })
+    or not same_ref(payload, ref)
     or trim(payload.workspace_id) ~= payload.workspace_id then
     return nil, nil, error_result("legacy_workspace_schema", "membership index uses an unsupported schema")
   end
@@ -233,50 +299,26 @@ end
 
 local function list_membership_records()
   local plugin_db = plugin_db_capability()
-  if not plugin_db then
-    return {}, nil
+  local ok, listed = pcall(plugin_db.list, { prefix = MEMBERSHIP_KEY_PREFIX })
+  if not ok or type(listed) ~= "table" then
+    return nil, error_result("membership_list_failed", "failed to list membership index")
   end
   local records = {}
-  if type(plugin_db.list) == "function" then
-    local ok, listed = pcall(plugin_db.list, { prefix = MEMBERSHIP_KEY_PREFIX })
-    if not ok then
-      return nil, error_result("membership_list_failed", "failed to list membership index")
+  for _, entry in ipairs(listed.entries or {}) do
+    local hub_id, session_id = entry.key:sub(#MEMBERSHIP_KEY_PREFIX + 1):match("^([^/]+)/(.+)$")
+    if not hub_id then
+      return nil, error_result("legacy_workspace_schema", "membership index key has no hub id: " .. entry.key)
     end
-    local entries = type(listed) == "table" and (listed.entries or listed) or {}
-    for _, entry in ipairs(entries) do
-      local key = type(entry) == "table" and entry.key or entry
-      if type(key) == "string" and key:sub(1, #MEMBERSHIP_KEY_PREFIX) == MEMBERSHIP_KEY_PREFIX then
-        local session_uuid = key:sub(#MEMBERSHIP_KEY_PREFIX + 1)
-        local membership, _, membership_error = get_membership(session_uuid)
-        if membership_error then
-          return nil, membership_error
-        end
-        if membership then
-          records[#records + 1] = membership_record(membership.session_uuid, membership.workspace_id)
-        end
-      end
+    local membership, _, membership_error = get_membership({ hub_id = hub_id, session_id = session_id })
+    if membership_error then
+      return nil, membership_error
     end
-  end
-  if #records > 0 then
-    table.sort(records, function(left, right)
-      return left.session_uuid < right.session_uuid
-    end)
-    return records, nil
-  end
-
-  -- Fallback for pre-index workspace_state only: derive exclusion rows without
-  -- inventing Hub session fields. Mutations always write membership keys.
-  local state, load_error = load_state()
-  if load_error then
-    return nil, load_error
-  end
-  for _, workspace in ipairs(state.workspaces) do
-    for _, session_uuid in ipairs(workspace.session_refs) do
-      records[#records + 1] = membership_record(session_uuid, workspace.id)
+    if membership then
+      records[#records + 1] = membership_record(membership, membership.workspace_id)
     end
   end
   table.sort(records, function(left, right)
-    return left.session_uuid < right.session_uuid
+    return left.id < right.id
   end)
   return records, nil
 end
@@ -511,17 +553,14 @@ local function commit_membership_batch(mutations, draft_frames)
   return nil, reserved, publish_results, publish_degraded
 end
 
-local function claim_session_batch(workspace_id, session_id, state, state_revision, draft_frames)
+local function claim_session_batch(workspace_id, ref, state, state_revision, draft_frames)
   local mutations = {
     {
       operation = "set",
-      key = membership_key(session_id),
+      key = membership_key(ref),
       schema_version = 1,
       expected_revision = 0,
-      payload = {
-        session_uuid = session_id,
-        workspace_id = workspace_id,
-      },
+      payload = membership_payload(ref, workspace_id),
     },
     {
       operation = "set",
@@ -536,8 +575,8 @@ local function claim_session_batch(workspace_id, session_id, state, state_revisi
     frames = {
       {
         type = "entity_upsert",
-        id = session_id,
-        entity = membership_record(session_id, workspace_id),
+        id = ref_key(ref),
+        entity = membership_record(ref, workspace_id),
       },
     }
   end
@@ -553,10 +592,10 @@ local function workspace_by_id(state, workspace_id)
   return nil, nil
 end
 
-local function workspace_by_session(state, session_id)
+local function workspace_by_session(state, ref)
   for _, workspace in ipairs(state.workspaces) do
     for _, candidate in ipairs(workspace.session_refs) do
-      if candidate == session_id then
+      if same_ref(candidate, ref) then
         return workspace
       end
     end
@@ -587,11 +626,29 @@ local function next_timestamp(state)
   return string.format("plugin-clock-%06d", state.next_timestamp)
 end
 
+-- A table that encodes as a JSON array even when empty. A plain empty Lua
+-- table crosses the Hub boundary as `{}`; a decoded JSON array keeps its
+-- array marker (Hub docs/lua-plugin-abi.md, Runtime Basics).
+local function json_array(items)
+  local array = botster.json.decode({ text = "[]" }).value
+  for index, item in ipairs(items or {}) do
+    array[index] = copy(item)
+  end
+  return array
+end
+
+-- A workspace as tool results return it: session_refs is always an array.
+local function workspace_view(workspace)
+  local view = copy(workspace)
+  view.session_refs = json_array(workspace.session_refs)
+  return view
+end
+
 local function read_model(workspace)
   return {
     id = workspace.id,
     name = workspace.name,
-    session_refs = copy(workspace.session_refs),
+    session_refs = json_array(workspace.session_refs),
     session_count = #workspace.session_refs,
     created_at = workspace.created_at,
     updated_at = workspace.updated_at,
@@ -600,7 +657,7 @@ local function read_model(workspace)
 end
 
 local function sorted_rows(state)
-  local rows = {}
+  local rows = json_array()
   for _, workspace in ipairs(state.workspaces) do
     rows[#rows + 1] = read_model(workspace)
   end
@@ -642,7 +699,7 @@ local function create_workspace(arguments)
   if persist_error then
     return persist_error
   end
-  return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+  return { ok = true, workspace = workspace_view(workspace), entity = read_model(workspace) }
 end
 
 local function list_workspaces(arguments)
@@ -674,7 +731,7 @@ local function show_workspace(arguments)
   if not workspace then
     return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
   end
-  return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+  return { ok = true, workspace = workspace_view(workspace), entity = read_model(workspace) }
 end
 
 local function rename_workspace(arguments)
@@ -712,7 +769,7 @@ local function rename_workspace(arguments)
   if persist_error then
     return persist_error
   end
-  return { ok = true, workspace = copy(workspace), entity = read_model(workspace) }
+  return { ok = true, workspace = workspace_view(workspace), entity = read_model(workspace) }
 end
 
 local function delete_workspace(arguments)
@@ -736,30 +793,30 @@ local function delete_workspace(arguments)
     end
 
     local released = {}
-    for _, session_id in ipairs(workspace.session_refs) do
-      released[#released + 1] = session_id
+    for _, ref in ipairs(workspace.session_refs) do
+      released[#released + 1] = ref
     end
-    table.sort(released)
+    table.sort(released, function(left, right)
+      return ref_key(left) < ref_key(right)
+    end)
 
     local mutations = {}
     local draft_frames = {}
-    for _, session_id in ipairs(released) do
-      local membership, membership_revision, membership_error = get_membership(session_id)
+    for _, ref in ipairs(released) do
+      local membership, membership_revision, membership_error = get_membership(ref)
       if membership_error then
         return membership_error
       end
       if membership then
         mutations[#mutations + 1] = {
           operation = "delete",
-          key = membership_key(session_id),
+          key = membership_key(ref),
           expected_revision = membership_revision,
         }
       end
-      -- Always publish remove for every released session_ref, including pre-index
-      -- rows that only existed via the workspace_state fallback snapshot path.
       draft_frames[#draft_frames + 1] = {
         type = "entity_remove",
-        id = session_id,
+        id = ref_key(ref),
       }
     end
     table.remove(state.workspaces, index)
@@ -781,7 +838,7 @@ local function delete_workspace(arguments)
     return with_membership_delivery({
       ok = true,
       deleted = true,
-      workspace = copy(workspace),
+      workspace = workspace_view(workspace),
       does_not_delete = {
         "hub_sessions",
         "worktrees",
@@ -794,15 +851,15 @@ local function delete_workspace(arguments)
   return attempt()
 end
 
-local function resolve_owner(state, session_id)
-  local membership, membership_revision, membership_error = get_membership(session_id)
+local function resolve_owner(state, ref)
+  local membership, membership_revision, membership_error = get_membership(ref)
   if membership_error then
     return nil, nil, membership_error
   end
   if membership then
     return membership.workspace_id, membership_revision, nil
   end
-  local owner = workspace_by_session(state, session_id)
+  local owner = workspace_by_session(state, ref)
   if owner then
     return owner.id, 0, nil
   end
@@ -810,7 +867,7 @@ local function resolve_owner(state, session_id)
 end
 
 local function add_session(arguments)
-  local rejected = unknown_field(arguments, { workspace_id = true, session_id = true })
+  local rejected = unknown_field(arguments, { workspace_id = true, session_id = true, hub_id = true })
   if rejected then
     return error_result("unknown_field", "add session does not accept field: " .. rejected, { rejected })
   end
@@ -826,6 +883,10 @@ local function add_session(arguments)
   if #missing > 0 then
     return error_result("validation_failed", "Add session needs a workspace and a valid session id.", missing)
   end
+  local ref, ref_error = session_ref(session_id, trim(arguments.hub_id))
+  if ref_error then
+    return ref_error
+  end
 
   local function attempt()
     local state, load_error, state_revision = load_state()
@@ -836,26 +897,26 @@ local function add_session(arguments)
     if not workspace then
       return error_result("workspace_not_found", "workspace not found: " .. workspace_id)
     end
-    local owner_id, membership_revision, owner_error = resolve_owner(state, session_id)
+    local owner_id, membership_revision, owner_error = resolve_owner(state, ref)
     if owner_error then
       return owner_error
     end
     if owner_id == workspace_id then
       -- Idempotent same-workspace claim. Repair missing membership key if needed.
-      if membership_revision == 0 and not select(1, get_membership(session_id)) then
+      if membership_revision == 0 and not select(1, get_membership(ref)) then
         local already_listed = false
         for _, candidate in ipairs(workspace.session_refs) do
-          if candidate == session_id then
+          if same_ref(candidate, ref) then
             already_listed = true
             break
           end
         end
         if not already_listed then
-          workspace.session_refs[#workspace.session_refs + 1] = session_id
+          workspace.session_refs[#workspace.session_refs + 1] = ref
           workspace.updated_at = next_timestamp(state)
         end
         local repair_error, reserved_frames, publish_results, publish_degraded =
-          claim_session_batch(workspace_id, session_id, state, state_revision)
+          claim_session_batch(workspace_id, ref, state, state_revision)
         if repair_error and repair_error.error and repair_error.error.code == "revision_conflict" then
           return attempt()
         end
@@ -866,7 +927,7 @@ local function add_session(arguments)
           ok = true,
           idempotent = true,
           repaired = true,
-          workspace = copy(workspace),
+          workspace = workspace_view(workspace),
           entity = read_model(workspace),
         }, reserved_frames, publish_results, publish_degraded)
       end
@@ -874,7 +935,7 @@ local function add_session(arguments)
       return with_membership_delivery({
         ok = true,
         idempotent = true,
-        workspace = copy(workspace),
+        workspace = workspace_view(workspace),
         entity = read_model(workspace),
       }, {}, {}, false)
     end
@@ -884,10 +945,10 @@ local function add_session(arguments)
       })
     end
 
-    workspace.session_refs[#workspace.session_refs + 1] = session_id
+    workspace.session_refs[#workspace.session_refs + 1] = ref
     workspace.updated_at = next_timestamp(state)
     local persist_error, reserved_frames, publish_results, publish_degraded =
-      claim_session_batch(workspace_id, session_id, state, state_revision)
+      claim_session_batch(workspace_id, ref, state, state_revision)
     if persist_error and persist_error.error and persist_error.error.code == "revision_conflict" then
       return attempt()
     end
@@ -896,7 +957,7 @@ local function add_session(arguments)
     end
     return with_membership_delivery({
       ok = true,
-      workspace = copy(workspace),
+      workspace = workspace_view(workspace),
       entity = read_model(workspace),
     }, reserved_frames, publish_results, publish_degraded)
   end
@@ -908,6 +969,7 @@ local function move_session(arguments)
   local rejected = unknown_field(arguments, {
     destination_workspace_id = true,
     session_id = true,
+    hub_id = true,
   })
   if rejected then
     return error_result("unknown_field", "move session does not accept field: " .. rejected, { rejected })
@@ -924,6 +986,10 @@ local function move_session(arguments)
   if #missing > 0 then
     return error_result("validation_failed", "Move session needs a destination workspace and a valid session id.", missing)
   end
+  local ref, ref_error = session_ref(session_id, trim(arguments.hub_id))
+  if ref_error then
+    return ref_error
+  end
 
   local function attempt()
     local state, load_error, state_revision = load_state()
@@ -934,11 +1000,11 @@ local function move_session(arguments)
     if not destination then
       return error_result("workspace_not_found", "workspace not found: " .. destination_id)
     end
-    local owner_id, _, owner_error = resolve_owner(state, session_id)
+    local owner_id, _, owner_error = resolve_owner(state, ref)
     if owner_error then
       return owner_error
     end
-    local source = owner_id and workspace_by_id(state, owner_id) or workspace_by_session(state, session_id)
+    local source = owner_id and workspace_by_id(state, owner_id) or workspace_by_session(state, ref)
     if not source then
       return error_result("session_not_grouped", "session does not belong to a workspace")
     end
@@ -949,16 +1015,16 @@ local function move_session(arguments)
     end
 
     for index, candidate in ipairs(source.session_refs) do
-      if candidate == session_id then
+      if same_ref(candidate, ref) then
         table.remove(source.session_refs, index)
         break
       end
     end
-    destination.session_refs[#destination.session_refs + 1] = session_id
+    destination.session_refs[#destination.session_refs + 1] = ref
     local timestamp = next_timestamp(state)
     source.updated_at = timestamp
     destination.updated_at = timestamp
-    local membership, current_membership_revision, membership_error = get_membership(session_id)
+    local membership, current_membership_revision, membership_error = get_membership(ref)
     if membership_error then
       return membership_error
     end
@@ -974,32 +1040,26 @@ local function move_session(arguments)
     if membership then
       mutations[#mutations + 1] = {
         operation = "set",
-        key = membership_key(session_id),
+        key = membership_key(ref),
         schema_version = 1,
         expected_revision = current_membership_revision,
-        payload = {
-          session_uuid = session_id,
-          workspace_id = destination.id,
-        },
+        payload = membership_payload(ref, destination.id),
       }
     else
       mutations[#mutations + 1] = {
         operation = "set",
-        key = membership_key(session_id),
+        key = membership_key(ref),
         schema_version = 1,
         expected_revision = 0,
-        payload = {
-          session_uuid = session_id,
-          workspace_id = destination.id,
-        },
+        payload = membership_payload(ref, destination.id),
       }
     end
     -- Move is a single authoritative upsert (not remove+upsert).
     local draft_frames = {
       {
         type = "entity_upsert",
-        id = session_id,
-        entity = membership_record(session_id, destination.id),
+        id = ref_key(ref),
+        entity = membership_record(ref, destination.id),
       },
     }
     local persist_error, reserved_frames, publish_results, publish_degraded =
@@ -1012,8 +1072,8 @@ local function move_session(arguments)
     end
     return with_membership_delivery({
       ok = true,
-      source = copy(source),
-      destination = copy(destination),
+      source = workspace_view(source),
+      destination = workspace_view(destination),
       entities = { read_model(source), read_model(destination) },
     }, reserved_frames, publish_results, publish_degraded)
   end
@@ -1022,7 +1082,7 @@ local function move_session(arguments)
 end
 
 local function remove_session(arguments)
-  local rejected = unknown_field(arguments, { workspace_id = true, session_id = true })
+  local rejected = unknown_field(arguments, { workspace_id = true, session_id = true, hub_id = true })
   if rejected then
     return error_result("unknown_field", "remove session does not accept field: " .. rejected, { rejected })
   end
@@ -1034,6 +1094,10 @@ local function remove_session(arguments)
       "Remove session needs a workspace and a valid session id.",
       { "workspace_id", "session_id" }
     )
+  end
+  local ref, ref_error = session_ref(session_id, trim(arguments.hub_id))
+  if ref_error then
+    return ref_error
   end
 
   local function attempt()
@@ -1047,7 +1111,7 @@ local function remove_session(arguments)
     end
     local removed = false
     for index, candidate in ipairs(workspace.session_refs) do
-      if candidate == session_id then
+      if same_ref(candidate, ref) then
         table.remove(workspace.session_refs, index)
         removed = true
         break
@@ -1057,7 +1121,7 @@ local function remove_session(arguments)
       return error_result("session_not_in_workspace", "session does not belong to workspace: " .. workspace_id)
     end
     workspace.updated_at = next_timestamp(state)
-    local membership, membership_revision, membership_error = get_membership(session_id)
+    local membership, membership_revision, membership_error = get_membership(ref)
     if membership_error then
       return membership_error
     end
@@ -1073,13 +1137,13 @@ local function remove_session(arguments)
     local draft_frames = {
       {
         type = "entity_remove",
-        id = session_id,
+        id = ref_key(ref),
       },
     }
     if membership then
       mutations[#mutations + 1] = {
         operation = "delete",
-        key = membership_key(session_id),
+        key = membership_key(ref),
         expected_revision = membership_revision,
       }
     end
@@ -1093,7 +1157,7 @@ local function remove_session(arguments)
     end
     return with_membership_delivery({
       ok = true,
-      workspace = copy(workspace),
+      workspace = workspace_view(workspace),
       entity = read_model(workspace),
     }, reserved_frames, publish_results, publish_degraded)
   end
@@ -1123,8 +1187,6 @@ end
 local function session_id_from_lifecycle(info)
   return trim(
     lifecycle_field(info, "session_uuid")
-      or lifecycle_field(info, "session_id")
-      or lifecycle_field(info, "id")
   )
 end
 
@@ -1146,7 +1208,11 @@ local function prune_session_reference(session_id)
   if load_error then
     return load_error
   end
-  local workspace = workspace_by_session(state, session_id)
+  local ref, ref_error = session_ref(session_id)
+  if ref_error then
+    return ref_error
+  end
+  local workspace = workspace_by_session(state, ref)
   if not workspace then
     return { ok = true, pruned = false }
   end
@@ -1159,10 +1225,13 @@ local function prune_session_reference(session_id)
 end
 
 local function log_prune_error(session_id, result)
-  if type(log) == "table" and type(log.warn) == "function" then
-    local message = result and result.error and result.error.message or "unknown error"
-    log.warn("[botster-workspaces] failed to prune ended session " .. tostring(session_id) .. ": " .. message)
-  end
+  botster.log.warn({
+    message = "failed to prune ended session",
+    fields = {
+      session_id = tostring(session_id),
+      error = result and result.error and result.error.message or "unknown error",
+    },
+  })
 end
 
 local function handle_session_lifecycle(info)
@@ -1196,18 +1265,18 @@ local function spawn_targets()
   if not capability or type(capability.list) ~= "function" then
     return nil, error_result("spawn_targets_unavailable", "Hub spawn-target projection is unavailable")
   end
+  -- The Hub returns { ok = true, value = rows }.
   local ok, result = pcall(capability.list)
-  if not ok or type(result) ~= "table" then
+  if not ok or type(result) ~= "table" or result.ok ~= true then
     return nil, error_result("spawn_targets_failed", "failed to list Hub spawn points")
   end
   local targets = {}
-  for _, target in ipairs(result) do
-    if type(target) == "table" and target.enabled ~= false and trim(target.target_id or target.id) then
-      local id = trim(target.target_id or target.id)
+  for _, target in ipairs(result.value) do
+    if target.enabled ~= false then
       targets[#targets + 1] = {
-        id = id,
-        label = trim(target.label or target.name) or id,
-        kind = trim(target.kind) or "directory",
+        id = target.target_id,
+        label = trim(target.label) or target.target_id,
+        kind = target.kind,
       }
     end
   end
@@ -1359,7 +1428,12 @@ local function spawn_session(arguments)
   if not valid_session_id(session_id) then
     return error_result("invalid_hub_session_id", "Hub spawn did not return a valid session id.")
   end
-  local owner_id, _, owner_error = resolve_owner(state, session_id)
+  -- The Hub spawned on this hub, so the reference is local.
+  local ref, ref_error = session_ref(session_id)
+  if ref_error then
+    return ref_error
+  end
+  local owner_id, _, owner_error = resolve_owner(state, ref)
   if owner_error then
     return owner_error
   end
@@ -1367,10 +1441,10 @@ local function spawn_session(arguments)
     return error_result("duplicate_hub_session_id", "Hub returned a session ID that is already grouped")
   end
 
-  workspace.session_refs[#workspace.session_refs + 1] = session_id
+  workspace.session_refs[#workspace.session_refs + 1] = ref
   workspace.updated_at = next_timestamp(state)
   local persist_error, reserved_frames, publish_results, publish_degraded =
-    claim_session_batch(workspace_id, session_id, state, state_revision)
+    claim_session_batch(workspace_id, ref, state, state_revision)
   if persist_error then
     return error_result(
       "persist_failed",
@@ -1385,7 +1459,7 @@ local function spawn_session(arguments)
   return with_membership_delivery({
     ok = true,
     session_id = session_id,
-    workspace = copy(workspace),
+    workspace = workspace_view(workspace),
     entity = read_model(workspace),
     hub_result = copy(hub_payload),
   }, reserved_frames, publish_results, publish_degraded)
@@ -1402,11 +1476,7 @@ end
 local function membership_items_for_snapshot(records)
   local items = {}
   for index, record in ipairs(records or {}) do
-    items[index] = {
-      id = record.session_uuid,
-      session_uuid = record.session_uuid,
-      workspace_id = record.workspace_id,
-    }
+    items[index] = membership_record(record, record.workspace_id)
   end
   return items
 end
@@ -1477,7 +1547,7 @@ local function available_session_options_source()
     },
     exclude = {
       source = "/botster-workspaces.membership",
-      value_field = "session_uuid",
+      value_field = "session_id",
     },
   }
 end
@@ -2254,7 +2324,9 @@ local function session_groups(workspace)
 
   local current = {}
   local unavailable = {}
-  for _, session_id in ipairs(workspace.session_refs) do
+  -- /session is this hub's session family, so only local references bind.
+  for _, ref in ipairs(workspace.session_refs) do
+    local session_id = ref.session_id
     current[#current + 1] = lifecycle_binding(workspace, session_id, "current")
     unavailable[#unavailable + 1] = lifecycle_binding(
       workspace,
@@ -2473,6 +2545,67 @@ workspaces_surface = function()
   }
 end
 
+-- Agent-facing tools. Each is a thin entry over the same functions as the
+-- botster_workspaces.* tools, which the TUI and the Web call; only the
+-- argument names and descriptions differ.
+local function agent_list_workspaces(arguments)
+  local rejected = unknown_field(arguments or {}, { hub_id = true })
+  if rejected then
+    return error_result("unknown_field", "list_workspaces does not accept field: " .. rejected, { rejected })
+  end
+  local hub_id, hub_error = resolve_hub(trim((arguments or {}).hub_id))
+  if hub_error then
+    return hub_error
+  end
+  local listed = list_workspaces({})
+  listed.hub_id = hub_id
+  return listed
+end
+
+local function agent_rename_workspace(arguments)
+  local rejected = unknown_field(arguments or {}, { workspace_id = true, new_name = true, hub_id = true })
+  if rejected then
+    return error_result("unknown_field", "rename_workspace does not accept field: " .. rejected, { rejected })
+  end
+  local _, hub_error = resolve_hub(trim(arguments.hub_id))
+  if hub_error then
+    return hub_error
+  end
+  return rename_workspace({ id = arguments.workspace_id, name = arguments.new_name })
+end
+
+-- Moves a session into a workspace. An ungrouped session is added; a grouped
+-- session is moved atomically.
+local function agent_move_session(arguments)
+  local rejected = unknown_field(arguments or {}, { session_id = true, workspace_id = true, hub_id = true })
+  if rejected then
+    return error_result("unknown_field", "move_agent_workspace does not accept field: " .. rejected, { rejected })
+  end
+  local workspace_id = trim(arguments.workspace_id)
+  if not workspace_id then
+    return error_result("validation_failed", "move_agent_workspace needs workspace_id", { "workspace_id" })
+  end
+  local ref, ref_error = session_ref(trim(arguments.session_id), trim(arguments.hub_id))
+  if ref_error then
+    return ref_error
+  end
+  local state, load_error = load_state()
+  if load_error then
+    return load_error
+  end
+  local owner_id, _, owner_error = resolve_owner(state, ref)
+  if owner_error then
+    return owner_error
+  end
+  local target = { hub_id = ref.hub_id, session_id = ref.session_id }
+  if owner_id then
+    target.destination_workspace_id = workspace_id
+    return move_session(target)
+  end
+  target.workspace_id = workspace_id
+  return add_session(target)
+end
+
 local subscribed = botster.events.on({ owner = "hub", name = "session_family" }, handle_session_family)
 if not subscribed.ok then
   error("session_family subscription refused: " .. subscribed.error.message, 0)
@@ -2641,6 +2774,7 @@ return botster.register({
         type = "object",
         properties = {
           workspace_id = { type = "string" },
+          hub_id = { type = "string", description = "Hub ID. Omit for the local hub; other hubs are not supported yet." },
           session_id = { type = "string" },
         },
         required = { "workspace_id", "session_id" },
@@ -2656,6 +2790,7 @@ return botster.register({
         type = "object",
         properties = {
           destination_workspace_id = { type = "string" },
+          hub_id = { type = "string", description = "Hub ID. Omit for the local hub; other hubs are not supported yet." },
           session_id = { type = "string" },
         },
         required = { "destination_workspace_id", "session_id" },
@@ -2671,6 +2806,7 @@ return botster.register({
         type = "object",
         properties = {
           workspace_id = { type = "string" },
+          hub_id = { type = "string", description = "Hub ID. Omit for the local hub; other hubs are not supported yet." },
           session_id = { type = "string" },
         },
         required = { "workspace_id", "session_id" },
@@ -2697,6 +2833,51 @@ return botster.register({
       },
       handler = "spawn_session",
       call = spawn_session,
+    },
+    {
+      name = "list_workspaces",
+      description = "List workspaces on the local hub with their session ids.",
+      input_schema = {
+        type = "object",
+        properties = {
+          hub_id = { type = "string", description = "Hub ID. Omit for the local hub; other hubs are not supported yet." },
+        },
+        additionalProperties = false,
+      },
+      handler = "agent_list_workspaces",
+      call = agent_list_workspaces,
+    },
+    {
+      name = "rename_workspace",
+      description = "Rename a workspace by ID on the local hub.",
+      input_schema = {
+        type = "object",
+        properties = {
+          workspace_id = { type = "string", description = "Workspace ID to rename." },
+          new_name = { type = "string", description = "New workspace display name." },
+          hub_id = { type = "string", description = "Hub ID. Omit for the local hub; other hubs are not supported yet." },
+        },
+        required = { "workspace_id", "new_name" },
+        additionalProperties = false,
+      },
+      handler = "agent_rename_workspace",
+      call = agent_rename_workspace,
+    },
+    {
+      name = "move_agent_workspace",
+      description = "Put a session into a workspace. A session in another workspace is moved; an ungrouped session is added.",
+      input_schema = {
+        type = "object",
+        properties = {
+          session_id = { type = "string", description = "Session ID to place." },
+          workspace_id = { type = "string", description = "Target workspace ID." },
+          hub_id = { type = "string", description = "Hub ID. Omit for the local hub; other hubs are not supported yet." },
+        },
+        required = { "session_id", "workspace_id" },
+        additionalProperties = false,
+      },
+      handler = "agent_move_session",
+      call = agent_move_session,
     },
     {
       name = "botster_workspaces.entity_snapshot",

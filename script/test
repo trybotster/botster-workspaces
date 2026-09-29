@@ -18,7 +18,6 @@ end
 
 manifest = JSON.parse(read("botster-package.json"))
 contract = JSON.parse(read("test/fixtures/workspaces/contract.json"))
-plugin = read("plugin.lua")
 readme = read("README.md")
 domain_doc = read("docs/workspace-domain.md")
 capabilities_doc = read("docs/capabilities.md")
@@ -121,52 +120,6 @@ assert(
   "real-Hub smoke must assert the superseded manifest key yields no spawnable session type"
 )
 
-required_plugin_tokens = %w[
-  botster_workspaces.create
-  botster_workspaces.list
-  botster_workspaces.show
-  botster_workspaces.rename
-  botster_workspaces.delete
-  botster_workspaces.add_session
-  botster_workspaces.move_session
-  botster_workspaces.remove_session
-  botster_workspaces.spawn
-  botster_workspaces.entity_snapshot
-  botster_workspaces.open
-  botster_workspaces.open_spawn
-  botster_workspaces.select_spawn_target
-  open_spawn_presentation_action
-  ensure_worktree_and_spawn
-  session_types
-  session_type_id
-  spawn_targets
-  plugin_db
-  surface_route
-  presentation_if
-  selected-workspace
-  workspace-dialog
-  botster-workspaces.workspace
-  bind_list
-  lifecycle_class
-  /session
-]
-required_plugin_tokens.each do |token|
-  assert(plugin.include?(token), "plugin entrypoint must wire #{token}")
-end
-
-forbidden_implementation_tokens = %w[
-  spawn_default_session
-  refresh_template_diagnostics
-  configured_archive_policy
-  normalize_template_refs
-  settings_surface
-  spawn_session_template
-  BOTSTER_CORE_PATH
-]
-forbidden_implementation_tokens.each do |token|
-  assert(!plugin.include?(token), "plugin entrypoint must remove obsolete implementation #{token}")
-end
-
 schema = contract.fetch("schema")
 workspace_fields = schema.fetch("workspace_fields").sort
 assert(workspace_fields == %w[created_at id name session_refs updated_at], "fixture must define exact five-field schema")
@@ -180,7 +133,10 @@ contract.fetch("workspaces").each do |workspace|
   assert(workspace["name"] == workspace["name"].strip && !workspace["name"].empty?, "fixture workspace name must be trimmed")
   assert(workspace["session_refs"].is_a?(Array), "session_refs must be an array")
   names << workspace["name"]
-  memberships.concat(workspace["session_refs"])
+  workspace["session_refs"].each do |ref|
+    assert(ref.keys.sort == %w[hub_id session_id], "session_refs entries must be { hub_id, session_id }")
+    memberships << "#{ref["hub_id"]}/#{ref["session_id"]}"
+  end
 end
 assert(names.uniq.length == names.length, "workspace names must be unique")
 assert(memberships.uniq.length == memberships.length, "session membership must have one owner")
@@ -294,14 +250,6 @@ production_files.each do |path|
   end
 end
 
-%w[fs. io.open os.execute File.read( File.write(].each do |token|
-  assert(!plugin.include?(token), "plugin must not use direct filesystem API #{token}")
-end
-
-%w[list_sessions polling].each do |token|
-  assert(!plugin.include?(token), "plugin must not synchronize lifecycle through #{token}")
-end
-
 %w[.env mise.local.toml *.log tmp/ data/ dist/ build/].each do |pattern|
   assert(gitignore.lines.map(&:strip).include?(pattern), ".gitignore must include #{pattern}")
 end
@@ -329,7 +277,12 @@ scanned_files = %w[
   test/fixtures/shared-stack-owner-session-type/plugin.lua
   test/fixtures/shared-stack-owner-session-type/bin/session.sh
   test/fixtures/workspaces/contract.json
-  test/plugin_runtime_test.lua
+  test/support.lua
+  test/workspace_spec.lua
+  test/membership_spec.lua
+  test/events_spec.lua
+  test/spawn_spec.lua
+  test/surface_spec.lua
 ]
 leak_patterns = {
   "absolute home path" => %r{/Users/[A-Za-z0-9._-]+},
@@ -375,9 +328,6 @@ cold_cut_files.each do |path|
   forbidden_contract_tokens.each do |token|
     assert(!auditable.include?(token), "#{path} retains superseded session-template vocabulary #{token}")
   end
-end
-frozen_obsolete_keys.each do |key|
-  assert(plugin.include?("#{key} = true"), "plugin entrypoint must keep rejecting frozen create argument #{key}")
 end
 
 Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
@@ -469,23 +419,12 @@ Dir.mktmpdir("botster-workspaces-shared-stack-inputs-") do |temporary_root|
   assert(!system(claim_validator, manifest_path, out: File::NULL, err: File::NULL), "claim-stack validator accepted a false binary digest")
 end
 
-lua = ENV.fetch("LUA", "lua")
-test_path = File.join(ROOT, "test/plugin_runtime_test.lua")
-assert(system(lua, test_path, chdir: ROOT), "Lua runtime test failed")
-assert(
-  !system({ "BOTSTER_WORKSPACES_INJECT_FAILURE" => "1" }, lua, test_path, chdir: ROOT, out: File::NULL, err: File::NULL),
-  "Lua shell gate did not observe the deliberate failing assertion"
-)
-{
-  "BOTSTER_WORKSPACES_TEST_REVERT_SPAWN_ACTION" => "reverted generic Spawn action",
-  "BOTSTER_WORKSPACES_TEST_HARDCODE_SPAWN_ACTION" => "hardcoded Spawn dispatch",
-  "BOTSTER_WORKSPACES_TEST_OMIT_SPAWN_HANDLER" => "missing Spawn handler",
-}.each do |environment, label|
-  assert(
-    !system({ environment => "1" }, lua, test_path, chdir: ROOT, out: File::NULL, err: File::NULL),
-    "Lua shell gate did not reject #{label}"
-  )
-end
+# Behaviour specs run in the Botster plugin test kit against the real Hub
+# runtime (see README, "Testing"). BOTSTER_PLUGIN_TEST names the runner binary.
+runner = ENV.fetch("BOTSTER_PLUGIN_TEST", "botster-plugin-test")
+specs = Dir.glob(File.join(ROOT, "test", "*_spec.lua")).sort
+assert(!specs.empty?, "kit specs are missing")
+assert(system(runner, "--plugin", ROOT, *specs, chdir: ROOT), "kit specs failed")
 
 
 # C2.5 TUI oracle negative controls (mirror parse_tui_claim_evidence! fail-closed rules).

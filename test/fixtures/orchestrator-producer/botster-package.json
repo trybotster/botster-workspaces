@@ -1,0 +1,56 @@
+{
+  "name": "botster-orchestrator",
+  "version": "0.0.0",
+  "kind": "plugin",
+  "botster": ">=0.1.0",
+  "description": "Test stand-in for the botster-orchestrator session_spawned producer.",
+  "source": {
+    "type": "path",
+    "path": "."
+  },
+  "capabilities": [
+    {
+      "surface": "mcp"
+    }
+  ],
+  "events": {
+    "emitted": [
+      {
+        "name": "session_spawned",
+        "audience": [
+          "plugins"
+        ],
+        "payload_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "hub_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "workspace_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "hub_id",
+            "session_id",
+            "workspace_id"
+          ]
+        }
+      }
+    ]
+  },
+  "entrypoints": [
+    {
+      "runtime": "lua",
+      "path": "plugin.lua",
+      "bootstrap": false
+    }
+  ]
+}

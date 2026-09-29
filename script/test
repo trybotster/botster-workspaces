@@ -217,6 +217,8 @@ scanned_files = %w[
   test/fixtures/session-type-package/plugin.lua
   test/fixtures/session-type-package/bin/session.sh
   test/fixtures/workspaces/contract.json
+  test/fixtures/orchestrator-producer/botster-package.json
+  test/fixtures/orchestrator-producer/plugin.lua
   test/support.lua
   test/workspace_spec.lua
   test/membership_spec.lua

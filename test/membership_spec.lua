@@ -88,12 +88,13 @@ kit.test("membership mutations publish upsert and remove frames keyed by hub and
   ws.call(t, p, "botster_workspaces.move_session", { destination_workspace_id = b, session_id = "session-a" })
   ws.call(t, p, "botster_workspaces.remove_session", { workspace_id = b, session_id = "session-a" })
   -- The kit subscribes as a client: a snapshot frame first, then live deltas.
+  -- p:entities returns each frame itself: { type, id, entity, ... }.
   t:match(p:entities(ws.MEMBERSHIP), {
-    { frame = "entity", entity = { type = "entity_snapshot", entity_type = ws.MEMBERSHIP } },
-    { frame = "entity", entity = { type = "entity_upsert", id = id,
-      entity = { id = id, hub_id = hub_id, session_id = "session-a", workspace_id = a } } },
-    { frame = "entity", entity = { type = "entity_upsert", id = id, entity = { workspace_id = b } } },
-    { frame = "entity", entity = { type = "entity_remove", id = id } },
+    { type = "entity_snapshot", entity_type = ws.MEMBERSHIP },
+    { type = "entity_upsert", id = id,
+      entity = { id = id, hub_id = hub_id, session_id = "session-a", workspace_id = a } },
+    { type = "entity_upsert", id = id, entity = { workspace_id = b } },
+    { type = "entity_remove", id = id },
   })
 end)
 

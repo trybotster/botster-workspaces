@@ -3,7 +3,25 @@
 local kit = require("botster.test")
 local ws = require("support")
 
-local PRODUCER = "test/fixtures/orchestrator-producer"
+-- The producer is the REAL botster-orchestrator manifest at the commit pinned
+-- in test/orchestrator.pin (script/test checks it out and passes its path in
+-- BOTSTER_ORCHESTRATOR_PACKAGE). Only the plugin code is a stand-in, because
+-- the in-process kit cannot spawn a session: the stand-in emits the event that
+-- the orchestrator emits after a spawn. The event name, audience, and payload
+-- schema come from the orchestrator's own manifest, so a contract change there
+-- breaks these specs instead of drifting unseen.
+local ORCHESTRATOR = os.getenv("BOTSTER_ORCHESTRATOR_PACKAGE")
+assert(ORCHESTRATOR and ORCHESTRATOR ~= "", "set BOTSTER_ORCHESTRATOR_PACKAGE (script/test does)")
+
+local function real_producer_package()
+  local directory = io.popen("mktemp -d"):read("*l")
+  assert(os.execute(string.format(
+    "cp '%s/botster-package.json' '%s/' && cp 'test/fixtures/orchestrator-producer/plugin.lua' '%s/'",
+    ORCHESTRATOR, directory, directory)))
+  return directory
+end
+
+local PRODUCER = real_producer_package()
 
 local function spawned(t, producer, payload)
   local emitted = producer:call_tool("producer.emit", payload)

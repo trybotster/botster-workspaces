@@ -189,6 +189,14 @@ BOTSTER_PLUGIN_TEST=botster-plugin-test script/test
 
 That Hub commit (`botster.hub.identity()` and the kit are on it) is the one these specs were last run against. Raise the pin when a newer Hub commit passes.
 
+The placement specs (`test/events_spec.lua`) use the REAL botster-orchestrator
+manifest as the producer's event contract, at the commit in
+`test/orchestrator.pin`: `script/test` clones and checks out that commit (or
+takes a local checkout in `BOTSTER_ORCHESTRATOR_PACKAGE` that is at it), so a
+contract change in the orchestrator breaks these specs instead of drifting.
+Only the producer's plugin code is a stand-in, because the in-process kit
+cannot spawn a session. Raise the pin when the orchestrator's contract changes.
+
 The in-process kit starts no session worker. `script/test-e2e` runs
 `test/e2e/*_spec.lua` against a real `botster-hub` process with a session
 worker (`botster-plugin-test --e2e`), which proves a completed spawn. It needs

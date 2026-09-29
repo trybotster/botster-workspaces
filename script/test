@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "tmpdir"
 
 ROOT = File.expand_path("..", __dir__)
 
@@ -217,7 +218,6 @@ scanned_files = %w[
   test/fixtures/session-type-package/plugin.lua
   test/fixtures/session-type-package/bin/session.sh
   test/fixtures/workspaces/contract.json
-  test/fixtures/orchestrator-producer/botster-package.json
   test/fixtures/orchestrator-producer/plugin.lua
   test/support.lua
   test/workspace_spec.lua
@@ -277,7 +277,24 @@ end
 runner = ENV.fetch("BOTSTER_PLUGIN_TEST", "botster-plugin-test")
 specs = Dir.glob(File.join(ROOT, "test", "*_spec.lua")).sort
 assert(!specs.empty?, "kit specs are missing")
-assert(system(runner, "--plugin", ROOT, *specs, chdir: ROOT), "kit specs failed")
+
+# The producer specs use the real botster-orchestrator manifest at a pinned
+# commit (test/orchestrator.pin). BOTSTER_ORCHESTRATOR_PACKAGE may name a local
+# checkout; it must be at that commit. Otherwise the pinned commit is cloned.
+orchestrator_pin = read("test/orchestrator.pin").strip
+orchestrator = ENV["BOTSTER_ORCHESTRATOR_PACKAGE"]
+if orchestrator.nil? || orchestrator.empty?
+  orchestrator = Dir.mktmpdir("botster-orchestrator-")
+  repository = ENV.fetch("BOTSTER_ORCHESTRATOR_REPO", "https://github.com/trybotster/botster-orchestrator.git")
+  assert(system("git", "clone", "--quiet", repository, orchestrator), "cannot clone #{repository}")
+  assert(system("git", "-C", orchestrator, "checkout", "--quiet", orchestrator_pin), "cannot check out #{orchestrator_pin}")
+end
+orchestrator_head = IO.popen(["git", "-C", orchestrator, "rev-parse", "HEAD"], &:read).strip
+assert(orchestrator_head == orchestrator_pin, "the orchestrator checkout must be at #{orchestrator_pin}, not #{orchestrator_head}")
+assert(
+  system({ "BOTSTER_ORCHESTRATOR_PACKAGE" => orchestrator }, runner, "--plugin", ROOT, *specs, chdir: ROOT),
+  "kit specs failed"
+)
 
 
 puts "script/test: ok"

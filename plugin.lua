@@ -2620,7 +2620,7 @@ end
 -- ungrouped and is logged, never raised.
 local function handle_session_spawned(payload)
   local session_id = type(payload) == "table" and trim(payload.session_id) or nil
-  local hub_id = type(payload) == "table" and trim(payload.hub_id) or nil
+  local hub_id = type(payload) == "table" and payload.hub_id or nil
   local workspace_id = type(payload) == "table" and trim(payload.workspace_id) or nil
   local result = add_session({ workspace_id = workspace_id, session_id = session_id, hub_id = hub_id })
   if not result.ok then
